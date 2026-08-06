@@ -108,6 +108,51 @@ func TestConstRoundTripsEveryField(t *testing.T) {
 	require.Equal(t, c, back.Funcs[0].Consts[0])
 }
 
+// TestAggTypeRoundTripsEveryField covers an aggregate type and its fields.
+//
+// AggType.Packed was the drop this found. AggType.walk reads it (ir/type.go:282,
+// :291) to place members with no padding, so a packed struct that lost the flag
+// answers Layout() with a different size and alignment than it had -- and the
+// stack slot, the by-value ABI classification and every field offset move with it.
+func TestAggTypeRoundTripsEveryField(t *testing.T) {
+	inner := &AggType{Name: "inner", Fields: []Field{{Sub: SubW, Count: 2, Pointer: true}}}
+	agg := &AggType{
+		Name:   "packed",
+		Align:  1,
+		Size:   9,
+		Opaque: true,
+		Packed: true,
+		Fields: []Field{{Sub: SubB, Type: inner, Count: 3, Pointer: true}},
+		Union:  true,
+		Cases:  [][]Field{{{Sub: SubL, Type: inner, Count: 2, Pointer: true}}},
+	}
+	allFieldsSet(t, *agg, "Fields") // Field.Sub's zero value is SubB, so Fields is checked below
+	allFieldsSet(t, agg.Fields[0], "Sub")
+	allFieldsSet(t, agg.Cases[0][0])
+
+	m := NewModule()
+	m.AddType(agg)
+	data, err := m.MarshalBinary()
+	require.NoError(t, err)
+	back, err := DecodeModule(data)
+	require.NoError(t, err)
+
+	got := back.Types[0]
+	// Field.Type resolves through the module's type table, so it is a different
+	// pointer to the same type; compare it by name and then by value.
+	require.Equal(t, inner.Name, got.Fields[0].Type.Name)
+	require.Equal(t, inner.Name, got.Cases[0][0].Type.Name)
+	got.Fields[0].Type, got.Cases[0][0].Type = inner, inner
+	require.Equal(t, agg, got)
+
+	// The layout rule is what the flag is for, so check the consequence too: a
+	// packed aggregate that came back unpacked would pad its members.
+	wantSize, wantAlign := agg.Layout()
+	gotSize, gotAlign := got.Layout()
+	require.Equal(t, wantSize, gotSize)
+	require.Equal(t, wantAlign, gotAlign)
+}
+
 func TestInstrRoundTripsEveryField(t *testing.T) {
 	agg := &AggType{Name: "pair", Fields: []Field{{Sub: SubW}, {Sub: SubW}}}
 	in := Instr{

@@ -311,6 +311,10 @@ func (e *enc) encType(t *AggType) {
 	e.iv(int64(t.Align))
 	e.iv(int64(t.Size))
 	e.boolean(t.Opaque)
+	// Packed is read by AggType.walk, so it is part of the type's layout and not
+	// a note about where the type came from: a packed struct that lost it comes
+	// back a different size, with every member at a different offset.
+	e.boolean(t.Packed)
 	e.boolean(t.Union)
 	e.uv(uint64(len(t.Fields)))
 	for _, f := range t.Fields {
@@ -750,6 +754,7 @@ func (d *dec) decType(t *AggType) {
 	t.Align = int(d.iv())
 	t.Size = int(d.iv())
 	t.Opaque = d.boolean()
+	t.Packed = d.boolean()
 	t.Union = d.boolean()
 	t.Fields = make([]Field, int(d.uv()))
 	for i := range t.Fields {

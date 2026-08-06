@@ -5431,3 +5431,25 @@ Produced by `cc/expr.go` and `cc/compile.go` (`__thread`); goc emits none.
 byte-identical to their post-fix-1 objects (`fc378a0a…`). The census says why:
 goc produces zero thread-local constants. That is evidence the field is genuinely
 unreachable from goc today, not evidence the fix is inert.
+
+## Drop 3 — `AggType.Packed`. Safe by luck in goc; a different struct layout in cc.
+
+`encType` wrote `Name`, `Align`, `Size`, `Opaque`, `Union`, fields and cases, and
+not `Packed` (`ir/binary.go`). `AggType.walk` reads it (`ir/type.go:282`, `:291`)
+to place members with no inter-member padding and to stop a member raising the
+aggregate's alignment. So this is not a note about where the type came from; it is
+part of the layout. A packed struct that lost it answers `Layout()` with a
+different size and a different alignment, and every member offset moves with them
+-- which moves the stack slot, the by-value ABI classification and every field
+access.
+
+Set only by `cc/agg.go:61` from `__attribute__((packed))`; goc emits none.
+
+**Test that fails without it:** `TestAggTypeRoundTripsEveryField`, which reports
+`Packed: (bool) true` expected, `false` actual, and then checks the consequence
+directly -- that `Layout()` returns the same size and alignment on both sides of
+the round trip, which is the thing the flag is for.
+
+**Emitted-code movement: none, on either path.** Both objects byte-identical to
+their post-fix-2 state. Census: zero packed aggregates among the 63 aggregate
+types goc's `hello.go` module reaches.
