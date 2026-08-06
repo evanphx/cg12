@@ -360,8 +360,12 @@ func TestCryptoSigningBench(t *testing.T) {
 	// word, since it sees the run that was actually measured.
 	pin, pinNote := cryptoBenchPin()
 	requireQuietBoxBefore(t, benchPreflightSuite{
-		target:  "make bench-crypto",
-		cost:    "about eight minutes",
+		target: "make bench-crypto",
+		// Measured, not taken from this file's header: a green `make bench-crypto`
+		// on this box is 1m43s wall, where the baseline header still says eight
+		// minutes. The header's figure is the one that has gone stale; a refusal
+		// message that overstates what it saved would be the wrong kind of wrong.
+		cost:    "a couple of minutes",
 		pin:     pin,
 		pinNote: pinNote,
 		coreVar: "GOC_BENCH_CORE",

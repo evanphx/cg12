@@ -205,8 +205,8 @@ func benchPreflightRefusal(suite benchPreflightSuite, reading benchPreflightRead
 			"this directory has been consulted yet.\n\n"+
 			"What the pre-flight measured, in %.1f seconds on %s, %s:\n"+
 			"  %s\n"+
-			"  (box-wide in the same window, %s were busy -- context and not gated on: this run is pinned,\n"+
-			"  so a busy core it is not on costs it far less than the one it is)\n\n"+
+			"  (box-wide in the same window, %s busy -- not gated on, because this run is pinned and a\n"+
+			"  busy core it is not on costs it far less than the one it is)\n\n"+
 			"Both timing baselines were cut on an idle box and every tolerance in them is that box's\n"+
 			"noise. A run on this one would either fail for a reason no diff explains or pass a tolerance\n"+
 			"it did not earn, and both cost more than the wait does.\n\n"+

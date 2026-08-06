@@ -2241,3 +2241,100 @@ on. Gating on those needs a throughput number against a per-machine reference,
 which is a second baseline with all of the first one's problems. The end-of-run
 ceilings are unchanged and remain the backstop, both for that and for a box that
 goes busy at minute two.
+
+## Verified by making it fire
+
+The tree's standing rule for a new check. Every figure below is from this box
+(aarch64, 64 cores, Neoverse-N1, go1.26.1), with the load applied deliberately.
+
+**It refuses on a loaded box.** One `bash` spinner pinned to core 62, which is
+the core `make bench-perf` picks:
+
+    $ taskset -c 62 bash -c 'while :; do :; done' &
+    $ make bench-perf
+      the calibration burst got 50.1% of core 62 (floor 90%) -- it is sharing that core with something
+      core 62 spent 49.9% of the window on work that was not this run's (ceiling 10%), per /proc/stat
+    --- FAIL: TestPerformanceSuite (1.38s)
+    real  0m2.621s
+
+and the same with a spinner on core 63, which is the core `make bench-crypto`
+picks: refused in 2.5 s, `the calibration burst got 49.9% of core 63`. Two point
+five seconds against eleven minutes and against a couple of minutes.
+
+**The third reading fires on its own.** A 5%-duty-cycle competitor (a 40 ms spin
+every 640 ms) on core 40 leaves both mean readings inside their bounds, and the
+spread catches it alone:
+
+      the burst's wall time spread 27.2% across 6 repetitions (ceiling 12%) --
+      the speed of this core is changing underneath it
+
+**It is about the core and not the box.** With both spinners still running,
+`GOC_PERF_CORE=40 make bench-perf` passes the pre-flight (`core 40 is quiet
+enough to measure on ... 99.5% ... 0.0% ... 0.4%`, box-wide 3 of 64 cores busy)
+and measures normally.
+
+**The override does what it says, and shows what it costs.** On the same loaded
+box, `GOC_BENCH_PREFLIGHT=off` proceeds, and one program at four repetitions
+takes 60 s to arrive at the noise-growth ceiling -- `one-repetition spread 0.11%
+in the baseline, 2.44% in this run`. At the full eleven programs and nine
+repetitions that is the eleven minutes this check exists to save.
+
+**It passes on a quiet box and the suites run to completion.** Against the
+committed baselines, unchanged, neither re-cut:
+
+    make bench-crypto   PASS  102.45s   pre-flight: core 63, 99.5% / 0.0% / 0.3%, 1.3 s
+    make bench-perf     PASS  558.69s   pre-flight: core 62, 99.5% / 0.0% / 0.4%, 1.3 s
+
+Three full `make bench-perf` runs were made on the final tree and two were
+green. The red one failed at the noise-growth ceiling on `text/format-append`,
+the loudest row in the suite: one-repetition spread 4.27% in the baseline and
+15.00% in that run, with the row's *null* arm going 3.40% -> 14.43% beside it.
+The null is the same goc binary divided by itself, so a 14% null is the machine
+and not the compiler, and that row sits closest to the ceiling on a good day
+(5.55% in the green run before it, 8.70% in the green run after). It is the case
+this pre-flight explicitly cannot see -- box-wide activity that arrives after
+the first two seconds -- and it is the case the end-of-run ceiling is for. It
+did its job.
+
+## Guards
+
+    TestAllocationCensus                            PASS  183.07s, baseline reproduced (no diff)
+    TestCompilingTheSameSourceTwiceGivesTheSameModule PASS   4.33s
+    TestParallelBackendIsByteIdenticalToSerial      PASS    0.21s
+    gofmt -l goc/ && go vet ./goc/                  clean
+
+The change is test-harness only: a new `_test.go` file, the two suites' call
+into it, prose in the Makefile and in both baseline headers. No compiler code
+was touched and no baseline number was rewritten. `goc/testdata/alloc_census_baseline.txt`,
+`perf_suite_baseline.txt` and `crypto_signing_bench_baseline.txt` have no
+changed rows -- the only diff in the last two is the paragraph documenting the
+pre-flight and the override.
+
+One incidental cleanup: `highestAllowedCPU` and `allowedCPUs` each carried their
+own copy of the Cpus_allowed_list parser and the pre-flight needed a third, for
+`taskset`'s argument. All three now go through one `parseCPUList`, exercised by
+both suites in every run above.
+
+## Where the same reasoning applies, and where it stops
+
+Not widened; recorded so the next person does not have to rediscover it.
+
+  - `scripts/cruby-diff.sh` step 5 -- "run the benchmark set on both builds and
+    compare against a recorded baseline" -- is a timing gate on a much longer
+    run. It is a stub today. When it is filled in it should call this
+    pre-flight, and it is the one place where the argument transfers whole.
+  - `scripts/matrix-timing.sh` times the capability matrix, up to an hour, and a
+    busy box moves its numbers. The reasoning transfers but the instrument does
+    not: that measurement is whole-box and many-core with no committed baseline,
+    so what it would want is a box-wide idleness check rather than a reading of
+    one pinned core.
+  - `TestEscapeSummaryCost` prints compile timings that are equally
+    box-dependent, but it only reports them; there is no gate to protect.
+  - `make test-goc-status`, `test-goc-status-opt` and `test-goc-coverage` are
+    long, and they count things rather than timing them. A busy box costs them
+    wall clock and not correctness. Not candidates.
+
+One thing noticed and not changed: `crypto_signing_bench_baseline.txt` says the
+run takes "about eight minutes". Measured twice today on an idle box it is
+1m43s. The pre-flight's own message quotes the measured figure rather than the
+committed one.
