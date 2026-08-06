@@ -3468,6 +3468,21 @@ paid for: **store the `recursive` bit of every function in the memo's set and
 validate it against the rebuilt SCC.** The graph rebuild costs 0.050 s / 0.209 s
 and the residue passes need it anyway.
 
+**`ir.Module.SymAttrs` is a fourth module-wide input, and it is free.** The
+inliner reads it through `isFrameScopedRuntimeCall`, and `LoadElim` and
+`DeadAlloc` read it through `isAtomicPointerStore` — `opt/pass.go` already names
+it as the one piece of module state the per-function passes touch. The front end
+writes it once and no pass ever changes it, so one digest of the table in the key
+covers it.
+
+**The largest sets are not what one would guess.** The maximum on both programs
+is `.goc.global.initfunc.*.unicode.Scripts` (182 on small, 181 on http) — a
+package-level initializer that builds a large table and therefore names a great
+many helpers. The largest *ordinary* functions are `runtime.findRunnable` (82),
+`runtime.gcMarkTermination` (67) and `runtime.sweepLocked.sweep` (66): the
+scheduler and collector, which is where one would expect a deep inline reach.
+Nothing in either module comes within an order of magnitude of "half the module".
+
 ## The same measurement on http: the blast radius is absolute, not proportional
 
 | edit | program | input moved | output genuinely changed | **invalidated** | ratio | hit rate |
@@ -3504,38 +3519,61 @@ end 2.05):
 | | s |
 |---|---:|
 | Option B underneath (`funcDecl`+`globalDecl` 1.64 + prefix 1.44) | 3.08 |
-| whole-module remainder, less the 0.467 s residue, at the leaf edit's 99.25% | 8.05 |
+| whole-module remainder, less the 0.467 s residue, at the leaf edit's 96.2% work-hit rate | 7.80 |
 | back end, less the ~230 nosplit callers excluded from the memo, at 99.25% | 1.92 |
-| **saved** | **13.05 of 16.16 = 81%** |
-| less decoding the post-opt unit (§2.5: 0.36 s) | **12.69 = 79%** |
+| **saved** | **12.80 of 16.16 = 79%** |
+| less decoding the post-opt unit (§2.5: 0.36 s) | **12.44 = 77%** |
 
 http (74.4 s: front end 18.98, prefix 8.34, remainder 36.08, back end 11.49):
 
 | | s |
 |---|---:|
 | Option B underneath (8.19 + 8.34) | 16.53 |
-| remainder, less the 1.164 s residue, at 99.76% | 34.8 |
-| back end, less the excluded nosplit callers, at 99.76% | 11.25 |
-| **saved** | **62.6 of 74.4 = 84%** |
-| less decoding the post-opt unit (§2.5: 1.60 s) | **61.0 = 82%** |
+| remainder, less the 1.164 s residue, at the leaf edit's 98.8% work-hit rate | 34.5 |
+| back end, less the excluded nosplit callers, at 99.76% | 11.26 |
+| **saved** | **62.3 of 74.4 = 84%** |
+| less decoding the post-opt unit (§2.5: 1.60 s) | **60.7 = 82%** |
 
-**79–82% against a stated ceiling of 85–86%**, and against Option B's 18–21%.
-The gap to the ceiling is not the miss rate — it is the residue, the decode, and
-the ~230 nosplit callers, in that order.
+**77–82% against a stated ceiling of 85–86%**, and against Option B's 18–21%.
+The gap to the ceiling is not the miss rate — it is the residue, the decode, the
+~230 nosplit callers and the recompute closure below, in that order.
 
-Two things this arithmetic is optimistic about, stated so nobody has to
-rediscover them:
+### The one architectural constraint the measurement uncovered
+
+**A memo hit cannot be served by storing only the final body.** Read from
+`opt/inline.go`, not measured: `inlineModule` walks `scc.order` bottom-up and
+`inlineInto` splices the callee's body *as it stands at that moment* — after that
+round's inlining, before the `clean` that follows the inline pass. So the body a
+caller receives is an intermediate state, not the finished one. A function whose
+memo missed therefore needs the intermediate states of everything it spliced, not
+their final bodies.
+
+That is bounded, and the bound is measured. Taking the invalidated set and adding
+the functions whose bodies were spliced into it:
+
+| edit | invalidated | plus intermediates a miss needs | **total to recompute** | work-hit rate |
+|---|---:|---:|---:|---:|
+| small, leaf | 31 | 125 | **156** of 4131 | 96.2% |
+| http, leaf | 31 | 126 | **157** of 12796 | 98.8% |
+| small, root | 2 | 13 | **15** of 4131 | 99.6% |
+| http, root | 3 | 5 | **8** of 12796 | 99.9% |
+
+Only 1142 of 5083 functions on small (2181 of 14901 on http) are ever spliced
+into a survivor at all, so the population that would need intermediate states
+stored is a fifth of the module rather than all of it. Either answer works —
+store the intermediates for that fifth, or recompute the ~125 the misses drag in
+— and the arithmetic above uses the recompute reading, which is the cheaper one
+to build and the more expensive one to run.
+
+Two things the arithmetic is still optimistic about:
 
 - **A miss is not priced per function.** The whole-module remainder is a
-  fixpoint, not a sum of per-function costs. Re-running it for 31 missed
-  functions still pays for the pipeline scaffolding around them, so the real
-  cost of a miss is above its 0.75% share. With 31 of 4131 missing, the error is
-  small; with a `goc_memcpy` edit invalidating 1395, it is not.
+  fixpoint, not a sum of per-function costs. Re-running it for 156 functions
+  still pays for the pipeline scaffolding around them. With 156 of 4131 the error
+  is small; with a `goc_memcpy` edit invalidating 1395, it is not.
 - **Validation is not priced at all.** Every build must hash each function's
-  post-prefix IR to compare against the recorded input digests. That is a walk
-  over the whole module. It is bounded by the cost of the digest the measurement
-  already computes, and it is the first thing stage 2 must measure rather than
-  assume.
+  post-prefix IR to compare against the recorded input digests — a walk over the
+  whole module. It is the first thing stage 2 must measure rather than assume.
 
 ## Verdict: stage 2 is worth doing
 
@@ -3569,8 +3607,10 @@ What stage 2 has to build, in the order the measurement suggests:
    itself moves output.
 3. **The key**: per function, the recorded consulted set, each member's
    post-prefix input digest, each member's `recursive` bit (to close the SCC
-   hole), plus `opt.PipelineIdentity()`, the target, `-O` and the goc binary
-   hash, exactly as §3.2 has them.
+   hole), a digest of `ir.Module.SymAttrs`, plus `opt.PipelineIdentity()`, the
+   target, `-O` and the goc binary hash, exactly as §3.2 has them.
+   A memo entry must hold the function's *intermediate* spliced body as well as
+   its final one, or a miss has to recompute the ~125 functions it drags in.
 4. **Exclude the ~230 nosplit callers `InlineIntoNoSplitCallers` measures.** They
    are 5.5% of small and 1.8% of http, they do not grow with the program, and
    they are the only population whose result depends on an ordering rather than
@@ -3596,3 +3636,34 @@ Packs were not touched, as instructed. `cmd/depsets` and `opt.Record` are
 measurement scaffolding: the recorder is nil unless `opt.Record` installs it, and
 the controls above show a recorded compile produces byte-identical output to an
 unrecorded one on all 4131 functions.
+
+### Guards run
+
+Scaled to the change, which is measurement scaffolding plus five hook lines in
+the inliner:
+
+- `go build ./...`, `go vet ./opt ./cmd/depsets`, `gofmt` — clean.
+- `go test ./opt` — the whole package, **ok in 0.94 s**. It covers the six new
+  tests in `opt/depset_test.go`: that the spliced set closes transitively through
+  a callee's own inlines, that a callee the inliner read and declined stays in the
+  consulted set (and that consulted is a superset of spliced), that **recording
+  produces byte-identical output to not recording**, that `Record` restores the
+  recorder and refuses to nest, and that the call-site census cannot change an
+  inline decision while `inlineOnceBudget == inlineSmallBudget`.
+- `make verify-fast` — **PASS in 4m44s**, every item green (build, vet, gofmt,
+  unit, three corpus shards, corpus-parallel, matrix-default, matrix-opt,
+  reducers).
+- The recorder's output-neutrality was also checked end to end on whole programs,
+  which is the check that matters more than the unit test: a recorded compile and
+  an unrecorded one agree on **4131 of 4131** post-optimisation function digests,
+  and two recorded http compiles agree on **12796 of 12796**.
+
+Not run, per the brief: the corpus suite on its own, the capability matrix on its
+own, `make test-unit`, the four audits, the census, determinism sweeps, the crash
+loops. `TestIRVerifyAudit` and the memoised-vs-unmemoised byte-identity check are
+stage 2's guards and are not needed here, because nothing this branch commits
+changes what the compiler emits.
+
+The `stdlib/src/runtime/stubs.go` edits for the leaf experiment were made in a
+throwaway `git worktree` and restored with `git checkout --` after each run; both
+that worktree and this one are clean.
