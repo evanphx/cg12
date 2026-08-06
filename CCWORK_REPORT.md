@@ -5280,3 +5280,166 @@ gate stands between this merge and `main`:
 `TestCheckedRuntimeCoverageBaselineDenominator` fails identically on `main` and
 is not this merge's to answer for.
 
+
+---
+
+# Confirmation job: `integration/optionc-fix` @ 3f4a6b8 (branch `ccwork/optionc-confirm`)
+
+Scope: confirm the two-line `t.Parallel()` repair to `goc/irverifyaudit_test.go`.
+
+## Change under test
+`3f4a6b8` adds `t.Parallel()` to `TestIRVerifyAudit` and
+`TestModuleRoundTripsThroughTheBinaryFormat` (both in `goc/irverifyaudit_test.go`,
+2 insertions, 1 file). No other files touched.
+
+Status: starting.
+
+## Structural finding that shapes the experiment (read before the results)
+
+`auditCorpus` (goc/corpusaudit_test.go:78) memoises the whole-corpus compile behind
+a `sync.Once`. Its four other consumers -- TestAllocationCensus, TestFrameEscapeAudit,
+TestLoopAliasAudit, TestEscapeShadowPlacement -- are all in `sequential_tests.txt`.
+
+That means the two configurations answer *different* questions:
+
+* `go test ./goc/...` (one process, whole suite): Go runs every sequential test to
+  completion before resuming any parallel one, so a sequential audit wins the
+  `sync.Once` race and the corpus pass happens in a QUIET process.
+  TestIRVerifyAudit then reads a cached result. A pass here is nearly vacuous
+  w.r.t. the concurrency claim.
+* `scripts/verify.sh`'s `corpus_parallel_half` (verify.sh:327) runs
+  `go test ./goc/ -parallel 32 -skip "^(<every sequential name>)$"`. No sequential
+  test is in that process, so TestIRVerifyAudit -- now parallel, hence no longer
+  skipped -- drives the corpus pass ITSELF, concurrently with 31 other tests.
+  THIS is the configuration the claim has to survive, and it is the one
+  verify-full actually executes.
+
+So the load-bearing run is the parallel half, not the whole-suite run. Both were run.
+
+## RESULT 1 -- the audit under concurrency: CLEAN, and identically so
+
+| run | config | result |
+|---|---|---|
+| control (quiet) | `go test ./goc/ -parallel 1 -run '^TestIRVerifyAudit$'` | `1559314 function verifications across 406 programs, all clean` -- PASS, 81.61s |
+| **concurrent** | `go test ./goc/ -parallel 32 -skip '^(<83 sequential names>)$'` (the exact `corpus_parallel_half` command) | `1559314 function verifications across 406 programs, all clean` -- PASS, 129.47s |
+
+The two counts are IDENTICAL: same denominator (1,559,314 verifications over 406
+programs), same zero numerator. Not merely "passed both times" -- the audit swept
+exactly the same amount of IR and rejected none of it in either process.
+
+The concurrency was real, not nominal. In the window between the audit's
+`=== CONT` and its `--- PASS`, 218 other top-level tests were resumed and 244
+completed in the same process, and the audit itself drove the `sync.Once` corpus
+compile there (no sequential test exists in that process to have won the race).
+Wall clock went 81.6s -> 129.5s, which is the contention showing up in time and
+not in findings.
+
+`TestModuleRoundTripsThroughTheBinaryFormat` also PASSed in that process (30.81s),
+both stages, including the byte-identity re-encode assertion.
+
+The whole parallel half: 0 failures, `ok ... 199.338s`.
+`TestEveryTestIsParallelOrListedAsSequential` PASS (the blocker is gone), and
+`TestOnlyKnownTestsWriteProcessGlobalCompilerState` PASS (neither new parallel test
+writes process-global `opt` state -- checked by the tree's own AST scan, not by
+assertion).
+
+**VERDICT ON THE REASONING: it holds. `t.Parallel()` is the correct side; the two
+names do NOT belong in sequential_tests.txt.** An IR-validity audit is immune to
+the escape-placement drift because both placements produce valid IR, exactly as
+claimed -- and the identical verification counts show the drift did not even change
+what got swept.
+
+## RESULT 2 -- the coverage-denominator failure: reproduces on `main`, verified independently
+
+Not inherited from the prior gate's claim. I made my own control: `git worktree add`
+of `main` at `21ca7b3`, ran the test there myself.
+
+```
+main (21ca7b3):   --- FAIL: TestCheckedRuntimeCoverageBaselineDenominator (0.03s)
+branch (3f4a6b8): --- FAIL: TestCheckedRuntimeCoverageBaselineDenominator (0.03s)
+```
+
+Identical failure, same assertion (runtime_coverage_denominator_test.go:100), same
+message:
+
+> capability "gc-invariants/promoted-local-root" is in neither the accepted baseline
+> nor testdata/runtime_coverage_baseline_pending.json; record why the baseline does
+> not cover it, or rerun and accept a new baseline
+
+Pre-existing on `main`, not introduced or worsened by this branch. Not fixed here --
+out of scope for a two-line test-file change, and fixing it means touching a
+baseline, which this job was told not to do.
+
+## RESULT 3 -- `go test ./goc/...` (single process, whole suite, the literal ask)
+
+`ok github.com/evanphx/cg12/goc 503.695s` -- zero failures.
+
+As noted above this configuration lets a sequential test win the `sync.Once`, so it
+is the weaker of the two concurrency checks; it is reported for completeness. The
+strong one is RESULT 1.
+
+## RESULT 4 -- `make verify-full`: 23 of 24 items green, the 1 failure is the known one
+
+`verify-full FAIL in 2001s -- 1 item(s) failed`
+
+```
+build 0 | vet 0 | gofmt 0 | unit 0 | ruby 0 | reducers 0
+corpus-parallel 252s 0 | corpus-sequential-0 241s 0 | -1 104s 0 | -2 110s 0
+matrix-default-0..3 all 0 | matrix-opt-0..3 all 0
+determinism 412s 0 | determinism-opt 902s 0
+control-corpus REUSE 0 | control-matrix-default REUSE 0 | control-matrix-opt REUSE 0
+goc-cmd 367s  <-- 1   THE ONLY FAILURE
+```
+
+`goc-cmd.log` contains exactly one failing test and nothing else:
+
+```
+--- FAIL: TestCheckedRuntimeCoverageBaselineDenominator (0.03s)
+FAIL	github.com/evanphx/cg12/cmd/goc	366.589s
+```
+
+That is the pre-existing `main` failure from RESULT 2. Nothing else in the tier
+failed. The three `main` controls were REUSEd (key `20841ce7d3a4`), so `main` and
+the machine are unchanged since they were recorded.
+
+Notably `corpus-parallel` -- the job that now carries the two newly-parallel tests
+-- is green at 252s, and both determinism sweeps (the ones that would catch a
+compiler-output change) are green.
+
+## NO BASELINE MOVED
+
+`git status --porcelain` after the whole tier: only `CCWORK_REPORT.md` (this file).
+Zero baseline files touched, none regenerated, nothing to stop for.
+
+## Two observations, no action taken (nothing failed, so nothing was changed)
+
+1. **A comment is now stale.** `goc/corpusaudit_test.go:113-115` says "The tests
+   that read this audit are all listed in sequential_tests.txt, so this pool has
+   the process to itself; it does not have to leave room for the parallel half of
+   the suite." That is no longer true -- TestIRVerifyAudit reads the audit and is
+   now parallel, so `auditCompileWorkers()` sizes a pool at
+   `min(GOMAXPROCS, MemAvailable/4.23GiB)` inside a process already running 31
+   other compiling tests. It held fine here (64 cores, 250 GiB, and the
+   MemAvailable bound is what keeps it honest on a smaller box), but the comment
+   now describes a world that ended with this commit. Worth a one-line fix by
+   whoever touches that file next; not a blocker and not this job's scope.
+
+2. **verify-full now pays a second corpus compile.** The corpus pass used to happen
+   only in `corpus-sequential-0`; it now also happens in `corpus-parallel`, because
+   that process no longer has a sequential audit to win the `sync.Once`. The
+   wall-clock cost is ~11s, not ~240s, because the two jobs run concurrently
+   (corpus-sequential-0 241s vs corpus-parallel 252s). Immaterial.
+
+## VERDICT
+
+* The IR-verify audit stays clean under concurrency -- **1,559,314 verifications
+  across 406 programs, all clean, identical to the quiet-process control**, with 218
+  other tests resumed and 244 completed in the same process during its run. The
+  `t.Parallel()` reasoning is confirmed by measurement, not accepted on argument.
+  The alternative fix (listing both names in `sequential_tests.txt`) is NOT needed
+  and would be the wrong call.
+* The coverage-denominator failure reproduces identically on my own `main` control
+  at `21ca7b3`, and `cmd/goc/` is byte-identical between `main` and this branch.
+  Pre-existing, not this branch's.
+
+# SAFE TO MERGE TO MAIN
