@@ -6191,3 +6191,64 @@ run's noise guard refused `text text/format-append` (one-repetition spread
 against the control), and the control run's null guard refused
 `sortmap map/build-probe` as above. Both are statements about the machine
 during those rows.
+
+## Guards
+
+Run on this branch's HEAD. Everything the brief asked for, and nothing it
+reserved for a gate except the four audits' baselines, which this change
+invalidated and which are therefore regenerated and adjudicated above.
+
+| guard | result |
+|---|---|
+| `go build ./...` | pass |
+| `go vet ./...` | pass |
+| `gofmt` | clean |
+| `make verify-fast` | **PASS in 296 s** (build, vet, gofmt, unit, the whole goc corpus, one capability shard each arm, the reducers) |
+| `TestIRVerifyAudit` | **1 564 724 function verifications across 406 programs, all clean** |
+| `TestCompilingTheSameSourceTwiceGivesTheSameModule` | pass |
+| `TestParallelBackendIsByteIdenticalToSerial` | pass (workers 1, 2, 3, 8, 64, 256) |
+| `make bench-perf` | measured, not gated — see above |
+
+The first `verify-fast` on this branch failed, and what it caught is worth
+recording because none of it was visible from the harness that is this stage's
+deliverable:
+
+1. `TestRuntimeReflectiveInterfaceAssertionKeepsMethodReachable` — the
+   type-descriptor side effect of the assertion chain, above. A **wrong-program
+   bug**, and the only one this stage introduced.
+2. `TestAllocationCounts` — `interface_local_method_call` 0 → 100 allocations,
+   the accepted cost of item 1, now in the table with its reasoning.
+3. `TestCompileExecutableUsesAggregateABIForInterfaceResults` — a substring test
+   that matched a method-value wrapper once the wrapper was named after the
+   function it is written in, and then asked a void wrapper for an aggregate
+   result.
+4. `TestCompileExecutableDynamicallyInitializesNestedByteSlice` — looked for an
+   initializer symbol ending in `.main.tests`.
+5. `TestDeriveClassifiesEveryGenField` — the new `gen` field had to be
+   classified as whole-compilation state, which is the check that exists
+   precisely so a new field cannot be silently reset by `derive`.
+
+`bench-crypto` was not run: it measures time, pins a core, and was not part of
+the brief.
+
+## What Stage 2 inherits
+
+- **Lowering is a pure function of the package**, demonstrated by
+  `goc/packagelowering_test.go`: 2496 of 2496 functions shared by two different
+  programs across 51 packages lower to byte-identical encoded IR, and the 34
+  initializer symbols the smaller program emits are named identically in both.
+- **Two families are program-level by construction and are excluded**: 297
+  interface-call wrappers, whose body `redirectUnavailableInterfaceCallWrappers`
+  chooses from the assembled module, and 5 interface-method dispatchers. A
+  per-package cache must regenerate both per program; it cannot hold them.
+- **The dispatcher set is derived before lowering**, so skipping a package's
+  lowering cannot silently drop a dispatcher, and a call site that dispatches
+  through an uncollected method is now a compile error.
+- **The module data is still assembled per program.** Type descriptors, itabs
+  and itab links are emitted as a side effect of lowering conversions
+  (`materialiseInterfaceImplementations` above), and that side effect is
+  whole-program. It does not put a whole-program fact in a lowered *function*,
+  which is what Stage 1 was for, but a Stage 2 unit format has to answer what a
+  cached package contributes to `Module.Data` — this stage does not.
+- **Generics are the larger half of the remaining problem**, not a detail:
+  22–32% of packages, but 54–89% of lowered functions.
