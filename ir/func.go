@@ -39,6 +39,13 @@ type Temp struct {
 	// must find it — the backend stabilizing it out of the volatile register, the
 	// inliner substituting the caller's closure — test this flag rather than
 	// matching a magic temporary name.
+	//
+	// Such a temporary is DEFINED ON ENTRY, exactly as a parameter is, and no
+	// instruction assigns it: it is the function's second kind of entry input
+	// and it is not in Func.Params, because it is not an argument. It must be
+	// paired with Func.HasClosureContext on the enclosing function, and a
+	// function has at most one. See ir.defineClosureContext, which is where the
+	// verifier learned all of this after rejecting 4% of what goc emits.
 	ClosureContext bool
 }
 
@@ -222,6 +229,8 @@ type Func struct {
 	SystemStack bool
 	// HasClosureContext reports that ABIInternal supplies this function's
 	// closure environment in the architecture's dedicated closure register.
+	// Exactly one temporary must then be marked Temp.ClosureContext -- the one
+	// that receives it, which is defined on entry and assigned by nothing.
 	HasClosureContext bool
 
 	// StackPointerWords records pointer-bearing words within OAlloc results.
