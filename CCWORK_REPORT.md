@@ -5378,3 +5378,56 @@ the emitted object, not merely over the encoding.
 `plain` does not move, and that is the correct answer rather than a null result:
 `Data` is module-level, and `ir.CloneFunc` puts one function into a scratch module
 that has no `Data` at all. The two `CloneFunc` callers cannot reach this field.
+
+## The census, which is the direct answer to "real, or safe by luck?"
+
+An object-size delta of zero is consistent with two very different things: a
+field goc never produces, and a field whose loss happens not to change this
+program's code. So the harness also counts, in the real compiled+optimized module
+for `hello.go`, how many instances of each dropped field exist:
+
+```
+census funcs=2152 data=6361 types-reached=63
+  DataItem.RelativeTo   1639
+  Data.GoTypeLink       499
+  Const.Thread          0
+  AggType.Packed        0
+  Jmp.Likely            0
+  Func.lowered          0
+  Module.SymAttrs       84
+  Module.SymAlign       0
+  Module.Aliases        0
+  Module.AllocDecisions 227   (diagnostic-only, deliberately not carried)
+```
+
+`DataItem.RelativeTo` is **1639**, and the round trip added exactly **1639**
+relocations. The two numbers are the same number.
+
+**Real in goc: `DataItem.RelativeTo` and `Module.SymAttrs`.** Everything else on
+the list is produced only by the `cc/` front end and is safe by luck in goc --
+which is a statement about goc's current output and not about the format, and it
+stops being true the moment a Go construct starts emitting one.
+
+## Drop 2 — `Const.Thread`. Safe by luck in goc; a wrong address in cc.
+
+`encConst` wrote `Kind`, `Cls`, `Int`, `Flt`, `Sym` and not `Thread`
+(`ir/binary.go`). A thread-local symbol constant is reached through the TLS ABI;
+without the flag it decodes as an ordinary symbol address -- the same address in
+every thread, where the point of the constant was that it is not.
+
+Two things make it worse than a single wrong flag. `internConst`'s key *does*
+include `Thread` (`ir/build.go:185`), so a function holding both `&g` and
+thread-local `&g` has two distinct constants before the round trip and one after
+it -- every use of one silently becomes a use of the other. And `opt/inline.go`
+re-interns a spliced callee's thread constant through `f.ThreadSym`, so a callee
+that came out of a cache spreads the demotion into its callers.
+
+Produced by `cc/expr.go` and `cc/compile.go` (`__thread`); goc emits none.
+
+**Test that fails without it:** `TestConstRoundTripsEveryField`, which reports
+`Thread: (bool) true` expected, `false` actual.
+
+**Emitted-code movement: none, on either path.** `plain` and `roundtrip` are both
+byte-identical to their post-fix-1 objects (`fc378a0a…`). The census says why:
+goc produces zero thread-local constants. That is evidence the field is genuinely
+unreachable from goc today, not evidence the fix is inert.

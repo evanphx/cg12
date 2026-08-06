@@ -85,6 +85,29 @@ func TestDataRoundTripsEveryField(t *testing.T) {
 	require.Equal(t, d, back.Data[0])
 }
 
+// TestConstRoundTripsEveryField covers a constant.
+//
+// Const.Thread was the drop this found. A thread-local symbol constant is
+// addressed through the TLS ABI; without the flag it decodes as an ordinary
+// symbol address, which is a different address in every thread. Note that
+// internConst's key does include Thread (ir/build.go), so the two constants are
+// distinct before the round trip and merge into one after it.
+func TestConstRoundTripsEveryField(t *testing.T) {
+	c := Const{Kind: ConstSym, Cls: ClsL, Int: 16, Flt: 1.5, Sym: "g", Thread: true}
+	allFieldsSet(t, c)
+
+	m := NewModule()
+	f := m.NewFunc("f", ClsW)
+	f.Consts = []Const{c}
+	f.Entry().RetVoid()
+
+	data, err := m.MarshalBinary()
+	require.NoError(t, err)
+	back, err := DecodeModule(data)
+	require.NoError(t, err)
+	require.Equal(t, c, back.Funcs[0].Consts[0])
+}
+
 func TestInstrRoundTripsEveryField(t *testing.T) {
 	agg := &AggType{Name: "pair", Fields: []Field{{Sub: SubW}, {Sub: SubW}}}
 	in := Instr{

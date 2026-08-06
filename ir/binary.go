@@ -469,6 +469,11 @@ func (e *enc) encConst(c Const) {
 	e.iv(c.Int)
 	e.f64(c.Flt)
 	e.str(c.Sym)
+	// Thread makes the symbol thread-local, reached through the TLS ABI rather
+	// than by its address. internConst's key includes it, so two constants that
+	// differ only here are two constants -- and a format that dropped it merged
+	// them, silently giving the thread-local one the global's address.
+	e.boolean(c.Thread)
 }
 
 func (e *enc) encBlock(b *Block, blockRef func(*Block)) {
@@ -884,11 +889,12 @@ func (d *dec) decTemp(id int) *Temp {
 
 func (d *dec) decConst() Const {
 	return Const{
-		Kind: ConstKind(d.u8()),
-		Cls:  Cls(d.u8()),
-		Int:  d.iv(),
-		Flt:  d.f64(),
-		Sym:  d.str(),
+		Kind:   ConstKind(d.u8()),
+		Cls:    Cls(d.u8()),
+		Int:    d.iv(),
+		Flt:    d.f64(),
+		Sym:    d.str(),
+		Thread: d.boolean(),
 	}
 }
 
