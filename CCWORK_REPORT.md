@@ -3769,3 +3769,70 @@ is a hypothesis; the measurement above is not.
 **`perf_suite_baseline.txt` was not re-cut.** A measurement did force attention,
 and re-cutting is exactly the wrong response to it: the baseline is the record
 that this code used to be faster.
+
+## 5. Compile time, re-measured on an idle box
+
+Median of three, wall clock, private `CG12_PACK_CACHE` per program so the shared
+cache is neither read nor trimmed. "monolithic" is `GOC_AUTOPACK=0`; "cold" is
+an empty pack cache and includes building and caching the pack; "warm" is a hit.
+
+| program | | monolithic | cold | warm | warm vs monolithic |
+|---|---|---|---|---|---|
+| small | default | 3.00 s | 5.02 s | 2.58 s | 1.16× |
+| small | `-O` | 7.51 s | 9.60 s | 2.61 s | **2.88×** |
+| hello | default | 6.40 s | 10.32 s | 4.94 s | 1.30× |
+| hello | `-O` | 16.36 s | 20.08 s | 5.13 s | **3.19×** |
+| httpsrv | default | 31.42 s | 49.57 s | 21.95 s | 1.43× |
+
+Branch 2's table reproduces essentially exactly (it had 3.05 / 6.45 / 31.5
+monolithic and 2.62 / 4.90 / 22.2 warm). Cold is slower than monolithic by the
+pack build, as it reported.
+
+### Warm goc against warm gc
+
+One line appended to the source before each compile, alternating between the two
+compilers, so neither answers from a whole-program result cache:
+
+| program | goc warm | gc warm | ratio |
+|---|---|---|---|
+| small (`println`) | 2.60 s | 0.19 s | **14×** |
+| hello (fmt/os/strings) | 4.89 s | 0.25 s | **20×** |
+| httpsrv (net/http) | 22.10 s | 0.56 s | **39×** |
+
+Branch 2 reported 16× / 20× / 40×. **Confirmed: 14× / 20× / 39×.** The one
+difference is `small`, where gc measures 0.19 s here against 0.16 s there, which
+is a tenth of a second on a number that is mostly process startup.
+
+With the source unchanged, so gc's action cache answers the whole build, gc is
+0.16 / 0.22 / 0.50 s — 16× / 22× / 44×. Branch 2 reported 0.05 / 0.07 / 0.10 s
+for this arm (52× / 70× / 222×) and I cannot reproduce that; what I measure is
+that a fully cached `go build -o /dev/null` of a one-file program costs about
+0.16 s on this box whatever is in the file, which puts a floor under the arm.
+The changed-source table above is the one that describes an edit-compile loop
+and is unaffected either way.
+
+### The remaining gap is the front end, and here is the number
+
+Branch 2 attributes the whole remaining gap to the front end. `cmd/stagetime`
+from branch 3 — merged here, so this is the first time the two are in one tree —
+attributes a `-O` whole-program compile of `hello.go`:
+
+| stage | wall | allocated |
+|---|---|---|
+| frontend | **4.07 s** | 1.14 GiB |
+| `opt.OptimizeModule` | 9.96 s | 3.36 GiB |
+| backend+object | 2.08 s | 3.01 GiB |
+| (serialization probes) | 1.09 s | |
+| **total** | **16.17 s** | 7.35 GiB |
+
+The warm `-O` compile of the same program is 5.13 s, and the front end alone is
+4.07 s of it — **79%**. At the default it is 4.07 of 4.94 s, **82%**. The pack
+removes the optimiser and the back end for the standard library and leaves the
+front end untouched, exactly as branch 2 says, and a warm goc still spends four
+seconds parsing and type-checking a closure gc never looks at. Branch 2's
+conclusion is confirmed with the stage number under it.
+
+Incidentally, `stagetime` reports **`ir.Verify` fails on 0 of 5119 functions**
+on the merged tree. That is branch 3's tool independently confirming branch 1's
+fix, which is the defect branch 3's own `BUILD_CACHE.md` found and could not
+work around.
