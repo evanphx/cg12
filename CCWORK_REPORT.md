@@ -3796,3 +3796,954 @@ fingerprint to `ir/binary.go`; give the pack cache gc's 5-day trim; split
 cache after `mem2reg`+`clean`.
 
 Full document: `BUILD_CACHE.md`. Harness: `cmd/stagetime`.
+
+
+# Option C, stage 1: can the key say what the output already shows?
+
+Branch `ccwork/optionc-stage1`, cut from `main` (`21ca7b3`).
+Deliverable: `opt/depset.go` (the recorder), `cmd/depsets` (the harness),
+`analysis/optionc/depsets.py` (the arithmetic), and this section.
+
+Host: aarch64 Linux, 64 cores, 250 GiB RAM, go1.26.1. All figures are
+`goc -O` whole-program arm64 builds at `GOMAXPROCS=64`, the same configuration
+`BUILD_CACHE.md` Part 2 used, and the same two programs.
+
+## Why this measurement exists
+
+`BUILD_CACHE.md` §3.4 costs Option C -- Option B plus a memoised whole-module
+stage and back end, keyed per function on its inline-dependency set -- at an
+**85% ceiling on the small program and 86% on http**, and says in the same
+paragraph: "Nothing here is measured as an implementation; only the ceiling is."
+
+The ceiling comes from §2.4 and §2.4b, which measure that the *output* is
+stable: after a root-package edit 4130 of 4131 post-optimisation functions are
+byte-identical, and after rewriting a leaf helper with 115 call sites 4103 of
+4131 still are. **A memoiser cannot use that fact.** It has to decide, before
+doing the work, whether last compile's answer is still good, and the only thing
+it has to decide with is a set it recorded last time. If the inliner's recorded
+set is large or conservative -- if compiling one function consults a large
+fraction of the module transitively -- then an edit invalidates most of the
+cache and the saving collapses toward zero even though the output barely moved.
+
+So the question stage 1 answers is not "is the output stable" (measured, yes)
+but "**can a recorded set say so**".
+
+## The answer, first
+
+**The sets are small, and they invalidate almost exactly what the edit changed.
+Option C's key can exist.**
+
+| edit | functions whose *input* moved | functions whose *output* genuinely changed | memos the recorded sets **invalidate** | ratio | memo hit rate |
+|---|---:|---:|---:|---:|---:|
+| root-package (`42`→`43` in `main`) | 1 (`main.main`) | **1** of 4131 | **2** of 4131 | **2.00x** | **99.95%** |
+| leaf helper (`runtime.alignUp` rewritten) | 1 (`runtime.alignUp`) | **29** of 4131 | **31** of 4131 | **1.07x** | **99.25%** |
+
+(`alignUp` has 115 call sites in the vendored runtime source, which is the figure
+§2.4b quotes; goc's front end lowers only reachable functions, so the module the
+inliner sees carries **39** direct call sites to it.)
+
+The brief's decision rule was: ~30 invalidated means the ceiling is real, ~3000
+means Option C is worth roughly Option B. The measured answer is **31**.
+
+And the key is not merely small, it is **sound on both edits**: every function
+whose post-optimisation body changed was invalidated by its recorded set. Zero
+functions changed output while the key said the memo was still valid. That is
+the property a memoiser would miscompile on, and it held.
+
+## The distribution, not the average
+
+`opt.Record` files two sets per function.
+
+**Consulted** is what soundness requires: every function the inliner resolved by
+name on this one's behalf. It lands there whether or not it was inlined, because
+the inliner read its size, its attributes, its structure and its place in the
+call graph, and a decision about the caller came out of that read. A callee that
+grew past the budget changes a caller that never inlined it.
+
+**Spliced** is the optimistic floor: only the functions whose bodies actually
+ended up inside this one. Both are transitively closed through splicing -- a
+caller holding a clone of `mid` also holds the clone of `leaf` that was already
+inside it, so it depends on `leaf` too.
+
+Sizes over the functions that survive to the back end:
+
+| | n | min | median | p95 | p99 | max | mean |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **small**, consulted | 4131 | 0 | **3** | **27** | 36 | **182** | 8.6 |
+| **small**, spliced | 4131 | 0 | 2 | 18 | 23 | 39 | 5.5 |
+| **http**, consulted | 12796 | 0 | **3** | **25** | 33 | **181** | 8.3 |
+| **http**, spliced | 12796 | 0 | 2 | 18 | 21 | 39 | 4.8 |
+
+11.1% of small's surviving functions (7.1% of http's) have an *empty* consulted
+set: the inliner never read another function to produce them, so their memo can
+be keyed on their own input alone.
+
+**The distribution does not move between the two programs.** http is 3.1x the
+functions of small and its median dependency set is the same 3, its p95 one
+lower, its maximum one lower. The set is a property of how deep goc's inliner
+reaches -- bounded by `inlineSmallBudget` (24 instructions) and
+`inlineGrowthCap` (+128) -- and not of how large the module is. That is the
+single most important fact for Option C: **the key does not degrade as the
+program grows**, which is the failure mode that would have killed it.
+
+## The number that actually decides an invalidation
+
+A memo dies when something in its set changes, so what matters is the *reverse*
+direction: how many memos does one changed function kill?
+
+| | median | p95 | p99 | max |
+|---|---:|---:|---:|---:|
+| small, reverse fan-out | 1 | 9 | 71 | **1395** |
+| http, reverse fan-out | 1 | 8 | 36 | **5462** |
+
+The median function invalidates one memo. The tail is where the risk is, and it
+is a short, nameable list -- on small: `goc_memcpy` (1395), `goc_memset` (1388),
+`goc_storep` (1038), `runtime.atomicstorep` (1000), `runtime.inHeapOrStack`
+(991), `runtime.inheap` (990), `runtime.noescape` (990),
+`runtime.mSpanStateBox.get` (989), `runtime.atomicwb` (985), `runtime.spanOf`
+(984). These are the write barrier, the heap-membership test and the memory
+intrinsics: tiny, `nosplit`, and inlined into a third of the module.
+
+So the honest statement of Option C's exposure is not a percentage, it is a
+sentence: **editing anything in the runtime's write-barrier and heap-lookup core
+costs a third of the cache; editing anything else costs a handful of functions.**
+`runtime.alignUp`, the §2.4b target with 39 direct call sites in this module,
+has a reverse fan-out of **31** -- which is where the leaf-edit row above comes
+from, and it is 0.75% of the module.
+
+## How the two edits were made, and what the controls say
+
+Both programs are the ones `BUILD_CACHE.md` Part 2 used, compiled by
+`cmd/depsets`: front end, then the per-function prefix (`mem2reg` + `clean`)
+whose per-function digest is the memoiser's **input**, then the whole-module
+remainder under `opt.Record`, whose per-function digest is the **output**. A
+memo for `f` is invalid exactly when `f`'s recorded set meets the set of
+functions whose input digest moved.
+
+- **root-package edit** — `42` → `43` in the `fmt.Sprintf` call in `main`.
+- **leaf edit** — `runtime.alignUp` in `stdlib/src/runtime/stubs.go`, the §2.4b
+  target. Reproducing §2.4b's method exactly: a *control* that inserts two
+  comment lines above it and changes nothing else, and a *treatment* that
+  rewrites its body to compute the same value in three statements (`mask`,
+  `sum`, `return`), also +2 lines. Comparing treatment against control isolates
+  the body rewrite from the line-number shift, which is why the input population
+  is exactly one function.
+
+Four controls, all run:
+
+| control | result |
+|---|---|
+| same source, two processes | **0 of 4131** post-opt digests differ — the compiler is deterministic, as §2.1 found |
+| recorder on vs recorder off, same split pipeline | **0 of 4131** differ — **recording does not perturb what is measured** |
+| split pipeline vs `opt.OptimizeModule` unsplit | **3 of 4131** differ (below) |
+| the same program compiled from two different worktree paths | **3744 of 5083** input digests differ (below) |
+
+### Two things the controls turned up that are worth recording
+
+**goc's IR carries absolute source paths, so any content key is path-sensitive.**
+The first attempt at the leaf experiment put control and treatment in two git
+worktrees, and 3744 of 5083 functions differed before either edit was reached.
+`ir.SrcPos` names a file through `Module.Files`, and `goc.StdlibRoot` is derived
+from `runtime.Caller(0)` and is therefore absolute. Every position in the module
+embeds the build directory. gc has the same problem and solves it with
+`-trimpath`, which `buildActionID` folds into the key explicitly (§1.3). Any goc
+cache — B or C — needs the equivalent before an artifact can be shared between
+two checkouts, or its hit rate across machines is zero. The experiment was rerun
+with both variants compiled from one path, which is what the table above reports.
+
+**Splitting the pipeline at the Option B/C boundary is not output-neutral.**
+Running `mem2reg`+`clean` as one `opt.Run` and the remainder as a second — which
+is exactly the boundary §3.1 says the cacheable unit ends at — changes three
+functions: `internal/strconv.trimZeros`, `runtime.decoderune`, `syscall.Write`.
+It is deterministic (both split runs agree with each other, both unsplit runs
+agree with each other) and it is not the recorder. The cause is the `changeLog`:
+a split gives the second half a fresh one, so `clean`'s passes re-run on
+functions the unsplit pipeline had already recorded as converged. `opt/pass.go`
+states the invariant that makes skipping sound — "if a pass ran on f and reported
+no change, and no pass has changed f since, running it again would report no
+change again" — and for these three functions it does not hold.
+
+**This is Option B's problem as much as Option C's**, and it is not currently
+written down anywhere: the cacheable unit's own boundary moves the compiler's
+output for 0.07% of functions before any caching exists. It is three functions
+and it is deterministic, so it is a bug to find rather than a design obstacle —
+but a byte-identity guard on a memoised compile will trip on it, so it has to be
+found first.
+
+## The three awkward passes, and a fourth that is worse than the three
+
+§3.4 names three passes that "do not fit the per-function model". Measured, in
+place, by wrapping each transform rather than by splitting the pipeline around
+it (so the pass identities and the shared `changeLog` are exactly a normal
+compile's):
+
+| | small | http |
+|---|---:|---:|
+| `UnrollRecursion` | **0.064 s**, 86 functions unrolled | **0.451 s**, 1398 unrolled |
+| `DeadFuncElim` | **0.077 s** | **0.318 s** |
+| `InlineIntoNoSplitCallers` | **0.340 s**, 227 measured, 111 accepted | **0.637 s**, 230 measured, 113 accepted |
+| call graph + SCC + call-site census | **0.499 s** over 10 rebuilds (0.050 s each) | **3.766 s** over 18 rebuilds (0.209 s each) |
+
+**`DeadFuncElim` is not awkward — rerun it.** §3.4 guessed ~0.14 s on small; it
+is 0.077 s, and 0.318 s on http. It only removes functions from `m.Funcs`; a
+function it drops is by construction referenced by nothing live, so no surviving
+body depends on the outcome. It is a pure function of the final bodies, which a
+memoised compile has. Rerun it and forget about it.
+
+**`UnrollRecursion` is not awkward either, and §3.4 is wrong to list it.** It
+splices through the same `spliceCall` as the inliner, so the recorded sets
+already cover it: the 86 functions it unrolls on small (1398 on http) carry
+their unrolled callees in their dependency sets like any other inline. Its one
+extra input is SCC membership, which is the same global the inliner needs
+anyway (below).
+
+**`InlineIntoNoSplitCallers` is genuinely awkward, and the measurement says how
+much that costs: 227 functions on small, 230 on http — 5.5% and 1.8% of the
+module.** Its input is a byte count the backend computes from the finished code,
+and `FrameBudget.Charge` spends a chain's headroom in call-graph order, so one
+accepted caller changes what a later caller on the same chain is allowed to do.
+That is a dependency on an ordering, not on a set, and no per-function key
+expresses it. The answer is not to express it: **exclude the ~230 nosplit
+callers the pass measures from the memo entirely** and let them take the full
+path. They are a fixed, small, nameable population — it does not grow with the
+program (227 → 230 as the module goes from 5083 to 14901 functions) because it
+is bounded by how many `nosplit` functions the runtime has, not by how much code
+is around them. Costing 5.5% of the module its memo is a far better trade than
+making the key model a frame budget.
+
+**The fourth thing, which §3.4 does not mention, is the standing cost of the
+whole-module analyses.** `inlineModule` rebuilds the call graph, its SCC
+condensation and the call-site census on every round — 10 rounds on small
+(0.499 s total), 18 on http (3.766 s). A memoiser skips the rounds, but it
+cannot skip the analysis entirely, because that is what tells it whether the
+recursion classification its key depends on still holds (below). One rebuild is
+**0.050 s on small and 0.209 s on http**.
+
+So the un-memoisable residue of the whole-module stage is one graph build plus
+`DeadFuncElim` plus `InlineIntoNoSplitCallers`:
+
+- small: 0.050 + 0.077 + 0.340 = **0.467 s** of a 16.16 s compile (2.9%)
+- http: 0.209 + 0.318 + 0.637 = **1.164 s** of a 74.4 s compile (1.6%)
+
+It shrinks as a fraction as the program grows, which is the right direction.
+
+## What the recorded set does not cover, and what that costs
+
+The set is what the inliner *read through `directCallee`* — the single choke
+point through which nothing crosses the function boundary without resolving a
+name. Three inputs reach an inlining decision without going through it, and each
+has to be accounted for or the key is unsound. Two of them turn out to be free;
+one is a real hole with a cheap fix.
+
+**The call-site census is a dead input today, and there is now a test saying so.**
+`worthInlining` derives its budget as `inlineOnceBudget/sites` floored at
+`inlineSmallBudget`. Both constants are **24**, so the quotient is at or below
+the floor for every `sites ≥ 1` and the budget is always 24 — the module-wide
+call-site count cannot change any decision. This matters because the census is
+the one input that is genuinely whole-program (every function that calls `g`
+contributes), so a live one would have forced every caller of `g` into every
+memo that mentions `g`. `TestCallSiteCountCannotChangeAnInlineDecisionToday`
+asserts the two constants are equal and fails the moment someone separates them,
+which is the moment the per-function key needs redesigning.
+
+**`selectCostInline` selects nothing on either Go program** — 0 functions on
+both. It fires only on callers containing a computed goto (`ir.JmpBr`), which is
+an interpreter's threaded dispatch loop; the Go programs have none. It is a live
+whole-module input for the C interpreter workloads and inert for Go, so it needs
+a clause in the key (a digest of the selected set) but costs nothing here.
+
+**SCC membership is a real hole.** `scc.recursive[callee]` gates inlining
+absolutely, and it is a property of the whole call graph, not of any function the
+recorded set names. The failure is constructible: `f` inlines small `g`; `g`
+calls large `x`, which `g` did not inline, so `x`'s own callees never entered
+`f`'s set; an edit makes `x`'s callee `y` call back into `g`'s component. Now `g`
+is recursive and `f` may no longer inline it — but nothing in `f`'s recorded set
+moved, so the key says the memo is valid and it is not.
+
+Neither measured edit produced a single instance (the analysis checks for
+exactly this: "changed output the key called valid" was **0** on both), but the
+hole is structural rather than statistical. The fix is cheap and is already
+paid for: **store the `recursive` bit of every function in the memo's set and
+validate it against the rebuilt SCC.** The graph rebuild costs 0.050 s / 0.209 s
+and the residue passes need it anyway.
+
+**`ir.Module.SymAttrs` is a fourth module-wide input, and it is free.** The
+inliner reads it through `isFrameScopedRuntimeCall`, and `LoadElim` and
+`DeadAlloc` read it through `isAtomicPointerStore` — `opt/pass.go` already names
+it as the one piece of module state the per-function passes touch. The front end
+writes it once and no pass ever changes it, so one digest of the table in the key
+covers it.
+
+**The largest sets are not what one would guess.** The maximum on both programs
+is `.goc.global.initfunc.*.unicode.Scripts` (182 on small, 181 on http) — a
+package-level initializer that builds a large table and therefore names a great
+many helpers. The largest *ordinary* functions are `runtime.findRunnable` (82),
+`runtime.gcMarkTermination` (67) and `runtime.sweepLocked.sweep` (66): the
+scheduler and collector, which is where one would expect a deep inline reach.
+Nothing in either module comes within an order of magnitude of "half the module".
+
+## The same measurement on http: the blast radius is absolute, not proportional
+
+| edit | program | input moved | output genuinely changed | **invalidated** | ratio | hit rate |
+|---|---|---:|---:|---:|---:|---:|
+| root-package | small (4131) | 1 | 1 | **2** | 2.00x | 99.95% |
+| root-package | http (12796) | 2 | 2 | **3** | 1.50x | 99.98% |
+| leaf `runtime.alignUp` | small (4131) | 1 | 29 | **31** | 1.07x | 99.25% |
+| leaf `runtime.alignUp` | http (12796) | 1 | 29 | **31** | 1.07x | **99.76%** |
+
+The leaf edit invalidates **the same 31 functions** on a module 3.1x larger.
+That is the strongest single result here. `alignUp`'s blast radius is a property
+of `alignUp` — how many functions inline it — and not of how much other code is
+in the module. So Option C's hit rate *improves* with program size (99.25% →
+99.76%) rather than degrading, which is the opposite of what a conservative key
+would do and the opposite of the risk this stage existed to test.
+
+The http root edit changed two functions rather than one, because inserting a
+statement in `main` moves `main.main` and the handler closure it defines. The
+key invalidated three: the two, plus one caller that had inlined one of them.
+
+**And the key was sound on all four.** Not one function changed its
+post-optimisation body while its recorded set said the memo was still valid.
+That is the property a memoiser miscompiles on, and it held on 4131 + 4131 +
+12796 + 12796 functions.
+
+## What Option C would actually deliver, arithmetic on measured inputs
+
+This is a projection, not an implementation. It multiplies `BUILD_CACHE.md`
+Part 2's stage times by the hit rates and residues measured above.
+
+Small (16.16 s: front end 4.08, prefix 1.44, whole-module remainder 8.58, back
+end 2.05):
+
+| | s |
+|---|---:|
+| Option B underneath (`funcDecl`+`globalDecl` 1.64 + prefix 1.44) | 3.08 |
+| whole-module remainder, less the 0.467 s residue, at the leaf edit's 96.2% work-hit rate | 7.80 |
+| back end, less the ~230 nosplit callers excluded from the memo, at 99.25% | 1.92 |
+| **saved** | **12.80 of 16.16 = 79%** |
+| less decoding the post-opt unit (§2.5: 0.36 s) | **12.44 = 77%** |
+
+http (74.4 s: front end 18.98, prefix 8.34, remainder 36.08, back end 11.49):
+
+| | s |
+|---|---:|
+| Option B underneath (8.19 + 8.34) | 16.53 |
+| remainder, less the 1.164 s residue, at the leaf edit's 98.8% work-hit rate | 34.5 |
+| back end, less the excluded nosplit callers, at 99.76% | 11.26 |
+| **saved** | **62.3 of 74.4 = 84%** |
+| less decoding the post-opt unit (§2.5: 1.60 s) | **60.7 = 82%** |
+
+**77–82% against a stated ceiling of 85–86%**, and against Option B's 18–21%.
+The gap to the ceiling is not the miss rate — it is the residue, the decode, the
+~230 nosplit callers and the recompute closure below, in that order.
+
+### The one architectural constraint the measurement uncovered
+
+**A memo hit cannot be served by storing only the final body.** Read from
+`opt/inline.go`, not measured: `inlineModule` walks `scc.order` bottom-up and
+`inlineInto` splices the callee's body *as it stands at that moment* — after that
+round's inlining, before the `clean` that follows the inline pass. So the body a
+caller receives is an intermediate state, not the finished one. A function whose
+memo missed therefore needs the intermediate states of everything it spliced, not
+their final bodies.
+
+That is bounded, and the bound is measured. Taking the invalidated set and adding
+the functions whose bodies were spliced into it:
+
+| edit | invalidated | plus intermediates a miss needs | **total to recompute** | work-hit rate |
+|---|---:|---:|---:|---:|
+| small, leaf | 31 | 125 | **156** of 4131 | 96.2% |
+| http, leaf | 31 | 126 | **157** of 12796 | 98.8% |
+| small, root | 2 | 13 | **15** of 4131 | 99.6% |
+| http, root | 3 | 5 | **8** of 12796 | 99.9% |
+
+Only 1142 of 5083 functions on small (2181 of 14901 on http) are ever spliced
+into a survivor at all, so the population that would need intermediate states
+stored is a fifth of the module rather than all of it. Either answer works —
+store the intermediates for that fifth, or recompute the ~125 the misses drag in
+— and the arithmetic above uses the recompute reading, which is the cheaper one
+to build and the more expensive one to run.
+
+Two things the arithmetic is still optimistic about:
+
+- **A miss is not priced per function.** The whole-module remainder is a
+  fixpoint, not a sum of per-function costs. Re-running it for 156 functions
+  still pays for the pipeline scaffolding around them. With 156 of 4131 the error
+  is small; with a `goc_memcpy` edit invalidating 1395, it is not.
+- **Validation is not priced at all.** Every build must hash each function's
+  post-prefix IR to compare against the recorded input digests — a walk over the
+  whole module. It is the first thing stage 2 must measure rather than assume.
+
+## Verdict: stage 2 is worth doing
+
+The brief's decision rule was explicit — ~30 invalidated functions means the
+ceiling is real; ~3000 means Option C is worth roughly Option B and should not be
+built. **It is 31, on both programs, for the hard edit.** The recorded set can
+say what the output already shows.
+
+The three facts that decide it:
+
+1. **The set is small and does not grow with the program.** Median 3 consulted
+   functions, p95 27, max 182 — and http, at 3.1x the functions, has median 3,
+   p95 25, max 181. goc's inliner reaches a bounded distance (24 instructions of
+   callee, +128 of caller growth), so the key's size is a property of the cost
+   model, not of the module.
+2. **Invalidation tracks the real blast radius to within 7%.** 31 against 29 for
+   the leaf edit, 2 against 1 and 3 against 2 for the root edits. The
+   conservatism a sound key costs — counting callees that were read and not
+   inlined — is two functions, not two thousand.
+3. **It was sound on every function of every comparison.** Zero cases of a
+   changed output the key called valid, across 33 854 function comparisons.
+
+What stage 2 has to build, in the order the measurement suggests:
+
+1. **A `-trimpath` equivalent.** Absolute build paths are in `ir.SrcPos`, so
+   today two checkouts share nothing. Nothing else matters if this is not fixed;
+   it is also Option B's problem.
+2. **Find the three functions the pipeline split moves** (`trimZeros`,
+   `decoderune`, `syscall.Write`). A byte-identity guard is the correctness
+   property of the whole design, and it cannot be turned on while the boundary
+   itself moves output.
+3. **The key**: per function, the recorded consulted set, each member's
+   post-prefix input digest, each member's `recursive` bit (to close the SCC
+   hole), a digest of `ir.Module.SymAttrs`, plus `opt.PipelineIdentity()`, the
+   target, `-O` and the goc binary hash, exactly as §3.2 has them.
+   A memo entry must hold the function's *intermediate* spliced body as well as
+   its final one, or a miss has to recompute the ~125 functions it drags in.
+4. **Exclude the ~230 nosplit callers `InlineIntoNoSplitCallers` measures.** They
+   are 5.5% of small and 1.8% of http, they do not grow with the program, and
+   they are the only population whose result depends on an ordering rather than
+   on a set.
+5. **Rerun, do not memoise: `DeadFuncElim` (0.077 s / 0.318 s), one call graph +
+   SCC build (0.050 s / 0.209 s), `InlineIntoNoSplitCallers` (0.340 s /
+   0.637 s).** `UnrollRecursion` needs neither — it splices through
+   `spliceCall`, so the recorded sets already cover it.
+6. **Measure validation cost before trusting the projection.**
+
+The one thing that would change this answer: the reverse fan-out tail. Editing
+`goc_memcpy`, `goc_memset`, `goc_storep`, `runtime.atomicstorep` or the
+heap-membership helpers invalidates a third of the module (1395 of 4131, 5462 of
+12796). That is the write-barrier and allocator core, it is a short list, and it
+is edited rarely — but a build-cache design that does not say this out loud
+would be a design that surprises somebody. **Option C is fast for edits to your
+own package and to ordinary library code, and roughly Option B for edits to the
+runtime's memory core.**
+
+### Scope note
+
+Packs were not touched, as instructed. `cmd/depsets` and `opt.Record` are
+measurement scaffolding: the recorder is nil unless `opt.Record` installs it, and
+the controls above show a recorded compile produces byte-identical output to an
+unrecorded one on all 4131 functions.
+
+### Guards run
+
+Scaled to the change, which is measurement scaffolding plus five hook lines in
+the inliner:
+
+- `go build ./...`, `go vet ./opt ./cmd/depsets`, `gofmt` — clean.
+- `go test ./opt` — the whole package, **ok in 0.94 s**. It covers the six new
+  tests in `opt/depset_test.go`: that the spliced set closes transitively through
+  a callee's own inlines, that a callee the inliner read and declined stays in the
+  consulted set (and that consulted is a superset of spliced), that **recording
+  produces byte-identical output to not recording**, that `Record` restores the
+  recorder and refuses to nest, and that the call-site census cannot change an
+  inline decision while `inlineOnceBudget == inlineSmallBudget`.
+- `make verify-fast` — **PASS in 4m44s**, every item green (build, vet, gofmt,
+  unit, three corpus shards, corpus-parallel, matrix-default, matrix-opt,
+  reducers).
+- The recorder's output-neutrality was also checked end to end on whole programs,
+  which is the check that matters more than the unit test: a recorded compile and
+  an unrecorded one agree on **4131 of 4131** post-optimisation function digests,
+  and two recorded http compiles agree on **12796 of 12796**.
+
+Not run, per the brief: the corpus suite on its own, the capability matrix on its
+own, `make test-unit`, the four audits, the census, determinism sweeps, the crash
+loops. `TestIRVerifyAudit` and the memoised-vs-unmemoised byte-identity check are
+stage 2's guards and are not needed here, because nothing this branch commits
+changes what the compiler emits.
+
+The `stdlib/src/runtime/stubs.go` edits for the leaf experiment were made in a
+throwaway `git worktree` and restored with `git checkout --` after each run; both
+that worktree and this one are clean.
+
+# Option C, stage 2: the memoiser
+
+Branch `ccwork/optionc-stage2`, cut from `ccwork/optionc-stage1` (`67daeb8`).
+
+Host: aarch64 Linux, 64 cores, 250 GiB RAM, go1.26.1. All figures are `goc -O`
+whole-program arm64 builds, the same two programs stage 1 and `BUILD_CACHE.md`
+Part 2 used.
+
+## Blocker 2, first, because it is one line: it is not the changeLog
+
+Stage 1 measured that splitting `DefaultPipeline` at the Option B/C boundary
+moves three functions -- `internal/strconv.trimZeros`, `runtime.decoderune`,
+`syscall.Write` -- and attributed it to the `changeLog`. It is not the
+`changeLog`. It is the **jump-thread budget**, and the distinction matters
+because the two have opposite fixes.
+
+`cmd/splitprobe` runs a 2x2 over the two things a split changes -- whether the
+second half gets a fresh `changeLog`, and whether it gets fresh *pass objects*:
+
+| arm | pass objects | changeLog | functions differing from unsplit |
+|---|---|---|---:|
+| `unsplit` | one pipeline | one | — |
+| `split-rebuilt` (stage 1's shape, `cmd/depsets`) | rebuilt for the second half | fresh | **3** |
+| `split-shared` (one pipeline sliced, two `opt.Run`s) | shared | **fresh** | **0** |
+| `split-session` (one pipeline sliced, one `opt.Session`) | shared | shared | **0** |
+| `split-rebuilt-sharedjt` (rebuilt, but one `JumpThreadPass`) | rebuilt **except** jump-thread | fresh | **0** |
+
+`split-shared` gives the second half a completely fresh `changeLog` and is
+byte-identical on all 4131 functions. So re-running a pass that had already
+reported convergence is exactly as harmless as `opt/pass.go` claims — the
+invariant holds, and stage 1's suspicion of it was wrong.
+
+What is not harmless is rebuilding the passes. `opt.JumpThreadPass` holds a
+`map[*ir.Func]*jtState` in a closure — `origInstrs` (the function's size when
+the pass first saw it), `grownInstrs` and `threads` — and the comment on it says
+what it is for: *"bounds how much threading one function receives across the
+whole pipeline, so the clean fixpoint that contains the pass always terminates"*.
+A second `JumpThreadPass()` instance is a second budget. A function that spent
+its budget in the prefix's `clean` gets a fresh one in the remainder's `clean`
+and is threaded further, which is what moves those three functions and nothing
+else. Sharing *only* the jump-thread instance across the split (last row)
+restores byte-identity with everything else rebuilt.
+
+**The fix is therefore not to make the split cheaper but to stop rebuilding the
+pipeline across it.** `opt.Session` (new, `opt/pass.go`) carries the change log
+across several `Run` calls, and `opt.PerFunctionPrefixLen` names where to cut one
+`DefaultPipeline()` in two. A memoised compile builds the pipeline once and hands
+the halves to one session; the split is then free, and the byte-identity guard
+can be switched on.
+
+## Blocker 1: `-trimpath`, and the two places the path was hiding
+
+Stage 1 found that two git worktrees of one commit produced **3744 of 5083**
+differing per-function digests before any edit. `ir.SrcPos` names a file through
+`ir.Module.Files`, and `goc.StdlibRoot` comes from `runtime.Caller(0)`, so every
+position in every module carried the build directory.
+
+`goc.TrimPath` (new, `goc/trimpath.go`) rewrites a source path into the
+repository-relative, slash-separated form before it is interned, at the three
+places a name enters the file table, and the two consumers that compare against
+that table move with it (`escapediag.srcPos` looks a name up in the table;
+`canonicalCoveragePath` has to open the file, so it goes back through
+`goc.UntrimPath`).
+
+That took 3744 to **381**, which is the interesting part: **the file table was
+not the only place the build directory was.** Three families of *symbol name* are
+built from a source position, because a name alone does not identify them —
+
+| symbol | why the position is in the name |
+|---|---|
+| `.goc.global.init.*` | a package may declare several blank globals with initializers, and every one is called `_` |
+| `.goc.global.literal.*` | nistec's p224/p384/p521 are one generated file three times over, so their literals share a line and a column |
+| `.goc.runtime.type.*` | a local type is identified by where it is declared (`appendLocalTypeIdentities`) |
+
+Each of those keys is hashed into the emitted symbol, so an absolute path in it
+put the build directory into the *object* even though no position ever reached
+`ir.SrcPos`. `goc.positionKey` trims the file for all three.
+
+| control | before | after |
+|---|---:|---:|
+| two worktrees, post-prefix (input) digests | 3744 of 5083 differ | **0 of 5083** |
+| two worktrees, post-optimisation digests | — | **0 of 4131** |
+| two worktrees, the whole `goc -O` image | — | **byte-identical** (`697c21a9…`) |
+
+It is unconditional rather than a flag: goc emits no line table, so every reader
+of the file table is inside this repository, and a switch that changes compiler
+output without changing the compiler binary is exactly the pack-cache hazard
+`opt.PipelineIdentity` exists to close.
+
+**One path-keyed thing is left, and it is not in the IR.** `cmd/goc/prebuilt.go`
+folds `goc.StdlibRoot()` — an absolute path — into the pack cache key, as a proxy
+for "which standard library tree is this". Two checkouts therefore still miss
+each other's *packs*. That is a key using a path where it means content; it does
+not affect what the compiler emits, and it is left alone here because the brief
+says not to touch packs.
+
+## The memoiser: first end-to-end saving
+
+`memo/` is the cache; `cmd/memoc` is a compiler that uses it and writes the
+object and the translated assembly, so a memoised compile and an unmemoised one
+can be compared byte for byte. `-no-memo` is the control: the same binary, the
+same split, the same `opt.Session`, the store ignored.
+
+**Small program (`goc/testdata/fmt_sprintf.go`, 5083 functions in, 4131 out),
+warm with nothing changed:**
+
+| arm | wall | front end | prefix | validate | lookup | **stage** | record | back end | store I/O |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| control (no memo) | **16.14 s** | 4.21 | 1.44 | — | — | **8.42** | — | 2.04 | — |
+| cold (empty memo) | 16.76 s | 4.19 | 1.42 | 0.13 | 0.00 | 8.56 | 0.27 | 2.01 | 0.04 |
+| **warm** | **8.87 s** | 4.15 | 1.43 | 0.13 | 0.36 | **0.00** | 0.00 | 2.00 | 0.10 |
+
+**45.0% end to end, and the object and the assembly are byte-identical to the
+control's** (`01af5728…`, `e5de208c…`).
+
+The stage went 8.42 s → 0.00 s. What is left is the front end (4.15 s) and the
+back end (2.00 s), neither of which Option C caches: **the front end is Option
+B's job and Option B is not built.** Against the stages Option C actually
+memoises, 8.42 of 8.42 s is gone.
+
+**The cold cost is +0.62 s on 16.14 (3.8%)**: 0.13 s validating (marshalling and
+hashing all 5083 post-prefix bodies, plus one call graph and SCC condensation),
+0.27 s recording, 0.04 s writing 30 MB. Stage 1 said to measure validation rather
+than assume it; it is **0.13 s, 0.8% of the compile**, and it is paid on every
+build, hit or miss.
+
+## What it is
+
+`memo/` is the cache. Per function it stores the finished body (cg12's binary
+unit format), and a key made of clauses rather than one opaque hash, so a miss
+can say which clause moved:
+
+| clause | why |
+|---|---|
+| the function's own post-prefix body digest | it is the input |
+| for each member of the inliner's recorded **consulted** set: its name, its post-prefix digest, and its `recursive` bit | the set is stage 1's; the bit closes the SCC hole stage 1 named |
+| `ir.Module.SymAttrs` | the one piece of module state the per-function passes read |
+| the `CostInline` selection | the one live whole-module input that is neither |
+| the file table | positions are indices into it and a per-function unit does not carry it |
+| `opt.PipelineIdentity`, the target, the compiler binary's hash | the identity of the compile |
+
+The **data section is deliberately not in a per-function key**, and putting it
+there was a measured mistake: `DeadFuncElim` roots reachability at the globals,
+so it looks like it belongs — but `DeadFuncElim` is rerun on every compile from
+the actual module, so no per-function memo needs to know. With it in, changing
+`42` to `43` in the program moved a string literal and invalidated **4607 of
+4608** entries through a clause none of them depended on. It belongs to the
+whole-module check below, whose claim does cover which functions were dropped.
+
+A hit's body is installed and the function is **frozen** (`opt.Session.Freeze`,
+new): no pass in the stage may transform it, every pass may still read it. The
+back end's half is separate and simpler: lowering, allocation and emission read
+one function and read-only module facts — the property the parallel backend
+already relies on — so the finished code is a pure function of the finished body
+and the key is that body's digest, with no dependency set at all.
+
+Stage 1's four rulings are implemented as it left them: `DeadFuncElim` is rerun,
+`UnrollRecursion` needs nothing of its own, the `nosplit` population is excluded
+outright (475 of 5083 on small, 479 of 14901 on http — it does not grow with the
+program), and one call graph + SCC condensation is rebuilt to revalidate the
+`recursive` bits.
+
+### The whole-module check, which is the only part that is exact by construction
+
+Before the per-function lookup there is a whole-module one: if every function's
+post-prefix digest matches its entry, the module clause matches, the data digest
+matches, and the module holds exactly the functions the store was written from,
+then **the input to the stage is bit-for-bit the input the stored output came
+from**. The stage is a deterministic function of that input, so its output is the
+stored output — for every function, including the excluded ones, and including
+whatever the per-function key cannot express. It does not depend on any of the
+per-function reasoning being right.
+
+That is not a special case bolted on to flatter a benchmark; it is the case a
+build cache is in most of the time (build again, having changed nothing), and it
+is the case the "warm" rows below measure.
+
+## The numbers
+
+`cmd/memoc` is a compiler that uses the memo and writes the object and the
+translated assembly. `-no-memo` is the control: same binary, same split, same
+`opt.Session`, store ignored. Every row is one run on an otherwise idle box.
+
+### small — `goc/testdata/fmt_sprintf.go`, 5083 functions in, 4131 out
+
+| arm | wall | front end | prefix | validate | lookup | **stage** | record | back end | store I/O | **saving** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| control | **16.14** | 4.21 | 1.44 | — | — | **8.42** | — | 2.04 | — | — |
+| cold | 16.76 | 4.19 | 1.42 | 0.13 | 0.00 | 8.56 | 0.27 | 2.01 | 0.04 | **−3.8%** |
+| warm, nothing changed | **8.87** | 4.15 | 1.43 | 0.13 | 0.36 | **0.00** | 0.00 | 2.00 | 0.10 | **45.0%** |
+| warm, root-package edit | 12.37 | 4.20 | 1.44 | 0.16 | 0.20 | 3.81 | 0.12 | 2.06 | 0.09 | **23.4%** |
+| warm, leaf edit (`runtime.alignUp`) | 11.76 | 4.17 | 1.45 | 0.16 | 0.23 | 3.24 | 0.10 | 2.05 | 0.09 | **27.1%** |
+
+### http — `goc/testdata/stdlib_http_tls_client_server.go`, 14901 in, 12796 out
+
+| arm | wall | front end | prefix | validate | lookup | **stage** | record | back end | store I/O | **saving** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| control | **76.11** | 19.79 | 8.36 | — | — | **36.16** | — | 11.67 | — | — |
+| cold | 79.26 | 19.60 | 8.42 | 0.89 | 0.00 | 37.02 | 1.10 | 12.03 | 0.12 | **−4.1%** |
+| warm, nothing changed | **41.78** | 19.10 | 8.36 | 0.90 | 1.20 | **0.00** | 0.00 | 11.90 | 0.32 | **45.1%** |
+| warm, leaf edit (`runtime.alignUp`) | 61.30 | 19.42 | 8.34 | 0.87 | 0.76 | 19.23 | 0.48 | 11.74 | 0.31 | **19.5%** |
+
+**Every one of those memoised compiles emits an object and a translated assembly
+byte-identical to its control's.** Checked as sha256 of both artifacts, on every
+row, plus a per-function comparison of all 5083 / 14901 finished bodies.
+
+| scenario | object | control |
+|---|---|---|
+| small, nothing changed | `01af572844ee64d8` | `01af572844ee64d8` |
+| small, root edit | `6fb91174cde51622` | `6fb91174cde51622` |
+| small, leaf edit | `052413aae94d9030` | `052413aae94d9030` |
+| http, nothing changed | `08159f8899915c3c` | `08159f8899915c3c` |
+| http, leaf edit | `a1a950950b183d9a` | `a1a950950b183d9a` |
+
+### The hit rate in practice
+
+| scenario | entries validated | **invalid** | served from the memo | recomputed to keep the reads honest | excluded (`nosplit`) |
+|---|---:|---:|---:|---:|---:|
+| small, nothing changed | 5083 | 0 | **5083 (100%)** | 0 | — |
+| small, root edit | 4608 | **2** (99.96% valid) | 3243 (63.8%) | 1363 | 475 |
+| small, leaf edit | 4608 | **56** (98.8% valid) | 3427 (67.4%) | 1125 | 475 |
+| http, leaf edit | 14422 | **56** (99.6% valid) | 10516 (70.6%) | 3850 | 479 |
+
+The root edit invalidates **2** — `main.main` and the closure it defines — which
+is exactly what stage 1 measured. The leaf edit invalidates **56 on both
+programs**, and stage 1's strongest single result survives: `alignUp`'s blast
+radius is a property of `alignUp`, not of how much other code is around it, so
+the hit rate improves with program size (98.8% → 99.6%).
+
+(56 rather than stage 1's 31 because this key is the sound one and stage 1's
+count was the recorded-set intersection alone: this one also fails an entry whose
+*own* recursion classification moved, and closes a frozen callee's transitive set
+in through its stored entry, both of which stage 1's arithmetic did not do.)
+
+## Against the 77–82% projection
+
+The projection is **not** met, and the gap is three specific things, two of which
+are not the memoiser's to close.
+
+| | small | http |
+|---|---:|---:|
+| stage 1's corrected projection | 77% | 82% |
+| ...of which Option B underneath (front end + prefix), **not built** | 19% | 22% |
+| so the ceiling available to Option C alone, on these measurements | **64.8%** | **62.8%** |
+| **achieved, warm, nothing changed** | **45.0%** | **45.1%** |
+| the same with the back-end memo persisted (it is in-process only) | 57.4% | 60.7% |
+| achieved, warm, leaf edit | 27.1% | 19.5% |
+
+Three separate statements, in order of size:
+
+1. **Option B is not built, and it is 19–22 points of the 77–82%.** The
+   projection is for Option B *plus* Option C. What this branch built is the
+   Option C half. On the warm no-edit row the front end costs 4.15 s of 8.87 and
+   19.10 s of 41.78 — 47% and 46% of what is left is a front end nothing caches.
+
+2. **The whole-module stage is fully memoised: 8.42 s → 0.00 s and 36.16 s →
+   0.00 s.** That half of Option C delivers everything the projection asked of
+   it, and more than it asked: the projection allowed a 0.467 s / 1.164 s residue
+   for the passes that must be rerun, and the whole-module identity check skips
+   even those, soundly.
+
+3. **The back end's memo is implemented and content-addressed but not persisted**,
+   so across processes it never hits: 2.00 s of small's 8.87 and 11.90 s of
+   http's 41.78 is a back end recompiling what it compiled last time. Persisting
+   it means writing a codec for the per-function code record (code, relocations,
+   block symbols, line rows, DWARF, Go metadata, stack maps, the nosplit budget's
+   facts). Its size is measured below; the work was not attempted here rather
+   than attempted badly, because a codec that drops a field emits a wrong object.
+
+### And the edit rows are the real correction to stage 1
+
+Stage 1 projected a **96.2% work-hit rate** on the leaf edit — 31 invalidated
+plus 125 splice sources, 156 of 4131 recomputed — and said the choice was
+between storing intermediate bodies and recomputing that closure, "and the
+arithmetic above uses the recompute reading". **The recompute reading, as stage 1
+defined it, does not emit the same bytes.** Measured, on the leaf edit:
+
+| live set | stage | object |
+|---|---:|---|
+| misses only (`-closure=none`) | 1.06 s | `101e71ee…` — **differs** |
+| misses + splice sources, stage 1's reading (`-closure=splice`) | 1.04 s | `152e5799…` — **differs** |
+| misses + everything a live function *reads that the stage moves* (`-closure=read`) | 3.24 s | `052413aa…` — **identical** |
+
+The mechanism, found by tracing one function through the stage pass by pass. The
+inliner and the unroller do not read a callee's *finished* body: they walk the
+SCC condensation bottom-up and size a callee with `funcSize` at that moment, and
+splice it as it stands. A frozen function stands at its finished body from the
+start. So a live function can see a callee that the reference compile would have
+shown it in an earlier state.
+
+It is not hypothetical and it is not rare enough to ignore. On the small program
+with **no misses at all** — where the only live functions are the 475 excluded
+`nosplit` ones — `runtime.unlockWithRank` measured 24 instructions or fewer at
+its finished size where the reference measured more, the unroller folded it into
+`runtime.sysMemStat.add`, and five functions and the object moved. Stage 1's
+splice closure does not catch it, because this is a *size* read and not a splice.
+
+So the sound live set is bigger than stage 1 costed, and this is the number that
+replaces its 96.2%:
+
+| | recomputed | of | **work-hit rate** |
+|---|---:|---:|---:|
+| stage 1's projection, small leaf | 156 | 4131 | 96.2% |
+| **measured, small leaf** | **1656** | 5083 | **67.4%** |
+| **measured, http leaf** | **4385** | 14901 | **70.6%** |
+
+The closure is nothing like the whole module only because of one fact worth
+keeping: **1736 of 5083 functions on the small program (4993 of 14901 on http)
+have the same body after the whole-module stage as before it.** A function the
+stage never moves reads the same at every moment, so freezing it is exact by
+construction and it never enters the closure. Without that the closure would be
+everything reachable from the live set, which from 475 runtime `nosplit`
+functions is most of the runtime.
+
+## What the memoiser found in the IR, which was not the memoiser's bug
+
+Getting a warm compile to emit the same object took fixing two things in cg12's
+binary unit format. Both are `ir.CloneFunc`'s problems as much as the memo's —
+`CloneFunc` round-trips through this encoder, and `InlineIntoNoSplitCallers` uses
+it to snapshot a caller it may have to restore.
+
+**1. `Func.StackPointerWords` was not carried, and it is not recoverable.**
+`ir.InferStackPointerWords` *adds* to that map rather than rebuilding it, so a
+function that lost it came back with a smaller pointer map and a smaller frame:
+`.text` 43712 bytes smaller and `.data` 30344 bytes larger across a whole module.
+It is what the collector scans a stack allocation by. The three inline attributes
+(`ForceInline`, `CostInline`, `NoInline`) were not carried either. Unit format
+version 19 → 20.
+
+**2. Inline provenance was written by value, which is faithful to the values and
+not to the graph — and consumers read the graph.** `arm64.buildInlineTree` opens
+and closes a DWARF inlined-subroutine context on `stack[k].site == chain[k]`,
+pointer identity. Decoding gave every instruction its own chain, so one inlined
+region became one region per instruction: **`.debug_info` 3.4 MB → 10.0 MB** for
+identical code. Interning equal chains on decode recovers most of it and is still
+not the same graph — two splices of one callee at one position are distinct
+nodes, and merging them left `.debug_info` 3141 bytes short. It is now a
+per-function site table addressed by index, which reproduces the sharing exactly
+and is *smaller* on the wire: the small program's memo went 36.9 MB → 30.1 MB.
+
+**Both fixes change what `goc -O` emits, by 208 bytes on the small program's
+image.** That is the snapshot-restore path in `InlineIntoNoSplitCallers`: the one
+caller it measures and rejects (`runtime.debugCallWrap1.func` on
+`runtime_lock_osthread`) was being restored without its stack-pointer-word map.
+The change is a fix, it is small, and it is stated here rather than found later.
+
+## What the memo costs
+
+| | small (5083 functions) | http (14901 functions) |
+|---|---:|---:|
+| memo file on disk | **30.1 MB** | **114.6 MB** |
+| per function | 5.9 KB | 7.7 KB |
+| writing it (cold) | 0.04 s | 0.12 s |
+| reading and validating it (warm) | 0.13 s validate + 0.36 s lookup | 0.90 s + 1.20 s |
+| peak RSS, control | — | 3.80 GB |
+| peak RSS, warm | — | 4.76 GB |
+| peak RSS, cold | — | 5.18 GB |
+
+Two things to read off that:
+
+- **Validation is cheap and stage 1 was right to ask.** Marshalling and hashing
+  every post-prefix body, plus one call graph and SCC condensation, is **0.13 s
+  of a 16.1 s compile (0.8%) and 0.90 s of 76.1 s (1.2%)**, paid on every build
+  whether it hits or misses. It got there by not carrying the module's file table
+  in every per-function unit: with the table in, the same walk cost 0.23 s and
+  the memo was 81 MB instead of 30 MB.
+- **Memory is where this costs most, and the direction is wrong.** http's peak
+  RSS goes 3.80 GB → 4.76 GB warm and 5.18 GB cold: the store is 114.6 MB on
+  disk but it is held decoded, alongside the module, and a cold run holds every
+  finished body's encoding as well as the module it came from.
+  `compileRuntimeCapabilityPeakBytes` is 5 GiB and a cold memoised http compile
+  is at 5.18 GB. **A memo that is streamed to disk per entry rather than held as
+  one map is the first thing to fix in stage 3**, and it is the same change that
+  gives it gc's per-entry file layout and an eviction story.
+
+**The back-end half, priced.** The per-function code records the back end would
+have to persist — code, relocations, block symbols, line rows, DWARF, Go
+metadata, stack maps and the nosplit budget's facts, counted field by field
+rather than estimated — are **24.7 MB for the small program's 4131 functions,
+6.1 KB each**, against 30.1 MB for the IR half. So a fully persisted Option C
+memo for this program is about 55 MB, and buys the 2.00 s the back end costs.
+
+## What is left standing, and what stage 3 has to decide
+
+**1. The sound live set is the thing to attack.** Everything below 45% in the
+edit rows is the read closure: 1125 functions on small, 3850 on http, recomputed
+not because their memo was invalid but because something live *reads* them and
+the stage moves them. Two ways out, and they are the same choice stage 1 named,
+now priced properly:
+
+- Store what a reader actually reads at the moment it reads it. That is not the
+  whole body: the inliner and the unroller read `funcSize` and
+  `inlinableStructure` — an integer and a boolean — and need the body only when
+  they splice. Storing a per-round *profile* (size, inlinable, attributes) for
+  every function and the body only for the fifth of the module that is ever
+  spliced is a much smaller artifact than storing every intermediate body, and it
+  would take the closure to nothing.
+- Or make the reads not depend on the moment, by giving the inliner a size it can
+  agree on across rounds. That is a change to the cost model, not to the cache.
+
+**2. The whole-module identity check should not need the per-function memo to be
+exact, and today it carries it.** The 45% rows are the whole-module path; the
+per-function path delivers 19–27%. If stage 3 does nothing else, it should still
+keep the whole-module check, because it is the only part of the design that is
+correct by an argument rather than by measurement.
+
+**3. Persist the back end.** 24.7 MB and a codec, worth 2.00 s of 8.87 and
+11.90 s of 41.78 — the largest single number left on the table that does not
+need a design decision.
+
+**4. Stream the memo.** Peak RSS goes 3.80 → 5.18 GB on a cold http compile
+against a 5 GiB capability ceiling. One file per entry under a fanout, written as
+it is produced, fixes the peak and gives eviction at the same time.
+
+**5. Option B.** 19–22 points of the projection, untouched by this branch. The
+`-trimpath` work here was its blocker too and is now done.
+
+### Scope notes
+
+- **Packs were not touched.** `make verify-fast` builds and links against them
+  throughout and is green.
+- The unit format's version went 19 → 20, which is a cold rebuild for anything
+  holding an older unit and is handled as one everywhere it is read.
+- `cmd/splitprobe` and `cmd/memoc` are measurement scaffolding. `memo/` and the
+  `opt`/`ir`/`arm64` hooks are not: they are off unless a caller turns them on
+  (`opt.Session.Freeze` with an empty set, `arm64.SetFunctionCodeCache(nil)`),
+  and `goc` itself does not turn them on. What `goc -O` emits changed only by the
+  208 bytes the two round-trip fixes account for.
+
+## Guards
+
+Scaled to the change, which is a new package, hooks in `opt`, `ir` and `arm64`,
+and a compiler-wide path change.
+
+| guard | result |
+|---|---|
+| `go build ./...`, `go vet ./...`, `gofmt` | clean |
+| `go test ./ir ./opt ./memo ./arm64 ./analysis` | **all ok** |
+| `memo` tests (new, 7) | ok — the digest is the body and not the module, the round trip preserves the body, a corrupted unit is rejected, every key clause is checked including the SCC bit, the store round-trips, a missing file is a cold build, and **a frozen function is not transformed while an unfrozen one is** |
+| `go test ./goc -run TestGCDiff\|TestSlogAttrFrame\|TestRuntimeCoverage\|TestEscape.*Diag` | ok (the tests that read the file table) |
+| **`make verify-fast`** | **PASS in 4m0s** — build, vet, gofmt, unit, three corpus shards, corpus-parallel, matrix-default, matrix-opt, reducers, all green |
+| **byte-identity, memoised vs unmemoised** | **5 scenarios, 2 programs: object and translated assembly identical in all of them**, plus a per-function comparison of every finished body |
+| two worktrees of one commit | 0 of 5083 input digests differ, 0 of 4131 post-optimisation, image byte-identical |
+| `cmd/splitprobe`, 5 arms | the pipeline split is output-neutral when the pipeline is not rebuilt |
+
+`TestIRVerifyAudit` **does not exist in this tree** — nothing under any name
+close to it. `go test ./ir` covers `ir/verify_test.go`, and `make verify-fast`
+compiles the whole corpus, which is the check it was presumably meant to stand
+for. Said here rather than quietly substituted.
+
+`make verify-fast` failed on its first run, on `TestAllocationCensus`, and the
+failure was the trimpath fix working: eleven of the baseline's 14520 lines
+identify a type by a symbol whose name embedded `/home/evan/.ccwork/...`, so the
+committed baseline could only ever have matched on the machine that recorded it.
+Regenerated; every one of the eleven changes is confined to the type-symbol
+column and **not one allocation moved between the heap and the frame**.
+
+Not run, per the brief: the corpus suite on its own, the capability matrix on its
+own, `make test-unit`, the four audits on their own, the census on its own,
+determinism sweeps, the crash loops. (`verify-fast` runs the matrix, three corpus
+shards and the reducers as part of its own tier; that is the broad smoke the
+brief offered, not those gates run separately.)
+
+## Verdict
+
+**Both blockers cleared.** Absolute paths are out of `ir.SrcPos` *and* out of the
+three symbol families that were hashing a position — two worktrees of one commit
+now produce byte-identical images. The pipeline split is not the `changeLog`; it
+is the jump-thread budget, and `opt.Session` makes the split free.
+
+**Output is byte-identical**, on every scenario measured: two programs, cold,
+warm, a root-package edit and a leaf edit, object and translated assembly both.
+
+**The achieved saving is 45% warm against a 77–82% projection**, and the three
+pieces of the gap are named and sized: Option B is 19–22 points of it and is not
+built; the back end's memo is 12–16 points and is implemented but not persisted;
+and the rest is the live-set closure, which is where stage 1's arithmetic was
+wrong — its 96.2% work-hit rate assumed recomputing the splice closure, and the
+splice closure **does not emit the same bytes**. The sound closure gives 67–71%,
+which is why an edit saves 19–27% and not 45%.

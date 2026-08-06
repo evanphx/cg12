@@ -16,12 +16,43 @@ const maxRecursionDepth = 2
 // It runs once, not in a fixpoint: the depth reached along each cloned recursive
 // call is tracked transiently in the call's Aux slot and cleared before
 // returning, so nothing about inlining leaks past the pass.
-func UnrollRecursion(m *ir.Module) bool {
+func UnrollRecursion(m *ir.Module) bool { return unrollRecursion(m, nil) }
+
+// UnrollPass is UnrollRecursion in its pipeline form. It is the only ModulePass
+// in DefaultPipeline that rewrites bodies, so it is the only one that has to know
+// which of them a memoised compile has frozen; everything else that rewrites a
+// body is a FuncPass or the inliner, and both already take part in change
+// tracking.
+func UnrollPass() Pass { return unrollPass{} }
+
+type unrollPass struct{}
+
+func (unrollPass) Name() string          { return "unroll" }
+func (unrollPass) Run(m *ir.Module) bool { return unrollRecursion(m, nil) }
+
+func (unrollPass) runTracked(m *ir.Module, log *changeLog) bool {
+	if !unrollRecursion(m, log) {
+		return false
+	}
+	// Unrolling reports no per-caller detail, so it is treated like any other
+	// module pass that cannot: everything not frozen is assumed to have moved.
+	for _, f := range m.Funcs {
+		if !log.isFrozen(f) {
+			log.version[f]++
+		}
+	}
+	return true
+}
+
+func unrollRecursion(m *ir.Module, log *changeLog) bool {
 	cg := buildCallGraph(m)
 	scc := computeSCC(cg)
 	changed := false
 	for _, f := range scc.order {
 		if f.Start == nil {
+			continue
+		}
+		if log.isFrozen(f) {
 			continue
 		}
 		if unrollInto(f, cg, scc) {
@@ -30,6 +61,9 @@ func UnrollRecursion(m *ir.Module) bool {
 	}
 	if changed {
 		for _, f := range m.Funcs {
+			if log.isFrozen(f) {
+				continue
+			}
 			clearCallDepth(f)
 		}
 	}
@@ -47,6 +81,9 @@ func unrollInto(caller *ir.Func, cg *callGraph, scc *sccInfo) bool {
 		}
 		depth := int(b.Instrs[idx].Unroll)
 		spliceCall(caller, b, idx, callee, cg, scc, depth)
+		if activeDeps != nil {
+			activeDeps.unrolled[caller] = true
+		}
 		changed = true
 	}
 	return changed

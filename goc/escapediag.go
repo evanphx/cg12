@@ -203,8 +203,9 @@ func (g *gen) srcPos(position token.Pos) ir.SrcPos {
 	}
 	at := g.fset.Position(position)
 	file := uint32(0)
+	trimmed := TrimPath(at.Filename) // the table holds trimmed names; see goc/trimpath.go
 	for index, name := range g.mod.Files {
-		if name == at.Filename {
+		if name == trimmed {
 			file = uint32(index + 1)
 			break
 		}

@@ -45,6 +45,13 @@ type functionCode struct {
 // records is relative to the function's own start, so the caller can place the
 // function anywhere in the module's text.
 func compileFunction(f *ir.Func, opts Options, conventions calleeConventions, bundle assemblyBundle, goRuntime bool) (*functionCode, error) {
+	// The memo's back-end half, when one is installed: the finished code is a
+	// pure function of the finished body, so a content key answers it outright.
+	// See arm64/codecache.go.
+	cached, cacheKey, keyed := cachedFunctionCode(f)
+	if cached != nil {
+		return cached, nil
+	}
 	applyAssemblyCallConventions(f, bundle.callConventions)
 	name := sanitize(f.Name)
 	params := dwarfParams(f)
@@ -98,6 +105,9 @@ func compileFunction(f *ir.Func, opts Options, conventions calleeConventions, bu
 	// safepoints need not be kept alive until the merge.
 	if !goRuntime && safepointsHaveRoots(mc.safepoints) {
 		code.stackMap = &stackMapFunc{sym: name, points: mc.safepoints}
+	}
+	if keyed {
+		storeFunctionCode(cacheKey, code)
 	}
 	return code, nil
 }

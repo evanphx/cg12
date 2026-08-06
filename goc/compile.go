@@ -366,7 +366,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		interfaceCandidates:     make(map[interfaceCandidateKey][]interfaceMethodCandidate),
 		escapeDiag:              newEscapeDiagnostics(),
 	}
-	g.mod.File(name)
+	g.mod.File(TrimPath(name))
 	registerNoEscapeDirectives(g)
 	for _, d := range file.Decls {
 		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.VAR {
@@ -1347,7 +1347,7 @@ func appendLocalTypeIdentity(fset *token.FileSet, builder *strings.Builder, path
 	// from it -- differ between a compile that shared a preparsed standard
 	// library and one that did not.
 	fmt.Fprintf(builder, "|%s=%s.%s@%s", path, object.Pkg().Path(), object.Name(),
-		fset.Position(object.Pos()))
+		positionKey(fset, object.Pos()))
 }
 
 func addRuntimeInitTask(mod *ir.Module, declarations []functionDecl, initSymbols map[*types.Func]string) error {
@@ -5651,7 +5651,7 @@ func (g *gen) staticFunctionLiteral(literal *ast.FuncLit) string {
 	// miscompiles elsewhere in the tree for exactly that reason. The enclosing
 	// function is included too, since a generic body is compiled once per
 	// instantiation from the same source position.
-	literalKey := g.fset.Position(literal.Pos()).String()
+	literalKey := positionKey(g.fset, literal.Pos())
 	if g.functionName != "" {
 		literalKey = g.functionName + "@" + literalKey
 	}
@@ -6018,7 +6018,11 @@ func (g *gen) at(n ast.Node) {
 		return
 	}
 	p := g.fset.Position(n.Pos())
-	file := g.mod.File(p.Filename)
+	// TrimPath, not p.Filename: the stdlib is read through an absolute
+	// StdlibRoot, and an absolute path here puts the build directory into every
+	// position in the module and therefore into every content key derived from
+	// it. See goc/trimpath.go.
+	file := g.mod.File(TrimPath(p.Filename))
 	g.cur.At(ir.SrcPos{File: file, Line: uint32(p.Line), Col: uint32(p.Column)})
 }
 
@@ -8190,7 +8194,7 @@ func (g *gen) emitDynamicGlobalInitializer(initializer *globalInitializer) {
 		// Position, not just the name: a package may declare several blank
 		// globals with initializers, and every one of them is called "_".
 		guardName = contentSymbolName(".goc.global.init",
-			objectPackagePath(object)+"."+object.Name()+"@"+g.fset.Position(object.Pos()).String())
+			objectPackagePath(object)+"."+object.Name()+"@"+positionKey(g.fset, object.Pos()))
 		for _, groupObject := range initializer.objects {
 			g.dynamicInitializerGuards[groupObject] = guardName
 		}

@@ -5,6 +5,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/evanphx/cg12/ir"
 )
@@ -84,7 +85,7 @@ const inlineCallerInstrBudget = 2000
 // on the size budget.
 func Inline(m *ir.Module) bool {
 	done := false
-	return inlineModule(m, map[*ir.Func]int{}, &done, nil)
+	return inlineModule(m, map[*ir.Func]int{}, &done, nil, nil)
 }
 
 // InlinePass returns a module pass that inlines with a growth cap fixed to each
@@ -117,7 +118,7 @@ func (p *inlinePass) runTracked(m *ir.Module, log *changeLog) bool {
 	if log != nil {
 		moved = func(caller *ir.Func) { log.record(inlinePassID, caller, true) }
 	}
-	return inlineModule(m, p.base, &p.costDone, moved)
+	return inlineModule(m, p.base, &p.costDone, moved, log)
 }
 
 // inlinePassID is the identity the inliner files its changes under. Any value
@@ -234,6 +235,9 @@ func selectCostInline(m *ir.Module, cg *callGraph, scc *sccInfo) {
 				continue
 			}
 			cd.callee.CostInline = true
+			if activeDeps != nil {
+				activeDeps.costInlineSelected[cd.callee] = true
+			}
 			budget -= grow
 			if dump {
 				fmt.Fprintf(os.Stderr, "COSTINLINE %-38s size=%-4d sites=%-3d into=%s\n",
@@ -245,7 +249,13 @@ func selectCostInline(m *ir.Module, cg *callGraph, scc *sccInfo) {
 
 // inlineModule inlines across the whole module. moved, when non-nil, is called
 // with each caller whose body inlining changed.
-func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool, moved func(*ir.Func)) bool {
+//
+// log is consulted only for frozen functions: a memoised compile has already
+// supplied their bodies, so they are not inlined into. They are still in the call
+// graph, still resolved by name and still spliceable, because they are callees
+// like any other.
+func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool, moved func(*ir.Func), log *changeLog) bool {
+	graphStart := time.Now()
 	forceInlineFromEnv(m)
 	cg := buildCallGraph(m)
 	scc := computeSCC(cg)
@@ -254,9 +264,20 @@ func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool, moved fun
 		*costDone = true
 	}
 	sites := callSiteCounts(m, cg.byName)
+	if activeDeps != nil {
+		activeDeps.noteGraph(time.Since(graphStart))
+	}
+	if activeDeps != nil && len(activeDeps.siteCounts) == 0 {
+		for f, n := range sites {
+			activeDeps.siteCounts[f] = n
+		}
+	}
 	changed := false
 	for _, f := range scc.order {
 		if f.Start == nil || hasSecondaryEntry(f) {
+			continue
+		}
+		if log.isFrozen(f) {
 			continue
 		}
 		if frameIsSpentFromTheNoSplitReserve(f) {
@@ -682,12 +703,21 @@ func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.F
 
 // directCallee returns the module function a call names directly, or nil for an
 // indirect or external call.
+//
+// It is also the inliner's single choke point for reading another function, and
+// so the place [InlineDeps] records from: every decision the interprocedural
+// passes make about a call site starts by resolving it here, and nothing in the
+// module is read across the function boundary without going through it.
 func directCallee(caller *ir.Func, call *ir.Instr, byName map[string]*ir.Func) *ir.Func {
 	c := call.Arg(0)
 	if c.Kind != ir.RefConst || caller.Consts[c.ID].Kind != ir.ConstSym {
 		return nil
 	}
-	return byName[caller.Consts[c.ID].Sym]
+	callee := byName[caller.Consts[c.ID].Sym]
+	if activeDeps != nil {
+		activeDeps.noteConsulted(caller, callee)
+	}
+	return callee
 }
 
 func canInlineCall(caller *ir.Func, call *ir.Instr, callee *ir.Func) bool {
@@ -827,6 +857,9 @@ func worthInlining(callee *ir.Func, sites int) bool {
 // (UnrollRecursion) can tell how deep it has gone and stop. For a non-recursive
 // callee nothing is stamped and depth is ignored.
 func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *callGraph, scc *sccInfo, depth int) {
+	if activeDeps != nil {
+		activeDeps.noteSpliced(caller, callee)
+	}
 	call := b.Instrs[idx]
 	args := call.Args[1:]
 	results := []ir.Ref{call.To}

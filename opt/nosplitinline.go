@@ -147,6 +147,9 @@ func InlineIntoNoSplitCallersReporting(m *ir.Module) (*NoSplitInlineReport, bool
 		if err != nil {
 			continue
 		}
+		if activeDeps != nil {
+			activeDeps.noSplitMeasured[caller] = true
+		}
 		if !inlineInto(caller, graph, components, sites, base) {
 			continue
 		}
@@ -168,6 +171,9 @@ func InlineIntoNoSplitCallersReporting(m *ir.Module) (*NoSplitInlineReport, bool
 			budget.Charge(name, after-before)
 		}
 		report.Accepted = append(report.Accepted, result)
+		if activeDeps != nil {
+			activeDeps.noSplitAccepted[caller] = true
+		}
 		changed = true
 	}
 	sort.Strings(report.NoRoom)
