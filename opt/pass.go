@@ -49,6 +49,11 @@ type changeLog struct {
 	// converged records, per (pass, function), the version at which that pass
 	// last ran and reported no change.
 	converged map[passFunc]uint32
+	// frozen names the functions a memoised compile has already supplied the
+	// answer for. No pass in the pipeline may transform one; every pass may
+	// still *read* one, because a frozen function is a callee like any other and
+	// the inliner has to be able to see it. See [Session.Freeze].
+	frozen map[*ir.Func]bool
 }
 
 type passFunc struct {
@@ -71,6 +76,11 @@ func (log *changeLog) settled(pass int32, f *ir.Func) bool {
 	}
 	at, ok := log.converged[passFunc{pass: pass, fn: f}]
 	return ok && at == log.version[f]
+}
+
+// isFrozen reports whether f's body is a memoised answer that no pass may touch.
+func (log *changeLog) isFrozen(f *ir.Func) bool {
+	return log != nil && log.frozen[f]
 }
 
 // record files the outcome of running pass on f.
@@ -147,6 +157,9 @@ func (p funcPass) runTracked(m *ir.Module, log *changeLog) bool {
 	for _, f := range m.Funcs {
 		if f.Start == nil {
 			continue // a declaration with no body
+		}
+		if log.isFrozen(f) {
+			continue // a memoised answer; see Session.Freeze
 		}
 		if log.settled(p.id, f) {
 			continue // converged on exactly these bytes already
@@ -255,6 +268,29 @@ type Session struct {
 // NewSession returns a session with an empty change log.
 func NewSession() *Session { return &Session{log: newChangeLog()} }
 
+// Freeze declares that these functions' bodies are already the answer -- a
+// memoised compile has installed them from the cache -- so no pass in this
+// session may transform them.
+//
+// Reading a frozen function is untouched, and has to be: the inliner resolves it
+// by name like any other callee, reads its size and its structure, and may
+// splice its body. What a memoised compile is asserting when it freezes f is
+// that running the stage would have produced exactly this body, so a reader that
+// sees it sees what it would have seen -- for every reader that runs after f
+// reached its final form. The one reader that does not is the inliner in a round
+// before f converged, which is why [InlineDeps] exists and why the recompute set
+// a miss drags in is measured rather than assumed.
+func (s *Session) Freeze(functions map[*ir.Func]bool) {
+	if s.log.frozen == nil {
+		s.log.frozen = make(map[*ir.Func]bool, len(functions))
+	}
+	for f, yes := range functions {
+		if yes {
+			s.log.frozen[f] = true
+		}
+	}
+}
+
 // Run applies one slice of a pipeline, carrying convergence state in and out.
 func (s *Session) Run(m *ir.Module, pipeline []Pass) {
 	for _, p := range pipeline {
@@ -307,7 +343,7 @@ func DefaultPipeline() []Pass {
 		// up the phis and redundant loads it exposes.
 		FuncPass("mem2reg", Mem2Reg),
 		clean,
-		ModulePass("unroll", UnrollRecursion), // bounded in-place recursion unrolling
+		UnrollPass(), // bounded in-place recursion unrolling
 		Fixpoint("inline-fixpoint", // inline/simplify what unrolling exposed
 			inline,
 			clean,

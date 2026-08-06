@@ -85,7 +85,7 @@ const inlineCallerInstrBudget = 2000
 // on the size budget.
 func Inline(m *ir.Module) bool {
 	done := false
-	return inlineModule(m, map[*ir.Func]int{}, &done, nil)
+	return inlineModule(m, map[*ir.Func]int{}, &done, nil, nil)
 }
 
 // InlinePass returns a module pass that inlines with a growth cap fixed to each
@@ -118,7 +118,7 @@ func (p *inlinePass) runTracked(m *ir.Module, log *changeLog) bool {
 	if log != nil {
 		moved = func(caller *ir.Func) { log.record(inlinePassID, caller, true) }
 	}
-	return inlineModule(m, p.base, &p.costDone, moved)
+	return inlineModule(m, p.base, &p.costDone, moved, log)
 }
 
 // inlinePassID is the identity the inliner files its changes under. Any value
@@ -249,7 +249,12 @@ func selectCostInline(m *ir.Module, cg *callGraph, scc *sccInfo) {
 
 // inlineModule inlines across the whole module. moved, when non-nil, is called
 // with each caller whose body inlining changed.
-func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool, moved func(*ir.Func)) bool {
+//
+// log is consulted only for frozen functions: a memoised compile has already
+// supplied their bodies, so they are not inlined into. They are still in the call
+// graph, still resolved by name and still spliceable, because they are callees
+// like any other.
+func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool, moved func(*ir.Func), log *changeLog) bool {
 	graphStart := time.Now()
 	forceInlineFromEnv(m)
 	cg := buildCallGraph(m)
@@ -270,6 +275,9 @@ func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool, moved fun
 	changed := false
 	for _, f := range scc.order {
 		if f.Start == nil || hasSecondaryEntry(f) {
+			continue
+		}
+		if log.isFrozen(f) {
 			continue
 		}
 		if frameIsSpentFromTheNoSplitReserve(f) {
