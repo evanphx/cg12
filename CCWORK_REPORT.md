@@ -6043,18 +6043,15 @@ symbol names) and one with it off (the committed default). The difference
 between those two is the placement change and nothing else.
 
 ```
-placement rows, whole-program lowering ON : heap 8321, frame 4257   (12 086 sites)
-placement rows, conservative (default)    : heap 8325, frame 4237   (12 077 sites)
-
-frame -> heap   11
+frame -> heap   11 of 12 086 sites
 heap -> frame    0
-disappeared      9
 appeared         0
+disappeared      0
 ```
 
 **Eleven allocation sites out of 12 086 moved from the frame to the heap, and
-none moved the other way.** That is the whole cost of item 1 in placement terms.
-The census's own review questions, answered:
+nothing else in the census moved at all.** That is the whole cost of item 1 in
+placement terms. The census's own review questions, answered:
 
 *Sites that moved HEAP → FRAME* (the correctness-critical direction): none. The
 change can only be conservative — it replaces a devirtualised "this method does
@@ -6080,20 +6077,50 @@ enumerating the program's implementations of that interface. Three of them are
 on the TLS handshake path, once per handshake. The rest are in corpus test
 programs written to exercise exactly this.
 
-*Sites that DISAPPEARED*, all nine: none of them is an allocation that stopped
-happening. Each is the *inlined copy* of a site inside a generated
-`.interfacecall.` wrapper or an interface dispatcher — `field/fe.go:224:2`
-inside `field.Element.Bytes.interfacecall.…`, `p256.go:57:2` inside
-`crypto/hpke.interface{Bytes() []byte}.Bytes`, and so on. Every one of those
-sites is still in the census under its own declared function
-(`field.Element.Bytes`, `Scalar.MultiplyAdd`, `fiat.P256Element.Bytes`). What
-went away is the inlining into the wrapper, which conservative lowering no
-longer enables. The code is gone from the wrapper; the allocation is not gone.
+`TestAllocationCounts`'s `interface_local_method_call` row is the same fact
+counted at runtime: 0 allocations per 100 calls before, 100 after. It is the one
+row in that table where goc is deliberately worse than it was, and its comment
+now says so and says what buying it back would take — devirtualising from what
+the *package* can see, which is what gc does and which does not have this
+problem.
 
-The committed baseline moved by 2468 removed and 541 added lines, and almost all
-of that churn is the symbol renaming of items 2 and 3, not placement: `main`'s
-baseline had the same site listed once per whole-program counter value (six
-copies of one `crypto/internal/fips140/ecdh.fipsSelfTest` line under six
-different `.goc.global.initfunc.<n>.` names, three copies of each
+*The nine sites that disappeared, and then did not.* The first run of this
+measurement showed nine census sites vanishing, all inlined copies inside
+generated `.interfacecall.` wrappers. That was not a placement effect: it was a
+defect in the first cut of item 4, and the corpus caught it. See the next
+section.
+
+The committed baseline moved by 2468 removed and 541 added lines against
+`main`, and almost all of that churn is the symbol renaming of items 2 and 3,
+not placement: `main`'s baseline had the same site listed once per whole-program
+counter value (six copies of one
+`crypto/internal/fips140/ecdh.fipsSelfTest` line under six different
+`.goc.global.initfunc.<n>.` names, three copies of each
 `net/http.methodvalue.…onSettingsTimer` line). Those collapse to one line each,
 which is the same defect this stage removed, visible in a baseline file.
+
+## What the corpus caught: the assertion chain had a side effect
+
+Dropping the `x.(I)` comparison chain broke
+`TestRuntimeReflectiveInterfaceAssertionKeepsMethodReachable`, a corpus program
+that obtains a `*concreteDecoder` only through `reflect` and asks
+`reflect.Type.Implements`. It answered no.
+
+The chain was not only a fast path. **Building it called `ensureTypeTag` and
+`ensureInterfaceItab` on every implementation, and that is what put each one's
+runtime type descriptor — with its method table — and its itab into the
+module.** `runtime.getitab`, the answer the chain fell through to, walks that
+method table. A type the program converts to no interface statically has nothing
+else asking for its descriptor, so dropping the chain dropped the descriptor,
+and both `getitab` and `reflect` then had nothing to find.
+
+The fix (`materialiseInterfaceImplementations`) keeps the side effect and drops
+the code: it walks the same implementations and calls `ensureInterfaceItab` on
+each, emitting no instruction into the function being lowered. That is sound for
+what this stage is about — what has to be a function of the package alone is the
+*IR of the function*, and these calls return symbol names and append to
+`Module.Data` without touching `g.cur` or `g.fn`. The module's data is assembled
+per program either way; it already holds the dispatchers and the itab links.
+
+It also restored the nine census sites: after the fix, the census differs from
+the whole-program control by exactly the eleven placement rows and nothing else.

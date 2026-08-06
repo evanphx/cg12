@@ -7925,6 +7925,32 @@ func (g *gen) ensureInterfaceCallWrapper(method *types.Func) string {
 	return wrapperSymbol
 }
 
+// materialiseInterfaceImplementations emits the runtime type descriptor and the
+// itab of every type in the program that implements target, without emitting
+// anything into the function being lowered.
+//
+// The comparison chain those two callers used to emit was not only a fast path.
+// Building it called ensureTypeTag and ensureInterfaceItab on each
+// implementation, and *that* is what put each one's type descriptor -- with its
+// method table -- and its itab into the module. runtime.getitab, which is the
+// answer the chain fell through to, walks that method table. Dropping the chain
+// therefore dropped the descriptors too, and
+// TestRuntimeReflectiveInterfaceAssertionKeepsMethodReachable caught it: a
+// `*concreteDecoder` that the program only ever obtains through reflect is
+// converted to no interface statically, so nothing else asked for its
+// descriptor, and reflect.Type.Implements answered no.
+//
+// Keeping the side effect and dropping the code is sound for the thing this
+// stage is about. What must be a function of the package alone is the IR of the
+// function being lowered; these calls return symbol names and append to
+// Module.Data, and touch neither g.cur nor g.fn. The module's data is assembled
+// per program either way -- it already holds the dispatchers and the itab links.
+func materialiseInterfaceImplementations(g *gen, targetType types.Type, target *types.Interface) {
+	for _, implementation := range g.interfaceImplementations(target) {
+		g.ensureInterfaceItab(implementation, targetType)
+	}
+}
+
 func (g *gen) interfaceCallReceiver(payload ir.Ref, receiverType types.Type) ir.Ref {
 	if isDirectInterfaceType(receiverType) {
 		receiverClass, supported := scalar(receiverType)
@@ -7947,6 +7973,8 @@ func (g *gen) interfaceTypeWord(dynamicType ir.Ref, targetType types.Type) ir.Re
 	var implementations []types.Type
 	if gocLoweringUsesWholeProgramFacts() {
 		implementations = g.interfaceImplementations(targetInterface)
+	} else {
+		materialiseInterfaceImplementations(g, targetType, targetInterface)
 	}
 	if len(implementations) == 0 {
 		return g.cur.Call(
@@ -10003,6 +10031,8 @@ func (g *gen) interfaceTypeMatch(dynamicTag ir.Ref, targetType types.Type) ir.Re
 	var implementations []types.Type
 	if gocLoweringUsesWholeProgramFacts() {
 		implementations = g.interfaceImplementations(target)
+	} else {
+		materialiseInterfaceImplementations(g, targetType, target)
 	}
 	if len(implementations) == 0 {
 		itab := g.cur.Call(

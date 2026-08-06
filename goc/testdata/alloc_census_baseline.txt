@@ -2689,6 +2689,7 @@ stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:354:2	crypto/int
 stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:354:2	crypto/internal/fips140/edwards25519.projP1xP1.Double	runtime.newobject	crypto_internal_fips140_edwards25519_field_Eleme	heap
 stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:375:2	crypto/internal/fips140/edwards25519.Point.Negate	runtime.newobject	1__crypto_internal_fips140_edwards25519_Point	frame
 stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:425:15	crypto/internal/fips140/edwards25519.affineCached.CondNeg	runtime.newobject	crypto_internal_fips140_edwards25519_field_Eleme	frame
+stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:425:15	crypto/internal/fips140/edwards25519.affineCached.CondNeg.interfacecall.crypto_internal_fips140_edwards25519_affineCache.b53b529d03c4f958	runtime.newobject	crypto_internal_fips140_edwards25519_field_Eleme	frame
 stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:425:15	crypto/internal/fips140/edwards25519.affineLookupTable.SelectInto	runtime.newobject	crypto_internal_fips140_edwards25519_field_Eleme	frame
 stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:43:14	crypto/internal/fips140/edwards25519.checkInitialized	runtime.newobject	crypto_internal_fips140_edwards25519_field_Eleme	frame
 stdlib/src/crypto/internal/fips140/edwards25519/edwards25519.go:43:42	crypto/internal/fips140/edwards25519.checkInitialized	runtime.newobject	crypto_internal_fips140_edwards25519_field_Eleme	frame
@@ -2705,6 +2706,8 @@ stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:120:2	crypto/interna
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:120:2	crypto/internal/fips140/edwards25519/field.Element.Invert	runtime.newobject	crypto_internal_fips140_edwards25519_field_Eleme	heap
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/ecdh.x25519ScalarMult	runtime.newobject	32_byte	frame
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/ecdh.x25519ScalarMult	runtime.newobject	32_byte	heap
+stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/hpke.interface{Bytes() []byte}.Bytes	runtime.newobject	32_byte	frame
+stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/hpke.interface{Bytes() []byte}.Bytes	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/internal/fips140/edwards25519.Point.bytes	runtime.newobject	32_byte	frame
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/internal/fips140/edwards25519.Point.bytes	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/internal/fips140/edwards25519.copyFieldElement	runtime.newobject	32_byte	frame
@@ -2713,10 +2716,14 @@ stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/interna
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/internal/fips140/edwards25519/field.Element.Absolute	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/internal/fips140/edwards25519/field.Element.Bytes	runtime.newobject	32_byte	frame
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/internal/fips140/edwards25519/field.Element.Bytes	runtime.newobject	32_byte	heap
+stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/internal/fips140/edwards25519/field.Element.Bytes.interfacecall.crypto_internal_fips140_edwards25519_field_Eleme.9855b45873abe1af	runtime.newobject	32_byte	frame
+stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/internal/fips140/edwards25519/field.Element.Bytes.interfacecall.crypto_internal_fips140_edwards25519_field_Eleme.9855b45873abe1af	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/internal/fips140/edwards25519/field.Element.Equal	runtime.newobject	32_byte	frame
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/internal/fips140/edwards25519/field.Element.Equal	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/internal/fips140/edwards25519/field.Element.IsNegative	runtime.newobject	32_byte	frame
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/internal/fips140/edwards25519/field.Element.IsNegative	runtime.newobject	32_byte	heap
+stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/internal/fips140/edwards25519/field.Element.IsNegative.interfacecall.crypto_internal_fips140_edwards25519_field_Eleme.c97fcafe4ca6362d	runtime.newobject	32_byte	frame
+stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:224:2	crypto/internal/fips140/edwards25519/field.Element.IsNegative.interfacecall.crypto_internal_fips140_edwards25519_field_Eleme.c97fcafe4ca6362d	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:229:2	crypto/internal/fips140/edwards25519/field.Element.bytes	runtime.newobject	crypto_internal_fips140_edwards25519_field_Eleme	frame
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:229:2	crypto/internal/fips140/edwards25519/field.Element.bytes	runtime.newobject	crypto_internal_fips140_edwards25519_field_Eleme	heap
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe.go:299:18	crypto/internal/fips140/edwards25519/field.Element.Absolute	runtime.newobject	crypto_internal_fips140_edwards25519_field_Eleme	frame
@@ -2735,10 +2742,14 @@ stdlib/src/crypto/internal/fips140/edwards25519/field/fe_generic.go:26:9	crypto/
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe_generic.go:40:9	crypto/internal/fips140/edwards25519/field.addMul19	runtime.newobject	crypto_internal_fips140_edwards25519_field_uint1	frame
 stdlib/src/crypto/internal/fips140/edwards25519/field/fe_generic.go:48:9	crypto/internal/fips140/edwards25519/field.addMul38	runtime.newobject	crypto_internal_fips140_edwards25519_field_uint1	frame
 stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:127:7	crypto/internal/fips140/edwards25519.Scalar.SetUniformBytes	runtime.newobject	crypto_internal_fips140_edwards25519_Scalar	frame
+stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:236:2	crypto/hpke.interface{Bytes() []byte}.Bytes	runtime.newobject	32_byte	frame
+stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:236:2	crypto/hpke.interface{Bytes() []byte}.Bytes	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:236:2	crypto/internal/fips140/ed25519.signWithDom	runtime.newobject	32_byte	frame
 stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:236:2	crypto/internal/fips140/ed25519.signWithDom	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:236:2	crypto/internal/fips140/edwards25519.Scalar.Bytes	runtime.newobject	32_byte	frame
 stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:236:2	crypto/internal/fips140/edwards25519.Scalar.Bytes	runtime.newobject	32_byte	heap
+stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:236:2	crypto/internal/fips140/edwards25519.Scalar.Bytes.interfacecall.crypto_internal_fips140_edwards25519_Scalar_Byte.010e026a1a248e81	runtime.newobject	32_byte	frame
+stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:236:2	crypto/internal/fips140/edwards25519.Scalar.Bytes.interfacecall.crypto_internal_fips140_edwards25519_Scalar_Byte.010e026a1a248e81	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:236:2	crypto/internal/fips140/edwards25519.Scalar.nonAdjacentForm	runtime.newobject	32_byte	frame
 stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:236:2	crypto/internal/fips140/edwards25519.Scalar.nonAdjacentForm	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:236:2	crypto/internal/fips140/edwards25519.Scalar.signedRadix16	runtime.newobject	32_byte	frame
@@ -2746,6 +2757,7 @@ stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:236:2	crypto/internal/
 stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:59:9	crypto/internal/fips140/edwards25519.NewScalar	runtime.newobject	crypto_internal_fips140_edwards25519_Scalar	heap
 stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:66:11	crypto/internal/fips140/ed25519.signWithDom	runtime.newobject	crypto_internal_fips140_edwards25519_Scalar	frame
 stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:66:11	crypto/internal/fips140/edwards25519.Scalar.MultiplyAdd	runtime.newobject	crypto_internal_fips140_edwards25519_Scalar	frame
+stdlib/src/crypto/internal/fips140/edwards25519/scalar.go:66:11	crypto/internal/fips140/edwards25519.Scalar.MultiplyAdd.interfacecall.crypto_internal_fips140_edwards25519_Scalar_Mult.c41d02151966ed7e	runtime.newobject	crypto_internal_fips140_edwards25519_Scalar	frame
 stdlib/src/crypto/internal/fips140/edwards25519/scalarmult.go:144:2	crypto/internal/fips140/edwards25519.Point.VarTimeDoubleScalarBaseMult	runtime.newobject	1__crypto_internal_fips140_edwards25519_Point	frame
 stdlib/src/crypto/internal/fips140/edwards25519/scalarmult.go:176:11	crypto/internal/fips140/edwards25519.Point.VarTimeDoubleScalarBaseMult	runtime.newobject	crypto_internal_fips140_edwards25519_projCached	frame
 stdlib/src/crypto/internal/fips140/edwards25519/scalarmult.go:177:11	crypto/internal/fips140/edwards25519.Point.VarTimeDoubleScalarBaseMult	runtime.newobject	crypto_internal_fips140_edwards25519_affineCache	frame
@@ -2921,6 +2933,8 @@ stdlib/src/crypto/internal/fips140/nistec/fiat/p224_invert.go:34:11	crypto/inter
 stdlib/src/crypto/internal/fips140/nistec/fiat/p224_invert.go:35:11	crypto/internal/fips140/nistec/fiat.P224Element.Invert	runtime.newobject	crypto_internal_fips140_nistec_fiat_P224Element	frame
 stdlib/src/crypto/internal/fips140/nistec/fiat/p224_invert.go:36:11	crypto/internal/fips140/nistec/fiat.P224Element.Invert	runtime.newobject	crypto_internal_fips140_nistec_fiat_P224Element	frame
 stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:42:23	crypto/internal/fips140/nistec/fiat.P256Element.IsZero	runtime.newobject	32_byte	frame
+stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:57:2	crypto/hpke.interface{Bytes() []byte}.Bytes	runtime.newobject	32_byte	frame
+stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:57:2	crypto/hpke.interface{Bytes() []byte}.Bytes	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:57:2	crypto/internal/fips140/nistec.P256Point.SetBytes	runtime.newobject	32_byte	frame
 stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:57:2	crypto/internal/fips140/nistec.P256Point.SetBytes	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:57:2	crypto/internal/fips140/nistec.P256Point.bytes	runtime.newobject	32_byte	frame
@@ -2929,6 +2943,8 @@ stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:57:2	crypto/internal/fips
 stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:57:2	crypto/internal/fips140/nistec.P256Point.bytesX	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:57:2	crypto/internal/fips140/nistec/fiat.P256Element.Bytes	runtime.newobject	32_byte	frame
 stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:57:2	crypto/internal/fips140/nistec/fiat.P256Element.Bytes	runtime.newobject	32_byte	heap
+stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:57:2	crypto/internal/fips140/nistec/fiat.P256Element.Bytes.interfacecall.crypto_internal_fips140_nistec_fiat_P256Element_.0a505424882d6ef3	runtime.newobject	32_byte	frame
+stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:57:2	crypto/internal/fips140/nistec/fiat.P256Element.Bytes.interfacecall.crypto_internal_fips140_nistec_fiat_P256Element_.0a505424882d6ef3	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:57:2	crypto/internal/fips140/nistec/fiat.P256Element.Equal	runtime.newobject	32_byte	frame
 stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:57:2	crypto/internal/fips140/nistec/fiat.P256Element.Equal	runtime.newobject	32_byte	heap
 stdlib/src/crypto/internal/fips140/nistec/fiat/p256.go:57:2	crypto/internal/fips140/nistec/fiat.P256Element.IsZero	runtime.newobject	32_byte	frame

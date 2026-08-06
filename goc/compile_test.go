@@ -1569,8 +1569,14 @@ func main() {
 				t.Fatalf("sync.Map.LoadOrStore aggregate result = %#v", function.RetAgg)
 			}
 		default:
-			if !strings.Contains(function.Name, "internal/sync.HashTrieMap") ||
-				!strings.Contains(function.Name, "LoadOrStore") {
+			// The instantiation itself, not a wrapper generated while lowering
+			// it. A method value inside the instantiation is now named after
+			// the function it is written in --
+			// `internal/sync.HashTrieMap.LoadOrStore[any,any].methodvalue.internal/sync.Mutex.Unlock.141.8`
+			// -- which matched a substring test, which then asked a void
+			// wrapper for an aggregate result.
+			if !strings.HasPrefix(function.Name, "internal/sync.HashTrieMap.LoadOrStore[") ||
+				!strings.HasSuffix(function.Name, "]") {
 				continue
 			}
 			foundGeneric = true
@@ -1997,7 +2003,12 @@ func main() { _ = tests[0].expect[0].line }
 	foundInitializer := false
 	heapAllocations := 0
 	for _, function := range module.Funcs {
-		if strings.Contains(function.Name, "global.initfunc") && strings.HasSuffix(function.Name, ".main.tests") {
+		// The initializer symbol is content-named from the package and the
+		// declaration it belongs to -- `.goc.global.initfunc.main_tests.<digest>`
+		// -- rather than ending in the package and name, because it used to end
+		// in a rank over every package the program loaded. See
+		// dynamicInitializerKey.
+		if strings.HasPrefix(function.Name, ".goc.global.initfunc.main_tests.") {
 			foundInitializer = true
 			for _, block := range function.Blocks {
 				for _, instruction := range block.Instrs {

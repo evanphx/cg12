@@ -192,12 +192,24 @@ var gocAllocationCounts = []struct {
 	// does. These numbers are the price of that bluntness, and lowering them is
 	// a real optimisation someone could do.
 	// An address converted to an interface type on the way into a local, then
-	// only called through. Parity. Two rules meet here: the emitter's
-	// nonEscapingAddress now asks the assignment question at every step of its
-	// climb rather than only of the address itself, so the conversion no longer
-	// ends the walk at its default case; and the method call is answered by
-	// asking every implementation the program can dispatch to. 1.00 -> 0.
-	{"interface_local_method_call", 0, 0, "the object goes where the local goes, and the one implementation keeps nothing"},
+	// only called through. This row was 0 and is 100 again, and it is the one
+	// place in this table where goc is deliberately worse than it was.
+	//
+	// It used to be 0 because the escape walk answered the method call by asking
+	// every implementation the program can dispatch to. That answer is a fact
+	// about the whole program, and reusing a lowered function that depends on it
+	// in a second program with one more implementation binds a devirtualised
+	// call to the wrong method -- so per-package caching and this optimisation
+	// cannot both be had, and the choice made was the cache. See
+	// gocLoweringUsesWholeProgramFacts, which restores the old answer for
+	// measurement, and CCWORK_REPORT.md for the eleven allocation sites in the
+	// whole corpus that moved with it.
+	//
+	// gc charges 0 here because it devirtualises within one function, which is a
+	// per-package fact and does not have this problem. Buying the row back means
+	// doing that: devirtualise from what the package can see, not from what the
+	// program contains.
+	{"interface_local_method_call", 100, 0, "the receiver of an interface method call is assumed retained, because the implementations are a whole-program fact"},
 	// The direction that got *more* expensive, and had to. `keep` stores its
 	// receiver in a package-level variable, so the object cannot be in the
 	// caller's frame -- and it was, because an immediately called method used to

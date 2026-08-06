@@ -34,6 +34,11 @@ var wholeCompilationGenFields = []string{
 	"functionDecls",
 	"noWriteBarrierFunctions",
 	"interfaceMethods",
+	// interfaceMethodSymbols is interfaceMethods keyed by dispatcher symbol.
+	// It is derived from a collector pass before lowering starts and read by
+	// requireInterfaceMethod, so every derived generator has to see the same
+	// one; a wrapper that saw an empty map would reject every dispatch.
+	"interfaceMethodSymbols",
 	"interfaceItabs",
 	"interfaceCallWrappers",
 	// The generated interface-method dispatchers, and the tail of the module
@@ -93,6 +98,7 @@ func fullyPopulatedGen() *gen {
 		functionDecls:               map[*types.Func]functionDecl{},
 		noWriteBarrierFunctions:     map[*types.Func]bool{},
 		interfaceMethods:            map[*types.Func]bool{},
+		interfaceMethodSymbols:      map[string]bool{},
 		interfaceItabs:              map[string]string{},
 		interfaceCallWrappers:       map[string]string{},
 		interfaceDispatchers:        map[string]bool{},
