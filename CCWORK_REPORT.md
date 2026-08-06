@@ -2519,3 +2519,95 @@ alone — which is what the monolithic column of the tables above was measured
 with, since `CG12_NOCACHE=1` would have disabled that too and measured something
 else.
 
+## Auditing the key, which now decides every compile
+
+The key already covered the pack version, target, `-O`, the package list, the
+placement policy, the optimisation pipeline, the goc binary's bytes and the
+vendored stdlib tree's bytes. Auditing it against what a default-on cache now
+depends on found three gaps, two of them real.
+
+**Gap 1 — the environment beyond the two variables that were named.** The key
+named `GOC_OPT_PIPELINE`/`GOC_OPT_SKIP` (via `opt.PipelineIdentity`) and the text
+layout (via `arm64.TextLayoutIdentity`). It named nothing else. A sweep of every
+`os.Getenv` in the non-test tree found these, all of which change what goc emits
+and none of which changed the key:
+
+| variable | what it changes |
+|---|---|
+| `GOC_ESCAPE_SUMMARIES=0` | turns off escape summaries — allocation placement |
+| `GOC_PAYLOAD_FOLD=0` | turns off payload folding — allocation placement |
+| `CG12_NO_IFCONVERT` | turns off if-conversion |
+| `CG12_FORCE_INLINE`, `CG12_NO_COSTINLINE`, `CG12_NO_AGGINLINE` | the inliner |
+| `GOC_NO_NOSPLIT_INLINE`, `GOC_NOSPLIT_LIMIT`, `GOC_NOSPLIT_INDIRECT` | the nosplit frame budget, which decides nosplit inlining |
+| `GOC_STDLIB_OVERLAY` | **which files a standard library package is built from** |
+
+The last is the sharpest: the key hashes the *contents* of the vendored tree, and
+`GOC_STDLIB_OVERLAY=off` changes nothing in the tree — only which of its files
+are selected. A hashed tree cannot see it.
+
+The fix is deliberately blunt: **every `GOC_` and `CG12_` variable, name and
+value, sorted, goes into the key**, except the four that name where the cache is
+rather than what is in it. The alternative is a maintained list of the variables
+that matter, and a switch added to the optimiser and not added to that list is a
+silent miscompile. A sweep of the namespace cannot miss one. What it costs is a
+miss when a diagnostic-only variable is set — and a miss is a slow build, which
+is the direction this cache is allowed to be wrong in.
+
+It also closes a subtlety: `arm64.TextLayoutIdentity()` reads its environment at
+package init (`var layout = layoutFromEnvironment()`), so a process that changes
+`GOC_FUNC_ALIGN` after start gets a stale identity. The sweep covers those
+variables directly and does not care when they were read.
+
+**Gap 2 — the C toolchain, which the old comment named as its own weakest link.**
+It was the `cc --version` banner: a release, not a binary. That was tolerable
+while a pack came only from an explicit command. It is not tolerable now. The
+identity is three things:
+
+  - the banner, cheap, names the release;
+  - the **bytes of the `cc` driver and of the `as` it reports it will exec**
+    (`cc -print-prog-name=as`), exact for those two binaries;
+  - the **bytes of the object `cc` actually produces for a fixed probe** — the
+    only one that measures behaviour rather than provenance, and so the only one
+    that catches a changed shared library under an unchanged `as`.
+
+The probe is a frame, an `adrp`/`:lo12:` pair, a `bl` to an undefined symbol, an
+FP instruction and an aligned datum — the constructs the Plan 9 sidecar is made
+of. What is still outside the key is the assembler's behaviour on instructions
+the probe does not contain. That is a sample, not a proof, and it is stated as
+one; it is strictly stronger than a version string. Cost: 26 ms, once per
+process. The probe object was checked byte-identical across directories before
+being made part of the key.
+
+**Gap 3 (not real) — the `-m` escape diagnostics.** These are printed by a pass
+that runs *after* the split, over a module the subtraction has taken definitions
+out of, so a pack would change what `-m` prints. Rather than key on it, `-m`
+declines auto-packing: a compile asked for its escape decisions gets the
+whole-program compile whose decisions those are.
+
+### Verified by construction
+
+`TestEveryChangeThatWouldMakeAPackWrongProducesAMiss` drives the real compiler,
+warms the cache, checks it is warm, then changes one thing per arm and requires a
+miss. All pass:
+
+| changed | result |
+|---|---|
+| the compiler binary (rebuilt `-ldflags=-s -w`: different bytes, identical behaviour) | miss |
+| `-O` | miss |
+| the placement policy (`GOC_FUNC_ALIGN=64`) | miss |
+| the optimisation pipeline (`GOC_OPT_PIPELINE=bounded`) | miss |
+| the standard library tree (a file added, then a byte changed) | miss |
+
+and `TestTheKeyMovesWhenTheEnvironmentChangesWhatTheCompilerEmits` does the same
+for fourteen environment switches including `GOC_STDLIB_OVERLAY` and a variable
+that does not exist yet, while requiring that `CG12_PACK_CACHE`,
+`CG12_PACK_CACHE_MAX_BYTES` and `GOC_AUTOPACK_DEBUG` do *not* move it.
+
+### One thing the key cannot save you from, stated plainly
+
+Every existing pack in the shared cache is unreachable under the new key. That is
+correct — the old key did not cover the environment or the assembler, so an old
+pack is a pack whose provenance is not fully known — but it means the first run
+after this change is cold for everything, and the 45 GB already there is garbage
+that only eviction reclaims.
+
