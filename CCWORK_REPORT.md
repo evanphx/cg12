@@ -2960,3 +2960,184 @@ Reproducing the 3m58s of §8 to within two seconds. Three commits on
   capabilities on either arm, either determinism sweep, `test-ruby`,
   `test-goc-cmd`, the coverage report, any comparison against `main`, a rare
   intermittent fault, or anything timing.
+
+# Why concurrent compiles in one process change escape placement
+
+Branch `ccwork/concurrent-escape-drift`, off `main` (`f67d5da`).
+
+## The answer, in one line
+
+`goc/escapesummary_test.go` writes `opt.EscapeSummaries` -- a package-level
+`bool` in the compiler that every compile in the process reads -- and holds it
+at `false` across six whole-program compiles. Any other test compiling during
+that window gets the analysis with its cross-function fact table switched off,
+which is the "assume every call escapes its arguments" arm. That is the
+conservative drift. It is a plain data race on a `bool`, not anything about the
+escape walk itself.
+
+The perturbation is not intrinsically conservative. It follows the knob, and the
+knob's *default* is what decides the direction -- see "The permissive direction"
+below.
+
+## The reduction
+
+`analysis/escapedrift`, three modes, smallest first.
+
+### Ceiling: the knob alone moves placement
+
+    $ go run ./analysis/escapedrift -mode knob -victim goc/testdata/hello.go
+    227 allocation decisions
+    summaries on -> off             3 moved to the heap,    0 moved to a frame
+                                   first to heap:  internal/strconv.roundShortest 292:11 runtime.newobject internal_strconv_decimal
+    summaries off -> on again       0 moved to the heap,    3 moved to a frame
+    on -> on again (control)        0 moved to the heap,    0 moved to a frame
+
+Three allocations, `hello.go` compiled whole-program. The control row is the
+important one: two compiles at the same knob setting agree exactly, so the
+compile is deterministic and the knob is the whole difference.
+
+### The reduction proper: two goroutines, a handshake, deterministic
+
+    $ go run ./analysis/escapedrift -mode pair -victim goc/testdata/hello.go
+    victim goc/testdata/hello.go, two goroutines, handshake (default knob true, held at false)
+    227 allocation decisions compiled alone
+    alone -> concurrent             3 moved to the heap,    0 moved to a frame
+                                   first to heap:  internal/strconv.roundShortest 292:11 runtime.newobject internal_strconv_decimal
+
+Goroutine A does nothing but what `TestEscapeSummaryCost` does -- save
+`opt.EscapeSummaries`, set it, put it back. Goroutine B compiles the program.
+The handshake puts B's whole compile inside A's window, so there is no timing
+and no repetition: it flips every run.
+
+`-mode race` drops the handshake and gives goroutine A the six compiles the real
+test does. It perturbs too (1 of 1 rounds), which is the statistical form the
+suite sees.
+
+### What the race detector says
+
+    $ go run -race ./analysis/escapedrift -mode race -spin -victim goc/testdata/hello.go
+    WARNING: DATA RACE
+    Read at 0x000000906749 by main goroutine:
+      github.com/evanphx/cg12/opt.LowerHeapAllocations()
+          opt/escape.go:117
+      github.com/evanphx/cg12/goc.compile()
+      github.com/evanphx/cg12/goc.CompileExecutable()
+    Previous write at 0x000000906749 by goroutine 75:
+      main.main.func3()
+
+A plain unsynchronised `bool`. Worth knowing: the detector reports this only in
+`-spin` mode, where the writing goroutine does not itself compile. When BOTH
+goroutines compile -- the real suite's shape -- two runs under `-race` reported
+nothing, because the compiles contend on shared locks inside the compile path
+(`goc/source_world.go`'s `sourceWorldsMutex` among them) and those locks order
+the write before the read. The value read is still the wrong one. So `-race` on
+the suite is not a reliable net for this; it is a race condition that is only
+sometimes a data race.
+
+## Why the earlier eliminations all held
+
+Everything the previous job ruled out really was innocent, which is why this was
+hard to see: the perturbation is not in the escape analysis, in a cache, in a
+budget, in a pool, or in map order. It is one `bool` a *test* writes.
+
+- `CG12_NOCACHE=1` changes nothing, because the source world was never involved.
+- The analysis has no time or step budget that load could move; `escapeRoundCap`
+  is 64 rounds of a fixed point, counted in rounds.
+- No compiler source reads `GOMAXPROCS`, `NumCPU`, `MemStats` or the clock. The
+  hits under `analysis/` are standalone measurement binaries, not the compile
+  path; the hits under `goc/testdata/` are programs being compiled.
+- The other package-level knob the tests move, `opt.SetEscapeDiagLevel` (from
+  `goc/escapediag_test.go` and `goc/gcdiffreason_test.go`), is placement-neutral,
+  measured rather than assumed:
+
+      $ go run ./analysis/escapedrift -mode diag -victim goc/testdata/hello.go
+      -m=0 -> -m=2                    0 moved to the heap,    0 moved to a frame
+
+  So it is not a second mechanism. It still redirects a process-global writer,
+  which is its own reason for those tests to stay sequential.
+
+`opt.EscapeSummaries` is the only write to compiler-visible global state any test
+in the tree makes. `goc`'s tests are almost all in `package goc_test`, so they
+can only reach exported identifiers; the ten internal ones write no package
+global.
+
+## The exact path
+
+`goc/escapesummary_test.go:300` -- `TestEscapeSummaryCost`, which runs by
+default (nothing skips it) and compiles `testdata/stdlib_crypto_ecdsa.go` six
+times:
+
+```go
+compileWith := func(summaries bool) (time.Duration, *ir.Module) {
+	previous := opt.EscapeSummaries
+	opt.EscapeSummaries = summaries
+	defer func() { opt.EscapeSummaries = previous }()
+	for round := 0; round < rounds; round++ {   // rounds = 3
+		compiled, err := goc.CompileExecutable(*escapeSummaryProgram, source)
+		...
+```
+
+`off, _ := compileWith(false)` holds the knob at `false` for three whole-program
+compiles of a crypto/ecdsa program -- tens of seconds. At `-parallel 32`, every
+other test compiling in that window reads the wrong knob at `opt/escape.go:117`:
+
+```go
+var facts *EscapeFacts
+if EscapeSummaries {
+	facts = ComputeEscapeFacts(module)
+}
+```
+
+With `facts == nil`, `LowerHeapAllocations` cannot tell what a callee does with a
+pointer it is handed, and every call falls into the assume-the-worst arm. That
+is the conservative drift, and it is why it is confined to the three placement
+tests: they are the only ones that assert where an allocation went.
+
+The second writer, `compileCorpusForLoweringStats` at line 386, is reached only
+from `TestEscapeSummaryPromotionRate`, which is flag-gated behind
+`-escape-promotion-rate` and skips in a normal run. `TestEscapeSummaryCost` is
+the live one.
+
+## Can it be perturbed the OTHER way? Yes, and it is easy
+
+"Conservative direction only" is not a property of the mechanism. The direction
+is decided by which way the knob is being moved, and that is decided by the
+knob's default -- `GOC_ESCAPE_SUMMARIES`, an environment variable. The suite
+happens to run with it unset, so the default is on and the test can only move it
+off. Set it the way its own doc comment says to set it for a bisection, and the
+same reduction perturbs the other way:
+
+    $ GOC_ESCAPE_SUMMARIES=0 go run ./analysis/escapedrift -mode pair -victim goc/testdata/hello.go
+    victim goc/testdata/hello.go, two goroutines, handshake (default knob false, held at true)
+    227 allocation decisions compiled alone
+    alone -> concurrent             0 moved to the heap,    3 moved to a frame
+                                   first to frame: internal/strconv.roundShortest 292:11 runtime.newobject internal_strconv_decimal
+
+Three allocations placed in a FRAME that the same compile alone put on the heap.
+That is the permissive direction, produced on demand.
+
+## Is it a latent correctness bug? No -- but not for the stated reason
+
+It is benign, and the argument is not "the drift is conservative".
+
+Both knob settings are placements the compiler is willing to ship. On is what
+ships; off is the same analysis with a strictly smaller fact base, which can only
+over-approximate escape. So a perturbed compile lands on one of two sound
+answers, never on a third. The permissive perturbation above produces exactly the
+placement the shipped default produces -- it is only "permissive" relative to a
+baseline taken with the knob off.
+
+So: no shipped defect, and none reachable. `goc` compiles one program per
+process, and `goc compile-batch` reads its stream strictly in sequence within
+each worker, so nothing in production is ever inside the window. But two things
+the earlier disposition assumed are not true:
+
+1. **The drift is not intrinsically conservative.** It follows an environment
+   variable. Anyone who runs the suite under `GOC_ESCAPE_SUMMARIES=0` -- the
+   documented way to bisect a placement -- gets frame placements a serial run
+   would not produce, in the tests whose whole job is to assert placement. That
+   is a bisection that lies to you.
+2. **Escape placement does not depend on process load.** It depends on one
+   `bool` that one test writes. That is a narrower and more fixable problem than
+   "concurrent compiles perturb the analysis", which is what the list's header
+   comment currently says.
