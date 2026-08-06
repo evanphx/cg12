@@ -220,3 +220,74 @@ func TestWireNumbersSurviveTheBurnedSlots(t *testing.T) {
 	assert.Empty(t, opTable[OSetReg+2].name, "the second slot after OSetReg is the burned OGetCallerSP")
 
 }
+
+// The format carries a content digest of its own payload, so a unit that is the
+// right version and not the right bytes is a decode error rather than a module.
+//
+// Before it, the only integrity check a reader had was structural -- and the
+// memo cannot use the structural one (see ir.DecodeModuleUnverified), so it
+// bolted a sha256 on from outside. A digest a caller has to remember to keep is
+// a digest some caller does not keep; in the header it is the decoder's job.
+func TestBinaryRejectsCorruptedContent(t *testing.T) {
+	data, err := richModule().MarshalBinary()
+	require.NoError(t, err)
+
+	// Every byte of the payload is covered: flip one in the middle of the funcs.
+	corrupt := append([]byte(nil), data...)
+	corrupt[len(corrupt)-16] ^= 0x01
+	_, err = DecodeModule(corrupt)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "digest")
+
+	// A payload byte immediately after the header, too -- the digest starts where
+	// the header ends, so an off-by-one there would leave the first field unguarded.
+	corrupt = append([]byte(nil), data...)
+	corrupt[binHeaderSize] ^= 0x01
+	_, err = DecodeModule(corrupt)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "digest")
+
+	// And the check is not vacuous: the untouched bytes decode.
+	_, err = DecodeModule(data)
+	require.NoError(t, err)
+}
+
+// The digest is checked before the payload is read, so it also catches the
+// corruption a structural decode would have accepted -- and it is checked by
+// DecodeModuleUnverified too, which is the entry point a cache uses precisely
+// because it cannot run the verifier.
+func TestBinaryDigestGuardsTheUnverifiedPath(t *testing.T) {
+	data, err := richModule().MarshalBinary()
+	require.NoError(t, err)
+	corrupt := append([]byte(nil), data...)
+	corrupt[len(corrupt)-16] ^= 0x01
+	_, err = DecodeModuleUnverified(corrupt)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "digest")
+}
+
+// A version mismatch reports itself as one. A stale cache is the ordinary case
+// and the diagnostic that names it is worth more than "corrupt".
+func TestBinaryReportsVersionBeforeDigest(t *testing.T) {
+	data, err := richModule().MarshalBinary()
+	require.NoError(t, err)
+	data[len(binMagic)] = binVersion + 1
+	_, err = DecodeModule(data)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "version")
+	assert.NotContains(t, err.Error(), "digest")
+}
+
+// The digest is a function of the payload, so it does not disturb the property
+// the cache is built on: equal modules encode to equal bytes.
+func TestBinaryDigestIsDeterministic(t *testing.T) {
+	m := richModule()
+	a, err := m.MarshalBinary()
+	require.NoError(t, err)
+	b, err := m.MarshalBinary()
+	require.NoError(t, err)
+	assert.Equal(t, a, b)
+	assert.Equal(t, a[len(binMagic)+1:binHeaderSize], b[len(binMagic)+1:binHeaderSize])
+	assert.NotEqual(t, make([]byte, binDigestSize), a[len(binMagic)+1:binHeaderSize],
+		"the reserved digest bytes must have been filled in")
+}

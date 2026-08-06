@@ -1,6 +1,8 @@
 package ir
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,7 +13,9 @@ import (
 // The on-disk format lets a compiled unit (an optimized module) be cached to
 // disk and reloaded, skipping the front-end and optimizer. It is a compact,
 // versioned binary encoding: a magic tag and a version byte guard against stale
-// or foreign caches (a mismatch is a decode error, so the caller recompiles).
+// or foreign caches (a mismatch is a decode error, so the caller recompiles),
+// and a content digest guards against a unit that is the right version and not
+// the right bytes.
 //
 // Pointer references — blocks, and aggregate types — are encoded as indices:
 // blocks by position within their function, aggregate types by position in a
@@ -20,7 +24,38 @@ import (
 const (
 	binMagic   = "cg12"
 	binVersion = 21
+	// binDigestSize is the width of the content digest that follows the version
+	// byte. See binHeaderSize.
+	binDigestSize = sha256.Size
+	// binHeaderSize is magic, version, digest -- everything before the payload the
+	// digest covers.
+	binHeaderSize = len(binMagic) + 1 + binDigestSize
 )
+
+// The digest is the sha256 of everything after it, written into the header after
+// the payload is built and checked before the payload is read.
+//
+// A magic tag says "this is a cg12 unit" and a version byte says "of a vintage I
+// can read". Neither says "and these are the bytes that were written", which is
+// the question a cache actually has to answer: a truncated write, a half-flushed
+// page, a file two writers raced on, a unit spliced from two others -- all of
+// them keep the magic and the version and are not the unit. Before this, a
+// corrupt unit decoded into whatever the corruption happened to describe, and
+// what came back was a module the compiler would go on to emit code from.
+//
+// It is in the format rather than beside it because a fingerprint a caller has to
+// remember to keep is a fingerprint some caller does not keep. memo.FuncDigest
+// bolted sha256 on from outside and got integrity for the memo's own reads; every
+// other reader of the format -- ir.CloneFunc, cmd/cg12, anything a later cache
+// grows -- got none. In the header, the check is the decoder's, and no caller can
+// forget it.
+//
+// sha256 and not a cheap checksum, for two reasons. The units this covers are
+// already content-addressed by sha256 elsewhere in the tree, so the format now
+// speaks the same language as its callers. And the cost is not where it looks: a
+// whole-module encode of goc's hello.go is 100 MB and hashes in tens of
+// milliseconds against a compile measured in seconds, while ir.CloneFunc's units
+// are single functions of a few kilobytes.
 
 // MarshalBinary encodes the module to cg12's binary unit format.
 func (m *Module) MarshalBinary() ([]byte, error) {
@@ -28,6 +63,8 @@ func (m *Module) MarshalBinary() ([]byte, error) {
 	e := &enc{typeIdx: typeIdx}
 	e.buf = append(e.buf, binMagic...)
 	e.u8(binVersion)
+	// Reserve the digest; it is filled in at the end, over everything after it.
+	e.buf = append(e.buf, make([]byte, binDigestSize)...)
 	e.boolean(m.Runtime)
 	e.str(m.GoModuleData)
 	e.boolean(m.GoHasMain)
@@ -120,6 +157,8 @@ func (m *Module) MarshalBinary() ([]byte, error) {
 	for _, f := range m.Funcs {
 		e.encFunc(f)
 	}
+	sum := sha256.Sum256(e.buf[binHeaderSize:])
+	copy(e.buf[len(binMagic)+1:], sum[:])
 	return e.buf, nil
 }
 
@@ -149,9 +188,20 @@ func decodeModule(data []byte, verify bool) (*Module, error) {
 		return nil, errors.New("ir: not a cg12 unit (bad magic)")
 	}
 	d := &dec{buf: data, pos: len(binMagic)}
+	// Version before digest: a stale cache is the ordinary case and deserves the
+	// diagnostic that names it, not "corrupt".
 	if v := d.u8(); v != binVersion {
 		return nil, fmt.Errorf("ir: unit format version %d, want %d", v, binVersion)
 	}
+	if len(data) < binHeaderSize {
+		return nil, errors.New("ir: truncated unit (no content digest)")
+	}
+	want := data[len(binMagic)+1 : binHeaderSize]
+	if got := sha256.Sum256(data[binHeaderSize:]); !bytes.Equal(got[:], want) {
+		return nil, fmt.Errorf("ir: unit content digest %x, want %x -- the bytes are not the "+
+			"bytes that were written", got[:8], want[:8])
+	}
+	d.pos = binHeaderSize
 
 	m := NewModule()
 	m.Runtime = d.boolean()
