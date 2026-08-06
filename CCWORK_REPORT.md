@@ -2610,7 +2610,8 @@ anything.
 | GC reducer `runtime_gc_type_mask_padding` `-O`, `GOMAXPROCS=3` | 0/20 at `GOGC=10` and default | **0/20 at `GOGC=10`, 0/20 at default** |
 | `go test ./ir` | pass | **PASS** (whole package, including the four new verifier tests and the two repaired round-trip fixtures) |
 | whole-module round trip, 4 configurations | decode | **decode OK and re-encode byte-identical** in all four |
-| determinism, and branch vs `main` byte-for-byte | byte-identical | *(recorded below when the run completes)* |
+| determinism on this branch | byte-identical | **406/406 identical** across two `-O` corpus rounds; 131 of them identical a third time from a separate pool |
+| branch vs `main` byte-for-byte | — | **406/406 differ**, expected and explained: the fix re-enables `InlineIntoNoSplitCallers` for closures. `hello.go` `.text` +8,064 bytes; verified by bisect to be the verifier's answer and not the binary's layout |
 
 The three new verifier tests and the round-trip test were each confirmed to fail
 on `main`'s `ir/verify.go` with the test files in place, and to pass with the
@@ -2758,4 +2759,28 @@ The allocation census is **unchanged**, so there is no census delta to review
 site by site: the extra inlining moves code into `nosplit` callers without
 moving any allocation. That is the guard's question answered directly — code
 changed, allocation placement did not.
+
+## What I would tell the next person
+
+1. **A verifier is not a passive observer here.** `ir.CloneFunc` clones through
+   `MarshalBinary`/`DecodeModule`, and `DecodeModule` ends with `VerifyModule`.
+   Anything the verifier rejects is therefore un-clonable, and every pass that
+   clones-to-measure reads that as "cannot do this" rather than as an error. A
+   false positive in `ir.Verify` is an optimisation switched off in silence.
+   That coupling is not obvious from either file and is now written down in
+   `ir/verify.go`.
+
+2. **`ir.Verify` now runs over the corpus** (`TestIRVerifyAudit`), with no
+   baseline, inside the existing audit pass. That is the cheap durable part.
+
+3. **A whole module round-trips**, before and after `-O`, byte-identically, so
+   the build-cache work is unblocked on this axis.
+
+4. **One thing left open, deliberately.** `arm64/nosplit_measure.go:76` says
+   dropping an unmeasurable function "understates the headroom of everything
+   that calls it, which is the safe direction". By `stackcheck`'s own documented
+   rule — an unresolved callee ends a chain — dropping it looks like the
+   *unsafe* direction. The fix makes all 465 measurable so the question is no
+   longer load-bearing for closures, but the comment and the rule still
+   contradict each other and someone should decide which is right.
 
