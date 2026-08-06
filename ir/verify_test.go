@@ -102,7 +102,7 @@ func TestVerifyCatchesAPhiFromANonPredecessor(t *testing.T) {
 // instruction assigns it and it is not a parameter -- and reading it is not a
 // use before definition. Every closure, deferwrap, gowrap and methodvalue goc
 // emits that touches a captured variable has this shape, and the verifier used
-// to reject all of them: 4.2% of the functions in a whole-program compile.
+// to reject all of them: 4-6% of the functions in a whole-program compile.
 func TestVerifyAcceptsTheIncomingClosureContext(t *testing.T) {
 	f := newFuncWith(func(f *Func, b *Block) {
 		f.HasClosureContext = true

@@ -20,14 +20,21 @@ import (
 //
 // The test exists because that answer was not the one the tree gave. ir.Verify
 // has been there for a while, and nothing on the path from the front end to the
-// backend ever called it -- its only callers are ir.DecodeModule and the
-// lifter, neither of which sees a goc compile. So goc emitted IR its own
-// verifier rejected on 4.2% of functions (every closure, deferwrap, gowrap and
-// methodvalue that read a captured variable), for as long as it took someone to
-// try decoding a module and find out. The defect was in the verifier -- its
-// model of function entry knew about parameters and not about the closure
-// environment the ABI supplies; see ir.defineClosureContext -- but the reason it
-// survived is that nothing ran it. This is what runs it.
+// backend ever called it: ir.DecodeModule and the lifter do, and neither sees a
+// goc compile, and opt/jumpthread does under CG12_JT_CHECK, where it panicked
+// the compiler on the first closure it touched -- so that arm was unusable too,
+// which is the same silence by another route.
+//
+// So goc emitted IR its own verifier rejected -- 125 of 2744 functions (4.6%)
+// for testdata/hello.go, 831 of 14568 (5.7%) for the http program, 7899
+// distinct functions over this whole corpus -- and it went unnoticed for as
+// long as it took someone to try decoding a module and find out. Every one was
+// a closure, deferwrap, gowrap or methodvalue reading a captured variable.
+//
+// The defect was in the verifier: its model of function entry knew about
+// parameters and not about the closure environment the ABI supplies. See
+// ir.defineClosureContext. But the reason it survived is that nothing ran it.
+// This is what runs it.
 //
 // It is nearly free: one linear walk per function, inside a corpus pass whose
 // cost is the compiles.

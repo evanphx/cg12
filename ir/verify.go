@@ -161,9 +161,10 @@ func verifySSA(f *Func) error {
 // stabilizeClosureContext copies it out of the volatile register at entry).
 //
 // Seeding defined from Params alone therefore missed it, and every closure,
-// deferwrap, gowrap and methodvalue that reads a captured variable -- 4.2% of
-// the functions goc emits on an ordinary whole-program compile -- looked like a
-// use before definition. The IR was well formed; the verifier's model of entry
+// deferwrap, gowrap and methodvalue that reads a captured variable looked like a
+// use before definition: 4-6% of the functions goc emits on an ordinary
+// whole-program compile (125 of 2744 for a hello-world, 831 of 14568 for an
+// http client and server). The IR was well formed; the verifier's model of entry
 // was one input short.
 //
 // The exemption is granted only where the function claims it. The flag and the

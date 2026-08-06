@@ -144,7 +144,7 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 				// ir.Verify is an instrument the tree already had and did not
 				// run on its own output: nothing between the front end and the
 				// backend called it, so the only callers were the binary decoder
-				// and the lifter, neither of which sees a goc compile. 4.2% of
+				// and the lifter, neither of which sees a goc compile. 4-6% of
 				// the functions goc emitted failed it and nothing said so. It
 				// costs one linear walk per function against a compile that
 				// dominates everything here, so the corpus pass is where it
