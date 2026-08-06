@@ -3671,3 +3671,53 @@ changes what the compiler emits.
 The `stdlib/src/runtime/stubs.go` edits for the leaf experiment were made in a
 throwaway `git worktree` and restored with `git checkout --` after each run; both
 that worktree and this one are clean.
+
+# Option C, stage 2: the memoiser
+
+Branch `ccwork/optionc-stage2`, cut from `ccwork/optionc-stage1` (`67daeb8`).
+
+Host: aarch64 Linux, 64 cores, 250 GiB RAM, go1.26.1. All figures are `goc -O`
+whole-program arm64 builds, the same two programs stage 1 and `BUILD_CACHE.md`
+Part 2 used.
+
+## Blocker 2, first, because it is one line: it is not the changeLog
+
+Stage 1 measured that splitting `DefaultPipeline` at the Option B/C boundary
+moves three functions -- `internal/strconv.trimZeros`, `runtime.decoderune`,
+`syscall.Write` -- and attributed it to the `changeLog`. It is not the
+`changeLog`. It is the **jump-thread budget**, and the distinction matters
+because the two have opposite fixes.
+
+`cmd/splitprobe` runs a 2x2 over the two things a split changes -- whether the
+second half gets a fresh `changeLog`, and whether it gets fresh *pass objects*:
+
+| arm | pass objects | changeLog | functions differing from unsplit |
+|---|---|---|---:|
+| `unsplit` | one pipeline | one | — |
+| `split-rebuilt` (stage 1's shape, `cmd/depsets`) | rebuilt for the second half | fresh | **3** |
+| `split-shared` (one pipeline sliced, two `opt.Run`s) | shared | **fresh** | **0** |
+| `split-session` (one pipeline sliced, one `opt.Session`) | shared | shared | **0** |
+| `split-rebuilt-sharedjt` (rebuilt, but one `JumpThreadPass`) | rebuilt **except** jump-thread | fresh | **0** |
+
+`split-shared` gives the second half a completely fresh `changeLog` and is
+byte-identical on all 4131 functions. So re-running a pass that had already
+reported convergence is exactly as harmless as `opt/pass.go` claims — the
+invariant holds, and stage 1's suspicion of it was wrong.
+
+What is not harmless is rebuilding the passes. `opt.JumpThreadPass` holds a
+`map[*ir.Func]*jtState` in a closure — `origInstrs` (the function's size when
+the pass first saw it), `grownInstrs` and `threads` — and the comment on it says
+what it is for: *"bounds how much threading one function receives across the
+whole pipeline, so the clean fixpoint that contains the pass always terminates"*.
+A second `JumpThreadPass()` instance is a second budget. A function that spent
+its budget in the prefix's `clean` gets a fresh one in the remainder's `clean`
+and is threaded further, which is what moves those three functions and nothing
+else. Sharing *only* the jump-thread instance across the split (last row)
+restores byte-identity with everything else rebuilt.
+
+**The fix is therefore not to make the split cheaper but to stop rebuilding the
+pipeline across it.** `opt.Session` (new, `opt/pass.go`) carries the change log
+across several `Run` calls, and `opt.PerFunctionPrefixLen` names where to cut one
+`DefaultPipeline()` in two. A memoised compile builds the pipeline once and hands
+the halves to one session; the split is then free, and the byte-identity guard
+can be switched on.

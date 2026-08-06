@@ -332,6 +332,11 @@ func canonicalCoveragePath(filename string) string {
 	if filename == "" {
 		return ""
 	}
+	// Names taken from the module's file table are repository-relative (see
+	// goc/trimpath.go), and resolving those against the process's working
+	// directory would name a file that does not exist. Names taken from the
+	// fset are absolute already and UntrimPath leaves them alone.
+	filename = UntrimPath(filename)
 	absolute, err := filepath.Abs(filename)
 	if err == nil {
 		filename = absolute

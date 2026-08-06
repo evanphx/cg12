@@ -366,7 +366,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		interfaceCandidates:     make(map[interfaceCandidateKey][]interfaceMethodCandidate),
 		escapeDiag:              newEscapeDiagnostics(),
 	}
-	g.mod.File(name)
+	g.mod.File(TrimPath(name))
 	registerNoEscapeDirectives(g)
 	for _, d := range file.Decls {
 		if gd, ok := d.(*ast.GenDecl); ok && gd.Tok == token.VAR {
@@ -6018,7 +6018,11 @@ func (g *gen) at(n ast.Node) {
 		return
 	}
 	p := g.fset.Position(n.Pos())
-	file := g.mod.File(p.Filename)
+	// TrimPath, not p.Filename: the stdlib is read through an absolute
+	// StdlibRoot, and an absolute path here puts the build directory into every
+	// position in the module and therefore into every content key derived from
+	// it. See goc/trimpath.go.
+	file := g.mod.File(TrimPath(p.Filename))
 	g.cur.At(ir.SrcPos{File: file, Line: uint32(p.Line), Col: uint32(p.Column)})
 }
 

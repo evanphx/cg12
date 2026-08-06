@@ -222,11 +222,52 @@ func (fp fixpoint) runTracked(m *ir.Module, log *changeLog) bool {
 // fixpoint the two inliner stages re-enter starts from the callers the inliner
 // actually spliced into, not from all 5101 functions of the module.
 func Run(m *ir.Module, pipeline []Pass) {
-	log := newChangeLog()
+	NewSession().Run(m, pipeline)
+}
+
+// Session is one pipeline's worth of state, held across as many [Session.Run]
+// calls as the caller wants to split the pipeline into.
+//
+// It exists because two pieces of pipeline state outlive an individual pass and
+// are therefore invisible in the pass list: the [changeLog], and the per-function
+// budgets a pass instance carries (the inliner's growth cap, jump threading's
+// thread and growth caps). Running a pipeline as two Run calls resets the first
+// and -- if the second half rebuilds its passes -- the second, and the compiler
+// then emits different code for the functions that had spent a budget in the
+// first half. Measured: splitting DefaultPipeline at the per-package/whole-module
+// boundary moves internal/strconv.trimZeros, runtime.decoderune and
+// syscall.Write, and it is the jump-thread budget that moves them.
+//
+// A memoised compile has to split the pipeline there -- that is where the cached
+// unit ends -- so the split has to be free. Build the pipeline once, hand the
+// halves to one Session, and it is:
+//
+//	pipeline := opt.DefaultPipeline()
+//	session := opt.NewSession()
+//	session.Run(m, pipeline[:opt.PerFunctionPrefixLen])
+//	session.Run(m, pipeline[opt.PerFunctionPrefixLen:])
+//
+// produces byte-identical output to opt.Run(m, pipeline).
+type Session struct {
+	log *changeLog
+}
+
+// NewSession returns a session with an empty change log.
+func NewSession() *Session { return &Session{log: newChangeLog()} }
+
+// Run applies one slice of a pipeline, carrying convergence state in and out.
+func (s *Session) Run(m *ir.Module, pipeline []Pass) {
 	for _, p := range pipeline {
-		runPass(p, m, log)
+		runPass(p, m, s.log)
 	}
 }
+
+// PerFunctionPrefixLen is the length of the prefix of [DefaultPipeline] that
+// touches one function at a time and never reads another -- `mem2reg` and the
+// first `clean`. It is the per-package unit BUILD_CACHE.md's Option B caches and
+// the boundary Option C's memoised stage begins at, named here so the split is
+// stated in one place rather than open-coded as a 2 in every caller.
+const PerFunctionPrefixLen = 2
 
 // DefaultPipeline is the standard optimization pipeline. Its shape encodes the
 // interaction between the interprocedural inliner and the intraprocedural
