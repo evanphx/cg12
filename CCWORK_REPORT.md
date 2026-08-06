@@ -5662,9 +5662,11 @@ sha256 elsewhere in the tree, and the cost is not where it looks. Measured:
 | `hello.go`, plain compile, before the digest | 7.55 s |
 | after | 7.53 s, 7.47 s |
 
-Both objects byte-identical to before. The whole-module encode is 100 MB and
-hashes in tens of milliseconds against a compile measured in seconds, and
-`ir.CloneFunc`'s units are single functions of a few kilobytes.
+Both objects byte-identical to before. Measured directly rather than assumed:
+goc's optimized `hello.go` module encodes to **14.0 MiB and hashes in 7.9 ms**
+(1.87 GB/s on this box) against a **7.5 s** compile, and `ir.CloneFunc` -- the
+caller that runs this thousands of times -- encodes single functions of a few
+kilobytes at **2.3 us** apiece.
 
 Four tests: a flipped byte at the end of the payload and one immediately after the
 header (so an off-by-one at the boundary cannot leave the first field unguarded),

@@ -52,10 +52,12 @@ const (
 //
 // sha256 and not a cheap checksum, for two reasons. The units this covers are
 // already content-addressed by sha256 elsewhere in the tree, so the format now
-// speaks the same language as its callers. And the cost is not where it looks: a
-// whole-module encode of goc's hello.go is 100 MB and hashes in tens of
-// milliseconds against a compile measured in seconds, while ir.CloneFunc's units
-// are single functions of a few kilobytes.
+// speaks the same language as its callers. And the cost is not where it looks.
+// Measured: goc's optimized hello.go module encodes to 14.0 MiB and hashes in
+// 7.9 ms, against a compile of 7.5 s -- and ir.CloneFunc, which is the caller
+// that runs this thousands of times, encodes single functions of a few kilobytes
+// at 2.3 us apiece. The whole compile did not move: 7.53 s and 7.47 s against a
+// 7.55 s baseline.
 
 // MarshalBinary encodes the module to cg12's binary unit format.
 func (m *Module) MarshalBinary() ([]byte, error) {
