@@ -2348,8 +2348,17 @@ The build-cache design job found that 211 of 5083 functions (4.2%) fail
 and `methodvalue` entry blocks, and that `ir.DecodeModule` therefore cannot
 round-trip a goc module. This is that defect.
 
-**The verifier was wrong, not the IR.** The emitted code is unchanged; only the
-verifier and the audits changed.
+**The verifier was wrong, not the IR.** The only non-test source change is
+`ir/verify.go`.
+
+**And emitted code does change** — closures get bigger, `.text` grows 0.5% on
+`hello.go` — because the defect was not latent. `ir.CloneFunc` clones through
+`MarshalBinary`/`DecodeModule`, `DecodeModule` gates on `VerifyModule`, and so
+the verifier rejecting closures had been silently disabling
+`opt.InlineIntoNoSplitCallers` for every one of them. Fixing the verifier
+re-enables an optimisation that had been off for 4-6% of functions. See the
+CORRECTION section near the end, which is the part of this report to read if you
+read only one.
 
 ## What was violated
 
@@ -2692,4 +2701,61 @@ closures grew: they are now receiving inlined callees they were always meant to.
 
 This also explains why `BUILD_CACHE.md`'s round-trip failure and this were the
 same bug: `CloneFunc` and the build cache use the very same encode/decode door.
+
+### Quantified, and is it safe?
+
+Same probe, but with `defineClosureContext` stubbed so the verifier behaves as
+`main` does, compiling `hello.go`:
+
+| `ir.Verify` reached via | calls | failing |
+|---|---:|---:|
+| `CloneFunc` <- `measureFunction` <- `newNoSplitFrameBudget` | 465 | **86** |
+| `CloneFunc` <- `measureFunction` <- `noSplitFrameBudget.Frame` | 312 | 0 |
+| `CloneFunc` <- `InlineIntoNoSplitCallersReporting` | 209 | 0 |
+| `parse.Parse` <- `applyNativeStdlibOverlays` | 1 | 0 |
+
+So on `main`, **86 of the 465 functions the nosplit frame budget tries to
+measure cannot be measured at all** on a hello-world, every one of them a
+closure shape. With the fix, zero fail and all 465 are measured.
+
+What a measurement failure means, at `arm64/nosplit_measure.go:76`:
+
+    measured, err := measureFunction(f, name, conventions, bundle)
+    if err != nil {
+        // ... Leaving it out understates the headroom of everything that
+        // calls it, which is the safe direction.
+        continue
+    }
+
+The function is dropped from the facts handed to `stackcheck`. **I think that
+comment has the direction backwards, and it is worth someone checking.**
+`stackcheck` deliberately mirrors Go's `cmd/link` walk, in which *an unresolved
+callee ends a chain* — so a `nosplit` function missing from the facts does not
+constrain its callers, it stops the walk before its own frame and its whole
+subtree are counted. That overstates headroom rather than understating it. I am
+not asserting a stack-overflow bug: with the fix all 465 are measured, so
+whichever direction it was, the budget is now computed from complete
+information for these functions. But the comment and the `stackcheck` rule
+disagree, and only one of them can be right.
+
+Evidence the new code is sound, all on this branch's tree:
+
+  - capability matrix **368/368 on both arms** — and `stackcheck` runs inside
+    `compileToObjectWithBundle` and returns an error, so a blown nosplit budget
+    fails the compile rather than shipping;
+  - the corpus **compiles 406/406**;
+  - the GC reducers are **0/20 at `GOGC=10` and at default**, both programs;
+  - `TestAllocationCensus` passes **against the committed baseline, unchanged**.
+
+### So: did emitted code change, or only the IR's internal form?
+
+**Emitted code changed.** Not the IR's internal form — that is identical; the
+front end emits exactly what it emitted before, and the fix does not touch it.
+What changed is what the optimiser then does with it, because a pass that had
+been silently declining to act on closures can now act on them.
+
+The allocation census is **unchanged**, so there is no census delta to review
+site by site: the extra inlining moves code into `nosplit` callers without
+moving any allocation. That is the guard's question answered directly — code
+changed, allocation placement did not.
 
