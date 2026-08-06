@@ -2338,3 +2338,30 @@ One thing noticed and not changed: `crypto_signing_bench_baseline.txt` says the
 run takes "about eight minutes". Measured twice today on an idle box it is
 1m43s. The pre-flight's own message quotes the measured figure rather than the
 committed one.
+
+# Caching by default for every goc compile
+
+Branch `ccwork/default-compile-cache`, off `main` (`76069d9`). Host: aarch64
+Linux, 64 cores, 250 GiB, go1.26.1, `cc` = gcc 13.3.0.
+
+_(run in progress — sections appended as each result lands)_
+
+## The situation, confirmed
+
+Read against the tree at `76069d9`:
+
+ 1. `goc/source_world.go:29` caches parsed/type-checked stdlib packages in a
+    process-level `map[sourceWorldKey]*sourceWorld`. A fresh `goc` process gets
+    nothing from it.
+ 2. `cmd/goc/packcache.go` is the on-disk content-addressed cache under
+    `~/.cache/cg12/runtime-pack`. Its only non-test caller is
+    `buildRuntimeCommand` (`cmd/goc/prebuilt.go:47`) — `goc build-runtime`.
+ 3. `-runtime a.gocrt,b.gocrt` (`cmd/goc/main.go:46`) links against packs you
+    already built; `runtimeSplit.chooseManifest` (`goc/runtime_split.go:149`)
+    picks the richest usable one.
+
+So the benefit is real and costs two manual steps. The shared cache on this box
+already holds **985 packs / 45 GB**, all written in the last week, entirely from
+opt-in `build-runtime` calls — which settles the eviction question before it is
+asked.
+
