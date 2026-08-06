@@ -39,6 +39,7 @@ import (
 // It is nearly free: one linear walk per function, inside a corpus pass whose
 // cost is the compiles.
 func TestIRVerifyAudit(t *testing.T) {
+	t.Parallel()
 	audit := auditCorpus(t)
 
 	require.NotZero(t, audit.functions, "the audit must have verified something")
@@ -91,6 +92,7 @@ func TestIRVerifyAudit(t *testing.T) {
 // module. The cost is the encode and decode of a hundred megabytes, so paying
 // it once is enough.
 func TestModuleRoundTripsThroughTheBinaryFormat(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("compiles a whole program and encodes it twice")
 	}
