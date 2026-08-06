@@ -2407,3 +2407,115 @@ subtraction has emptied out, and the win is 2.8–3.1×.
 Cold is slower than monolithic, by the pack build. That is the deal: one compile
 pays, every later compile of any program with that import list collects.
 
+## The headline: warm goc against warm gc
+
+Every compile-time comparison in this project so far has been goc against
+itself. This is goc against the host toolchain, both fully warm, on identical
+source. One line is appended to the file before each compile, alternating
+between the two, so neither is answering from a whole-program result cache: gc
+has its stdlib package archives and goc has its pack, and both have to compile
+the program.
+
+| program | goc warm | gc warm | ratio |
+|---|---|---|---|
+| small (`println`)      | 2.62 s  | 0.16 s | **16×** |
+| hello (fmt/os/strings) | 4.90 s  | 0.24 s | **20×** |
+| httpsrv (net/http)     | 22.1 s  | 0.55 s | **40×** |
+
+With the source *unchanged*, so that gc's action cache answers the whole build
+and it does no compiling at all, gc is 0.05 / 0.07 / 0.10 s — 52× / 70× / 222×.
+That is the literal "already in each one's cache" reading of the question; the
+table above is the one that describes an edit-compile loop, and it is the fairer
+number of the two.
+
+The ratio is what it is because the two caches cache different things. gc caches
+*per package*: a warm gc compiles one package, the program's own, and links
+against archives. goc's pack caches the runtime module's **object**, but the
+program compile still runs the whole-program front end over the entire closure
+and only subtracts at the end. So goc's warm compile is still parsing and
+type-checking ~150 packages that gc does not look at.
+
+That is the shape of the remaining gap, and it is not something a cache of packs
+can close. Closing it means caching the front end — the parsed and type-checked
+`sourceWorld` that `goc/source_world.go` already builds and then throws away when
+the process exits. That is a different piece of work and this measurement is the
+argument for it.
+
+## The decisions asked for
+
+**Pack selection — build the pack the program needs, don't fall back to a
+narrower one.** The pack carries exactly the standard library packages the file's
+own import declarations name. When the program imports something no cached pack
+carries, a wider pack is built and cached.
+
+The alternative — a fixed ladder of package sets, compile the remainder normally
+— cannot work, because usability runs the wrong way. A pack is usable only by a
+program whose closure *contains* the pack's, so a ladder can only be rounded
+*down*: a net/http program that finds no net/http tier falls back to the
+runtime-only tier and recompiles net/http from source. And net/http programs are
+the entire prize. This tree's own matrix measured it: eleven of 368 capability
+programs cost 125–167 s each and are 54% of all compile CPU; the other 327
+average 4.2 s. A rounded-down ladder helps precisely the 327 that did not need
+help.
+
+Near-duplicates are the cost of that, and they are handled by an equality rather
+than a heuristic. If a cached pack C satisfies `C.Packages ⊆ P ⊆ C.Closure` for
+the requested list P, then C's closure and the closure of the pack that would be
+built from P are *the same set* — monotonicity gives one containment, idempotence
+the other (the proof is in `substitutePack`). So a program importing
+{fmt, io, net/http, strings} takes the existing {net/http} pack instead of
+building a second 98 MB copy. Verified end to end: the second compile logs
+`substituted 1a07d580925a (carries [net/http])` and the cache stays at two packs.
+
+It is order-dependent and deliberately not more than that: {fmt, net/http}
+compiled first leaves a pack a later {net/http} program cannot match. Fixing that
+means knowing every package's closure before compiling anything — a second import
+resolver to write, keep correct against build tags, and be wrong in. The
+duplicate is cheaper than the resolver, and eviction bounds it.
+
+**Concurrency — a per-key advisory file lock, layered over a sequence that is
+already safe without it.** `writeFileAtomically` (temp file + rename, already in
+the tree) is what guarantees a half-written pack is never readable and that two
+racing writers both end with a whole file; that property does not depend on the
+lock. The lock exists so that a suite starting dozens of compiles at once pays
+for one 98 MB pack build rather than dozens. It is `flock` on `<key>.lock`, held
+across the build, with the cache re-checked after acquiring; plus an in-process
+mutex per key for `compile-batch`, which compiles many programs in one process.
+
+Every way of failing to take the lock ends in building anyway, never in failing:
+no flock on the platform, an unwritable directory, or a wait that gives up after
+15 minutes because a peer is wedged rather than merely slow. The kernel drops a
+flock when the holder dies however it dies, so a killed builder cannot wedge the
+cache.
+
+Measured: four concurrent cold compiles of one program, `1 of 4 concurrent
+compiles reached the build step`, four byte-identical images, one whole pack in
+the cache.
+
+**Cache growth — bounded now, not a follow-up.** The question answers itself: the
+shared cache on this box already held **985 packs and 45 GB**, written in a week,
+from opt-in `build-runtime` calls alone. Making the cache the default multiplies
+that. So `trimPackCache` evicts least-recently-used packs to a 20 GiB budget
+(`CG12_PACK_CACHE_MAX_BYTES` overrides; 0 is unbounded), sweeping after each
+cached write. Least recently *used*, not oldest: a hit touches the pack's mtime,
+so a pack every build links against never becomes the oldest thing in the cache.
+Unlinking a pack a reader has open is safe on POSIX, and a reader that has not
+opened it yet gets a miss, not a fault.
+
+Two consequences worth stating plainly. The first run of a `goc` carrying this
+change will trim the existing shared cache from 45 GB down to 20 GiB — that is
+the feature working, but it is a deletion, and the packs it deletes are the
+least recently used ones. The second is that this change alters the key (see
+below), so those 45 GB are already garbage under the new key and eviction is the
+only thing that will ever reclaim them.
+
+**`CG12_NOCACHE=1` bypasses everything.** It is checked in `autoPackEnabled`
+before anything else, so a compile under it never computes a key, never reads the
+cache, never builds a pack, and takes the whole-program path. Verified: `goc:
+autopack: disabled`, zero files written to the cache directory, and the image is
+byte-identical to the `GOC_AUTOPACK=0` monolithic build. `GOC_AUTOPACK=0` is a
+separate switch that turns off only this, leaving the in-memory source world
+alone — which is what the monolithic column of the tables above was measured
+with, since `CG12_NOCACHE=1` would have disabled that too and measured something
+else.
+
