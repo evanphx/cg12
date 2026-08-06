@@ -453,6 +453,22 @@ func (e *enc) encData(d *Data) {
 func (e *enc) encFunc(f *Func) {
 	e.str(f.Name)
 	e.linkage(f.Linkage)
+	// lowered gates what the rest of the tree is willing to believe about the
+	// function. VerifyModule runs the SSA checks only on an unlowered one
+	// (ir/verify.go), because lowering destructs SSA and those checks would reject
+	// the very form it produces; the interpreter refuses a lowered function
+	// outright (interp/interp.go); MarkLowered exists to stop a module lowered for
+	// one target being lowered again for another, which does not fail, it emits a
+	// program built around the first target's register assignment. A round trip
+	// that dropped the mark disarmed all three.
+	e.str(f.lowered)
+	// nameSeq is the counter behind the generated block and temporary names ("b7",
+	// "t12"). A decoded function whose counter restarted at zero hands a name that
+	// is already in use to the next pass that asks for one, and the assembler
+	// rejects the duplicate label: decoding goc's hello.go before the optimizer ran
+	// and emitting it failed with `runtime.sigblock: a64: duplicate label "b4"`.
+	// It is the format's to carry -- the names it belongs to are in the unit.
+	e.uv(uint64(f.nameSeq))
 	e.boolean(f.HasRet)
 	e.u8(byte(f.Retty))
 	e.typeRef(f.RetAgg)
@@ -885,6 +901,8 @@ func (d *dec) decFunc(m *Module) *Func {
 	f := &Func{mod: m}
 	f.Name = d.str()
 	f.Linkage = d.linkage()
+	f.lowered = d.str()
+	f.nameSeq = int(d.uv())
 	f.HasRet = d.boolean()
 	f.Retty = Cls(d.u8())
 	f.RetAgg = d.typeRef()
@@ -918,6 +936,22 @@ func (d *dec) decFunc(m *Module) *Func {
 	f.Consts = make([]Const, int(d.uv()))
 	for i := range f.Consts {
 		f.Consts[i] = d.decConst()
+	}
+	// constIdx is the constant-interning index. It is derived from Consts, so the
+	// format does not carry it -- but it does have to be rebuilt, because
+	// internConst treats a nil index as an empty one and appends rather than
+	// finding what is already there. A decoded function without it grows a second
+	// copy of every constant a later pass asks for, so a function reached through
+	// a cache marshals to different bytes than the same function reached without
+	// one, which is exactly the identity the memo is built on.
+	if len(f.Consts) > 0 {
+		f.constIdx = make(map[constKey]int, len(f.Consts))
+		for i, c := range f.Consts {
+			k := constKey{c.Kind, c.Cls, c.Int, c.Flt, c.Sym, c.Thread}
+			if _, seen := f.constIdx[k]; !seen {
+				f.constIdx[k] = i
+			}
+		}
 	}
 	f.AggregateValues = make([]AggregateValue, int(d.uv()))
 	for index := range f.AggregateValues {

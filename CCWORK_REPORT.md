@@ -5501,3 +5501,74 @@ to their post-fix-3 state. That is expected rather than disappointing: those two
 modes round-trip *after* `opt.OptimizeModule`, and `SymAttrs` is read by the
 optimizer. The mode that shows it is the cache path -- decode, *then* optimize --
 and measuring that turned up a further defect first. See drop 5.
+
+## Drop 5 — `Func.nameSeq`, `Func.constIdx` and `Func.lowered`. Not on the brief; the first one stops the cache path compiling at all.
+
+Measuring drop 4 needed a third harness mode -- **`roundtrip-pre`**: decode the
+unit *before* `opt.OptimizeModule` runs, which is what a cache actually does. At
+the branch base (`3f4a6b8`) that mode does not produce an object:
+
+```
+$ ./measure roundtrip-pre
+measure: function runtime.sigblock: a64: duplicate label "b4"
+```
+
+Three separate causes, all in `Func`, none of them exported and so none of them
+visible to the existing guard:
+
+**`nameSeq` — carried now.** It is the counter behind generated block and
+temporary names (`b7`, `t12`). A decoded function restarts it at zero, so the next
+pass that asks for a block gets a name the function already uses, and the
+assembler rejects the duplicate label. The names it belongs to are in the unit, so
+the counter belongs in the unit.
+
+**`constIdx` — rebuilt on decode, not carried.** It is the constant-interning
+index and it is derived from `Consts`, so the format should not carry it -- but it
+does have to be *rebuilt*, because `internConst` treats a nil index as an empty
+one and appends rather than finding what is already there. A decoded function
+grows a second copy of every constant a later pass asks for. Measured, cache path
+with the rebuild removed:
+
+| section | rebuilt | not rebuilt | moved |
+|---|---:|---:|---:|
+| `.text` | 1527964 | 1527708 | −256 |
+| `.rela.text` | 905184 | 905592 | **+408** |
+| `.data` | 3624240 | 3624056 | −184 |
+| `.rela.data` | 265392 | 265344 | −48 |
+| `.debug_info` | 1321198 | 1320695 | −503 |
+| object | 9991688 | 9990560 | −1128 |
+
+So this is not merely a bloated constant table: duplicated constants defeat the
+value numbering that would have shared them, and the object that comes out is a
+different program.
+
+**`lowered` — carried now.** It gates what the rest of the tree believes about a
+function: `VerifyModule` runs the SSA checks only on an unlowered one
+(`ir/verify.go:52`) because lowering destructs SSA and those checks would reject
+the form it produces; the interpreter refuses a lowered function outright
+(`interp/interp.go:98`); and `MarkLowered` exists to stop a module lowered for one
+target being lowered for another, which does not fail -- it emits a program built
+around the first target's register assignment. A round trip that dropped the mark
+disarmed all three. No movement measured: nothing in the module is lowered at the
+point a cache would write it (census: 0), so this one is safe by luck too.
+
+**Emitted-code movement for drop 5: from "does not compile" to byte-identical.**
+With all of it in place, the cache path emits `fc378a0a…` -- the same object,
+byte for byte, as the compile that never round-tripped.
+
+## And now drop 4's number, which needed drop 5 to be measurable
+
+With the cache path working, `SymAttrs` can be measured on its own by clearing it
+after the decode -- exactly the pre-fix-4 behaviour, and nothing else changed:
+
+| | sha256 | `.text` | object |
+|---|---|---:|---:|
+| cache path, `SymAttrs` carried | `fc378a0a…` | 1527964 | 9991688 |
+| cache path, `SymAttrs` dropped | `25c4e7e0…` | 1527964 | 9991688 |
+
+**Every section is the same size, and 755 bytes of the object differ — 691 of them
+in `.text`.** That is the most dangerous shape a defect in this format can take: a
+cache that dropped `SymAttrs` emitted a *different program* of *identical size*,
+which no size check, and no check on the encoded bytes, would ever have noticed.
+The differing bytes fall out as `.text` 691, `.rela.debug_info` 37, `.rela.text`
+15, `.debug_line` 5, `.data` 2, `.debug_info` 2, `.symtab` 2, `.debug_loc` 1.
