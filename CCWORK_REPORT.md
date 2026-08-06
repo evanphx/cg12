@@ -2708,3 +2708,44 @@ the win is 1.16–1.42× by default and 2.8–3.1× under `-O`, and why warm goc
 still 16–40× warm gc. The next thing worth caching is the `sourceWorld` that
 `goc/source_world.go` builds and discards at process exit.
 
+## Measurement conditions, and why the ratios are the number to quote
+
+This is a shared build host and it was not idle: another ccwork job was
+compiling throughout, and the shared pack cache grew from 985 to 999 entries
+while this job ran. Load average over the measurement window ranged from the
+high teens to 72.
+
+The absolute times therefore move — a warm net/http compile is 22.1 s at low
+load and 29.9 s at load 65 — but every comparison here was taken by
+**alternating the two arms on the same file**, so both see the same machine.
+Three independent sets, taken hours apart at different loads:
+
+| | set 1 (light) | set 2 | set 3 (load 52–66) |
+|---|---|---|---|
+| small, goc ÷ gc      | 2.62 / 0.16 = 16× | 3.28 / 0.20 = 16× | 3.28 / 0.19 = **17×** |
+| hello, goc ÷ gc      | 4.90 / 0.24 = 20× | 6.25 / 0.28 = 22× | 5.95 / 0.27 = **22×** |
+| httpsrv, goc ÷ gc    | 22.1 / 0.55 = 40× | 29.0 / 0.61 = 47× | 29.9 / 0.66 = **45×** |
+
+Ratios stable within ~12% across a 4× swing in load; absolutes vary by up to
+35%. The same holds for the speedup this change buys — re-measured at load 72,
+`hello` is 8.2 s monolithic → 6.3 s warm (1.30×, was 1.32×) and 20.6 s → 6.5 s
+under `-O` (3.17×, was 3.10×).
+
+So: **warm goc is 16–22× warm gc on small programs and 40–47× on a net/http
+program**, and the absolute figures in the tables above are the low-load set.
+
+## Also run
+
+`make test-goc-cmd` — the whole goc driver end-to-end suite, with auto-packing on
+by default, since this change touches the driver more than anything else. One
+failure, `TestCheckedRuntimeCoverageBaselineDenominator`, which **pre-exists on
+`main` (76069d9)**: verified by running that test in a clean worktree at
+76069d9, where it fails the same way. It is a bookkeeping check that every
+capability appears in the coverage baseline or the pending list, and it names
+whichever unlisted capability map iteration reaches first. Nothing else in the
+suite fails.
+
+Not run, as instructed: `go test ./goc/...` and `make test-unit` — a gate job
+does those. The three named guard tests were run individually with `-run`. No
+timing baseline was re-cut.
+
