@@ -166,7 +166,7 @@ func resolveAutoPack(target goc.Target, optimize bool, directory, prefix string,
 		autoPackDebugf(diagnostics, "substituted %s (carries %v) for %v", entry.Key[:12], entry.Packages, packages)
 		return path, nil
 	}
-	autoPackDebugf(diagnostics, "miss %s for %v; building", key[:12], packages)
+	autoPackDebugf(diagnostics, "miss %s for %v", key[:12], packages)
 	return buildAndCachePack(target, optimize, directory, prefix, key, packages, diagnostics)
 }
 
@@ -266,6 +266,10 @@ func buildAndCachePack(target goc.Target, optimize bool, directory, prefix, key 
 			path = cached
 			return nil
 		}
+		// Said here rather than at the miss, so that it means "this process is
+		// the one paying for the pack" -- which is what the lock is there to make
+		// true of exactly one of a set of racing compiles.
+		autoPackDebugf(diagnostics, "building pack %s for %v", key[:12], packages)
 		pack, err := prebuilt.BuildRuntime(target, prebuilt.Options{
 			Optimize: optimize,
 			Packages: packages,
@@ -318,7 +322,9 @@ func lockPackKeyInProcess(key string) func() {
 // declarations name, sorted and de-duplicated.
 //
 // Only the import declarations are parsed, which is why this is affordable on
-// every compile: it reads the head of one file, not a package graph.
+// every compile: it reads the head of one file, not a package graph. A body that
+// does not compile is therefore not seen here, which is right -- the compile that
+// follows reports it, exactly as it did before there was a cache.
 //
 // Two kinds of path are dropped. "unsafe" and "C" are not packages a pack root
 // can blank-import. Anything with no directory under the vendored tree is not a
