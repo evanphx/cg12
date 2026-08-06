@@ -4159,3 +4159,73 @@ read with a missing member.
 Not in the key, deliberately: `Manifest.IRDigest`. It is a *content* check, not a
 *key* clause -- it answers "is this artifact intact", which the key cannot,
 because the key is computed from the inputs and the digest from the output.
+
+## 4. What it costs in compile time
+
+Two programs, `-O`, a fresh private cache per arm, one cold run and two warm.
+Box quiet (load 0.6, nothing else of mine running).
+
+| | monolithic | `object` cold / warm | `compose` cold / warm | `ir` cold / warm |
+|---|---:|---:|---:|---:|
+| `perf_bench/float/main.go` | 16.45 / 16.40 | 20.25 / **5.17, 5.09** | 30.73 / **15.45, 15.27** | 26.88 / **11.74, 11.67** |
+| `testdata/fmt_sprintf.go` | 16.28 / 16.32 | 20.21 / **5.10, 5.11** | 29.96 / **14.94, 15.10** | 26.88 / **11.52, 11.79** |
+| pack on disk | — | 20 MB | 20 MB | **55 MB** |
+
+Against the two alternatives, on the warm path that is what a pack is for:
+
+- **against the object pack: 3.0x** (5.1 s → 15.2 s). That is the price of the
+  code quality, and it is nearly all optimiser: the object pack's optimiser sees
+  ~600 functions and takes 0.19 s, a composed build's sees 5083 and takes ~10 s.
+- **against a monolithic build: 7%** (16.4 s → 15.2 s). What survives of the
+  pack is the back end, which still only lowers the program's own functions
+  (2.05 s → 0.18 s), less the ~1 s the composed optimiser spends on functions the
+  object pack had already discarded.
+
+The `ir` arm buys back 3.5 s of the 10 s (15.2 → 11.7, a 23% saving) at 35 MB of
+extra pack, and costs the code quality measured above -- which is why it is not
+the default.
+
+**The cold path is worse in both directions**, and it is not a rounding error:
+30.7 s against the object pack's 20.3 s, because the pack build itself is
+unchanged (~15 s) and the first program compile now costs 15 s rather than 5 s.
+A cache whose first use is 1.5x the uncached compile is a cache that has to be
+amortised over more than one build to be worth anything -- which packs are, but
+it is worth saying out loud.
+
+## The prerequisite, checked before building on it
+
+`TestModuleRoundTripsThroughTheBinaryFormat` passes on this tree: `hello.go`
+encodes, decodes and re-encodes to the same bytes both as compiled and after
+`opt.OptimizeModule` (7.54 s, both subtests green). That is the two-configuration
+statement the test makes.
+
+The other two configurations the brief names are the ones this work exercises
+directly rather than in a test: the `ir` arm marshals a **prebuilt runtime**
+module after `finishRuntimeModule` and the optimiser, and decodes it inside a
+**program** compile. Both round trips complete and the resulting binaries run --
+`stdlib_http_tls_client_server.go` among them -- so the round trip holds for the
+two module shapes a pack involves, not only for a monolithic one.
+
+### The acceptance test, under the `compose` default
+
+`CG12_PACK_CACHE=<private> make bench-perf`, auto-packing ON, `GOC_PACK_MODE`
+unset (so `compose`), quiet box.
+
+    --- PASS: TestPerformanceSuite (653.08s)
+    ok  github.com/evanphx/cg12/goc  653.093s
+
+**42 of 42 rows within tolerance, none past, and the noise gate did not fire.**
+The seven measurements the brief listed as past tolerance under the object pack,
+and `text/parse`, which the `ir` arm regressed:
+
+| row | object pack | `compose` | tol |
+|---|---:|---:|---:|
+| `float/dot-product` | +39.3% | **-0.0%** | 5.0% |
+| `flate/decompress` | +18.6% | +0.2% | 5.0% |
+| `sort/ints` | +13.2% | -0.1% | 5.0% |
+| `mutex/uncontended` | +13.1% | -0.0% | 5.0% |
+| `flate/compress` | +12.3% | +0.1% | 5.0% |
+| `interp/bytecode-loop` | +8.1% | -0.8% | 5.0% |
+| `text/parse` (`ir` regressed this one) | +2.9% | +0.2% | 5.0% |
+| `map/build-probe` (the noisy row) | | -13.8%, resolved +5.8% | 14.5% |
+
