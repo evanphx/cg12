@@ -3614,3 +3614,41 @@ After the fix, and this is also the answer to "cold vs warm byte-identity":
 
 20 of 20 identical, and the cold image equals the warm one byte for byte, so a
 pack written by one process and read by another produces the same executable.
+
+### The corpus arm — 406 programs, 4 rounds, both optimization levels
+
+Through `goc compile-batch` with no `-runtime`, which post-merge means each
+worker picks each program's pack out of the cache — the new default path, and
+the one worth measuring.
+
+| | rounds | result |
+|---|---|---|
+| default | 4 × 406 | **reproducible=406 varying=0 failed=0** |
+| `-O` | 4 × 406 | **reproducible=406 varying=0 failed=0** |
+
+No program produced two different images, and none produced two images with the
+same content digest and different layout either. Round 0 pays for the cold cache
+(182.7 s default, 307.7 s at `-O`) and rounds 1–3 are 99–103 s each.
+
+## 1. The audits
+
+`go test ./goc/...` in full: **PASS, 1142.3 s**, zero failures. That is the whole
+corpus package on the merged tree, with every regenerated baseline in place.
+
+The five named audits, run explicitly in check mode:
+
+    --- PASS: TestAllocationCensus      (207.63s)   baseline reproduced, no diff
+    --- PASS: TestEscapeShadowPlacement
+    --- PASS: TestFrameEscapeAudit
+    --- PASS: TestIRVerifyAudit
+    --- PASS: TestLoopAliasAudit
+
+`TestIRVerifyAudit` is branch 1's, and it passes on the merged tree.
+
+**The allocation census ran three separate times**, in three separate processes,
+each doing a full corpus compile and comparing against
+`alloc_census_baseline.txt`: the `-update` regeneration (196.3 s), the full
+`./goc/...` package run, and the explicit check above (207.6 s). No diff in any
+of them. (A `-count=2` repeat inside one process is not a second census — the
+corpus compile is memoized, and the second iteration takes 0.06 s. Three
+processes is the honest reading of "twice".)
