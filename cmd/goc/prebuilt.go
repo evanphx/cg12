@@ -54,10 +54,10 @@ func buildRuntimeCommand(arguments []string, errorOutput io.Writer) int {
 	if readCachedPack(cache, key, *output) {
 		return 0
 	}
-	pack, err := prebuilt.BuildRuntime(target, prebuilt.Options{
+	pack, err := prebuilt.BuildRuntime(target, applyPackMode(prebuilt.Options{
 		Optimize: *optimize,
 		Packages: carried,
-	})
+	}))
 	if err != nil {
 		fmt.Fprintf(errorOutput, "goc: %v\n", err)
 		return 1
@@ -187,6 +187,18 @@ func (set *packSet) packFor(manifest *runtimepack.Manifest) (*runtimepack.Pack, 
 	return pack, nil
 }
 
+// irFor returns the IR member of a pack this set offered, for a program build
+// that inlines from it. It is the accessor prebuilt.Options.PackIR takes, and it
+// goes through packFor so that the pack is read once whether the compile wants
+// its IR, its object, or both.
+func (set *packSet) irFor(manifest *runtimepack.Manifest) ([]byte, error) {
+	pack, err := set.packFor(manifest)
+	if err != nil {
+		return nil, err
+	}
+	return pack.IR, nil
+}
+
 // linkAgainstPrebuiltRuntime compiles one program as a second Go module and links
 // it with the prebuilt runtime it can use most of.
 //
@@ -213,7 +225,10 @@ func linkAgainstPrebuiltRuntime(
 	optimize bool,
 	errorOutput io.Writer,
 ) error {
-	program, err := prebuilt.CompileProgram(target, filepath.Base(name), source, packs.manifests, prebuilt.Options{Optimize: optimize})
+	program, err := prebuilt.CompileProgram(target, filepath.Base(name), source, packs.manifests, applyPackMode(prebuilt.Options{
+		Optimize: optimize,
+		PackIR:   packs.irFor,
+	}))
 	if err != nil {
 		return err
 	}

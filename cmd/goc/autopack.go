@@ -270,10 +270,10 @@ func buildAndCachePack(target goc.Target, optimize bool, directory, prefix, key 
 		// the one paying for the pack" -- which is what the lock is there to make
 		// true of exactly one of a set of racing compiles.
 		autoPackDebugf(diagnostics, "building pack %s for %v", key[:12], packages)
-		pack, err := prebuilt.BuildRuntime(target, prebuilt.Options{
+		pack, err := prebuilt.BuildRuntime(target, applyPackMode(prebuilt.Options{
 			Optimize: optimize,
 			Packages: packages,
-		})
+		}))
 		if err != nil {
 			return err
 		}

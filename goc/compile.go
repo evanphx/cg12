@@ -547,7 +547,19 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		rootPackageFunctions = append(rootPackageFunctions, redirectedCallWrappers...)
 		finishRuntimeModule(mod, options.runtimeSplit, rootPackageFunctions, rootPackageData)
 	case options.runtimeSplit.againstRuntime():
-		if err := finishProgramModule(mod, options.runtimeSplit, assemblyReferences); err != nil {
+		split := options.runtimeSplit
+		// Composing defers this to the caller, who runs it after the optimizer.
+		// Until then the module is the whole program, which is the only state in
+		// which the optimizer can inline a pack function into a program one.
+		finish := func(module *ir.Module) error {
+			return finishProgramModule(module, split, assemblyReferences)
+		}
+		if split.compose {
+			markProgramSymbolExports(mod, split)
+			split.finish = finish
+			break
+		}
+		if err := finish(mod); err != nil {
 			return nil, err
 		}
 	}

@@ -21,7 +21,9 @@
 package runtimepack
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,7 +41,12 @@ const magic = "cg12gorp"
 //
 // Version 2 added Packages and Closure, which is what lets a build hold several
 // packs and give each program the richest one it can use.
-const Version = 2
+//
+// Version 3 added the IR member: the optimized prebuilt module, serialized, so a
+// program build can inline across the pack boundary instead of compiling against
+// a wall of external symbols. It is a container change (a third member) and a
+// manifest change (IRVersion, IRDigest), so both checks below move together.
+const Version = 3
 
 // Manifest describes the prebuilt runtime module.
 type Manifest struct {
@@ -101,6 +108,39 @@ type Manifest struct {
 	// functions and the interface-method dispatchers, which switch over the itabs
 	// the program contains. The program module must define and export them.
 	ProgramSymbols []string `json:"programSymbols"`
+
+	// IRVersion is the ir binary unit format version the IR member was written
+	// with, or 0 when the pack carries none.
+	//
+	// It is the one clause a pack key needs that an object-only pack did not.
+	// Everything else the key already covers -- the target, -O, the placement
+	// policy, the pipeline identity, every GOC_/CG12_ variable, the hashed
+	// compiler, the hashed stdlib, the C toolchain -- describes what was compiled
+	// and how. This describes how the artifact was *written*, which the compiler's
+	// own hash does not: ir/binary.go's version byte is data, not code reachable
+	// from a hash of the binary in any way a reader can rely on. A pack read back
+	// by a compiler whose format has moved is refused here rather than decoded
+	// into a module that is subtly not what was written.
+	IRVersion int `json:"irVersion,omitempty"`
+
+	// IRDigest is a sha256 of the IR member, checked on read.
+	//
+	// gc has the same thing for the same reason: cmd/link's checkFingerprint
+	// refuses an import whose fingerprint does not match, so a stale or truncated
+	// artifact is a loud failure rather than a miscompile. ir/binary.go has a
+	// magic tag and a version byte and no content digest, so the check lives here.
+	IRDigest string `json:"irDigest,omitempty"`
+}
+
+// DigestOf is the content digest a pack records for a member. Empty for an empty
+// member, so a pack carrying no IR records no digest rather than the digest of
+// nothing.
+func DigestOf(member []byte) string {
+	if len(member) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(member)
+	return hex.EncodeToString(sum[:])
 }
 
 // Pack is a prebuilt runtime: its manifest and the two objects that make it up.
@@ -114,6 +154,15 @@ type Pack struct {
 	// Sidecar is the assembled Plan 9 assembly the Go runtime needs. It carries
 	// the module's last text, so it also defines the module's text-end symbol.
 	Sidecar []byte
+
+	// IR is the optimized prebuilt module in ir/binary.go's unit format, or empty
+	// for an object-only pack.
+	//
+	// It is what the program side inlines from. The object above is still the
+	// pack's own code -- carrying IR does not mean giving up the compiled member,
+	// and gc does not either: its archive holds both the compiled package and the
+	// export data whose bodies importers inline.
+	IR []byte
 }
 
 // index is the JSON header: the manifest plus the lengths of the members that
@@ -122,6 +171,7 @@ type index struct {
 	Manifest    Manifest `json:"manifest"`
 	ObjectSize  int      `json:"objectSize"`
 	SidecarSize int      `json:"sidecarSize"`
+	IRSize      int      `json:"irSize"`
 }
 
 // Marshal encodes the pack.
@@ -130,17 +180,19 @@ func (pack *Pack) Marshal() ([]byte, error) {
 		Manifest:    pack.Manifest,
 		ObjectSize:  len(pack.Object),
 		SidecarSize: len(pack.Sidecar),
+		IRSize:      len(pack.IR),
 	})
 	if err != nil {
 		return nil, err
 	}
-	encoded := make([]byte, 0, len(magic)+12+len(header)+len(pack.Object)+len(pack.Sidecar))
+	encoded := make([]byte, 0, len(magic)+12+len(header)+len(pack.Object)+len(pack.Sidecar)+len(pack.IR))
 	encoded = append(encoded, magic...)
 	encoded = binary.LittleEndian.AppendUint32(encoded, uint32(Version))
 	encoded = binary.LittleEndian.AppendUint64(encoded, uint64(len(header)))
 	encoded = append(encoded, header...)
 	encoded = append(encoded, pack.Object...)
 	encoded = append(encoded, pack.Sidecar...)
+	encoded = append(encoded, pack.IR...)
 	return encoded, nil
 }
 
@@ -166,15 +218,33 @@ func Unmarshal(encoded []byte) (*Pack, error) {
 		return nil, fmt.Errorf("runtimepack: manifest version %d, but this goc writes version %d; rebuild it", header.Manifest.Version, Version)
 	}
 	members := body[headerSize:]
-	if len(members) != header.ObjectSize+header.SidecarSize {
+	described := header.ObjectSize + header.SidecarSize + header.IRSize
+	if len(members) != described {
 		return nil, fmt.Errorf("runtimepack: %d bytes of members, but the index describes %d",
-			len(members), header.ObjectSize+header.SidecarSize)
+			len(members), described)
 	}
-	return &Pack{
+	pack := &Pack{
 		Manifest: header.Manifest,
 		Object:   members[:header.ObjectSize],
-		Sidecar:  members[header.ObjectSize:],
-	}, nil
+		Sidecar:  members[header.ObjectSize : header.ObjectSize+header.SidecarSize],
+		IR:       members[header.ObjectSize+header.SidecarSize:],
+	}
+	// Checked here rather than where the IR is decoded, so that every reader gets
+	// the check and no caller can forget it. A pack whose IR does not hash to what
+	// its manifest recorded is a corrupt or truncated artifact, and decoding it
+	// would produce a module that is not the one the pack was built from.
+	if digest := DigestOf(pack.IR); digest != header.Manifest.IRDigest {
+		return nil, fmt.Errorf("runtimepack: the IR member hashes to %.16s, but the manifest records %.16s",
+			orNone(digest), orNone(header.Manifest.IRDigest))
+	}
+	return pack, nil
+}
+
+func orNone(digest string) string {
+	if digest == "" {
+		return "no IR"
+	}
+	return digest
 }
 
 // Write encodes the pack to a file.

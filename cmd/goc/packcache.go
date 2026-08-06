@@ -18,6 +18,7 @@ import (
 
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/internal/runtimepack"
+	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
 )
 
@@ -83,6 +84,14 @@ func packCacheKey(version int, target string, optimize bool, packages []string, 
 func packCacheKeyPrefix(version int, target string, optimize bool, stdlibRoot string) (string, error) {
 	digest := sha256.New()
 	fmt.Fprintf(digest, "packversion=%d;target=%s;optimize=%v;\n", version, target, optimize)
+	// What the pack carries and how the program consumes it. An IR pack has a
+	// third member and a manifest that names an IR format version, and a program
+	// built against one is composed rather than subtracted -- so a pack built
+	// under one mode is not the pack another mode wants. The IR format version is
+	// in here for the reason the pipeline identity is: ir/binary.go's version byte
+	// is data the compiler's own hash does not usefully cover, and a format change
+	// that was not a cache miss would be a wrong binary rather than a slow build.
+	fmt.Fprintf(digest, "packmode=%s;irversion=%d;\n", packModeIdentity(), ir.BinaryVersion)
 	// The code placement policy, which the compiler binary's bytes do not cover:
 	// it can be overridden from the environment so a corpus can be built several
 	// ways, and a pack laid out under one policy is the wrong pack under another.

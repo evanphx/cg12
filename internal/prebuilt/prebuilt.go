@@ -33,6 +33,33 @@ type Options struct {
 	// Packages are the standard library packages the pack carries beyond the Go
 	// runtime itself, as import paths. Empty means the runtime alone.
 	Packages []string
+
+	// Compose makes a program build optimize the whole program -- the pack's
+	// functions included -- and only then subtract the definitions the pack
+	// already has, instead of subtracting first and optimizing the remainder.
+	//
+	// It is what stops a pack costing code quality: the optimizer sees the module
+	// a monolithic build sees, so a program function can inline a pack function.
+	// It costs the optimizer saving the object pack had, because the module the
+	// optimizer runs over is the whole program again; see PackMode.
+	Compose bool
+
+	// CarryIR makes a runtime build serialize the optimized prebuilt module into
+	// the pack alongside its object, and makes a program build seed its own
+	// module with those bodies rather than re-optimizing them.
+	//
+	// This is gc's arrangement -- an object for the callee's own code, serialized
+	// IR for the caller to inline from -- and it is the only reason for a pack to
+	// carry IR at all in goc: goc's front end is whole-program and re-derives
+	// every function the pack holds regardless, so pack IR cannot save the front
+	// end. What it can save is the optimizer's work on the packed functions.
+	CarryIR bool
+
+	// PackIR yields the IR member of a pack this build was offered. It is a
+	// callback rather than a field because which pack a program uses is not known
+	// until its front end has run, and a pack is tens of megabytes: the manifests
+	// are read to choose, and only the chosen pack's members are ever read.
+	PackIR func(*runtimepack.Manifest) ([]byte, error)
 }
 
 // BuildRuntime compiles the fixed runtime root as a prebuilt Go module and
@@ -53,6 +80,16 @@ func BuildRuntime(target goc.Target, options Options) (*runtimepack.Pack, error)
 	sort.Strings(assemblyFiles)
 	if options.Optimize {
 		opt.OptimizeModule(runtimeModule.Module)
+	}
+	// Serialized before the backend, which mutates the module it lowers. These are
+	// the bodies a program build inlines from, so they must be the bodies the
+	// pack's own object was generated from and nothing later.
+	var carriedIR []byte
+	if options.CarryIR {
+		carriedIR, err = runtimeModule.Module.MarshalBinary()
+		if err != nil {
+			return nil, fmt.Errorf("serialize the prebuilt module: %w", err)
+		}
 	}
 	object, assembly, err := arm64.CompileToObjectAndAssembly(runtimeModule.Module)
 	if err != nil {
@@ -88,6 +125,8 @@ func BuildRuntime(target goc.Target, options Options) (*runtimepack.Pack, error)
 			Target:              string(target),
 			Fingerprint:         runtimeModule.Fingerprint,
 			Optimize:            options.Optimize,
+			IRVersion:           irVersionFor(carriedIR),
+			IRDigest:            runtimepack.DigestOf(carriedIR),
 			Packages:            append([]string(nil), options.Packages...),
 			Closure:             runtimeModule.Closure,
 			ModuleDataSymbol:    gometa.DefaultModuleDataSymbol,
@@ -99,7 +138,22 @@ func BuildRuntime(target goc.Target, options Options) (*runtimepack.Pack, error)
 		},
 		Object:  objectBytes,
 		Sidecar: sidecar,
+		IR:      carriedIR,
 	}, nil
+}
+
+// irVersionFor reports the ir binary format version a carried payload was written
+// with, or 0 when the pack carries no IR.
+//
+// It is read out of the payload rather than named as a constant here, so the key
+// cannot claim a version the encoder did not write. A pack whose IRVersion does
+// not match this compiler's is refused on read: an IR format change that was not
+// a cache miss would be a wrong binary rather than a slow build.
+func irVersionFor(payload []byte) int {
+	if len(payload) == 0 {
+		return 0
+	}
+	return ir.BinaryVersion
 }
 
 // Program is a compiled program module: its object, and the sidecar it needs for
@@ -129,16 +183,41 @@ func CompileProgram(target goc.Target, name string, source []byte, manifests []*
 				manifest.Optimize, options.Optimize)
 		}
 	}
-	program, err := goc.CompileExecutableAgainstRuntimeFor(target, name, source, manifests...)
+	compile := goc.CompileExecutableAgainstRuntimeFor
+	if options.Compose {
+		compile = goc.CompileComposedExecutableAgainstRuntimeFor
+	}
+	program, err := compile(target, name, source, manifests...)
 	if err != nil {
 		return nil, err
 	}
 	chosen := manifests[program.Chosen]
-	if err := checkProgramSymbols(program.Module, chosen); err != nil {
-		return nil, err
-	}
-	if options.Optimize {
-		opt.OptimizeModule(program.Module)
+	if !options.Compose {
+		if err := checkProgramSymbols(program.Module, chosen); err != nil {
+			return nil, err
+		}
+		if options.Optimize {
+			opt.OptimizeModule(program.Module)
+		}
+	} else {
+		// The module is still the whole program here. Seed it with the pack's own
+		// optimized bodies where the pack has them, so the inliner works from the
+		// code the pack's object actually contains rather than re-deriving it, then
+		// optimize the whole thing, then subtract.
+		if options.CarryIR {
+			if err := seedFromPackIR(program.Module, chosen, options.PackIR); err != nil {
+				return nil, err
+			}
+		}
+		if options.Optimize {
+			opt.OptimizeModule(program.Module)
+		}
+		if err := program.Finish(program.Module); err != nil {
+			return nil, err
+		}
+		if err := checkProgramSymbols(program.Module, chosen); err != nil {
+			return nil, err
+		}
 	}
 	object, assembly, err := arm64.CompileToObjectAndAssembly(program.Module)
 	if err != nil {
@@ -156,6 +235,61 @@ func CompileProgram(target goc.Target, name string, source []byte, manifests []*
 		}
 	}
 	return compiled, nil
+}
+
+// seedFromPackIR replaces a composed program module's copy of each function the
+// pack carries with the pack's own optimized body.
+//
+// This is what the IR member is for, and it is the only work in goc a pack's IR
+// can save. It cannot save the front end: goc lowers a whole program at once and
+// funcDecl fills go/types-keyed maps (typeTags, runtimeTypes, interfaceItabs,
+// interfaceCallWrappers) that four whole-program steps consume after the lowering
+// loop, so a package's lowering cannot be skipped in favour of a serialized
+// artifact without under-populating the module's type region. What it can save is
+// the optimizer: the pack's bodies arrive at their fixpoint already, so the
+// passes converge on them instead of re-deriving what the pack build derived.
+//
+// The substitution is by symbol, which is the identity cross-unit references
+// already use (ir.LinkerSymbol mangles a name; ir.Const.Sym carries one), so
+// nothing has to be fixed up. The functions substituted here are all subtracted
+// again by ProgramModule.Finish -- the pack's object defines them -- so their
+// only effect on the output is what the inliner copied out of them.
+func seedFromPackIR(module *ir.Module, manifest *runtimepack.Manifest, read func(*runtimepack.Manifest) ([]byte, error)) error {
+	if read == nil {
+		return fmt.Errorf("goc: an IR pack build needs a way to read the pack's IR")
+	}
+	if manifest.IRVersion == 0 {
+		return fmt.Errorf("goc: the chosen prebuilt runtime carries no IR; rebuild it")
+	}
+	if manifest.IRVersion != ir.BinaryVersion {
+		return fmt.Errorf("goc: the prebuilt runtime's IR is format version %d, and this goc reads version %d; rebuild it",
+			manifest.IRVersion, ir.BinaryVersion)
+	}
+	encoded, err := read(manifest)
+	if err != nil {
+		return err
+	}
+	packed, err := ir.DecodeModule(encoded)
+	if err != nil {
+		return fmt.Errorf("decode the prebuilt runtime's IR: %w", err)
+	}
+	bodies := make(map[string]*ir.Func, len(packed.Funcs))
+	for _, function := range packed.Funcs {
+		bodies[function.Name] = function
+	}
+	for index, function := range module.Funcs {
+		body := bodies[function.Name]
+		if body == nil {
+			continue
+		}
+		// The linkage is this compilation's, not the pack build's: the pack
+		// exported everything it kept so a separately compiled program could
+		// reference it, and this module is not separately compiled from those
+		// functions -- it is about to inline them and then drop them.
+		body.Linkage = function.Linkage
+		module.Funcs[index] = body
+	}
+	return nil
 }
 
 // checkProgramSymbols refuses a program module that does not define everything

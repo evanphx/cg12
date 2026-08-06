@@ -22,6 +22,11 @@ const (
 	binVersion = 19
 )
 
+// BinaryVersion is the on-disk unit format version, for a cache key that has to
+// invalidate when the encoding changes. A cache whose key does not cover this
+// turns an encoding change into a wrong binary rather than a miss.
+const BinaryVersion = binVersion
+
 // MarshalBinary encodes the module to cg12's binary unit format.
 func (m *Module) MarshalBinary() ([]byte, error) {
 	types, typeIdx := collectTypes(m)

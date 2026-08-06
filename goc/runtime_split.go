@@ -101,6 +101,24 @@ type runtimeSplit struct {
 	// chosen indexes candidates, so the caller knows which pack's objects to link.
 	chosen int
 
+	// compose defers the subtraction until the caller asks for it, so the
+	// optimizer can run over the whole program first.
+	//
+	// This is the one ordering decision that decides a pack-linked program's code
+	// quality. compile() has always produced the whole-program module and then
+	// subtracted the pack's definitions from it before returning, which leaves the
+	// optimizer a module of ~600 functions whose callees are all external symbols:
+	// nothing can be inlined across the pack boundary, and program-local code pays
+	// for it (main_dotProduct: 160-byte frame and 95 instructions against a
+	// monolithic build's 64 and 72). Setting compose keeps the whole module intact
+	// through the optimizer -- so it sees exactly what a monolithic build sees --
+	// and hands the caller the subtraction to run afterwards.
+	compose bool
+
+	// finish is the subtraction compile() did not perform because compose was set.
+	// The caller runs it after the optimizer.
+	finish func(*ir.Module) error
+
 	// programSymbols is filled by a runtime build: the symbols it deliberately
 	// left undefined for the program module to supply.
 	programSymbols []string
@@ -211,6 +229,13 @@ type ProgramModule struct {
 	KeptData            int
 	SubtractedFunctions int
 	SubtractedData      int
+
+	// Finish is set only for a composed build. The module it returns holds the
+	// whole program -- the pack's definitions included -- so that the optimizer
+	// can inline across the pack boundary; calling Finish afterwards drops the
+	// definitions the pack already has and fills in the counts above. It must be
+	// called before the backend, and exactly once.
+	Finish func(*ir.Module) error
 }
 
 // CompileRuntimeModuleFor lowers a prebuilt runtime module for a target: the Go
@@ -253,6 +278,20 @@ func CompileRuntimeModuleFor(target Target, packages []string) (*RuntimeModule, 
 // plain one lets each program take the richest it can and the rest fall back,
 // instead of forcing one pack to fit every program.
 func CompileExecutableAgainstRuntimeFor(target Target, name string, src []byte, manifests ...*runtimepack.Manifest) (*ProgramModule, error) {
+	return compileAgainstRuntime(target, name, src, false, manifests)
+}
+
+// CompileComposedExecutableAgainstRuntimeFor is
+// [CompileExecutableAgainstRuntimeFor] with the subtraction deferred: the module
+// it returns is the whole program, and ProgramModule.Finish performs the
+// subtraction once the caller's optimizer has run.
+//
+// It exists so that a pack stops costing code quality. See runtimeSplit.compose.
+func CompileComposedExecutableAgainstRuntimeFor(target Target, name string, src []byte, manifests ...*runtimepack.Manifest) (*ProgramModule, error) {
+	return compileAgainstRuntime(target, name, src, true, manifests)
+}
+
+func compileAgainstRuntime(target Target, name string, src []byte, compose bool, manifests []*runtimepack.Manifest) (*ProgramModule, error) {
 	if len(manifests) == 0 {
 		return nil, fmt.Errorf("goc: compiling against a prebuilt runtime needs its manifest")
 	}
@@ -261,7 +300,7 @@ func CompileExecutableAgainstRuntimeFor(target Target, name string, src []byte, 
 			return nil, fmt.Errorf("goc: compiling against a prebuilt runtime needs its manifest")
 		}
 	}
-	split := &runtimeSplit{mode: runtimeSplitAgainstRuntime, candidates: manifests}
+	split := &runtimeSplit{mode: runtimeSplitAgainstRuntime, candidates: manifests, compose: compose}
 	module, err := compile(name, src, compileOptions{
 		target:       target,
 		executable:   true,
@@ -270,14 +309,33 @@ func CompileExecutableAgainstRuntimeFor(target Target, name string, src []byte, 
 	if err != nil {
 		return nil, err
 	}
-	return &ProgramModule{
-		Module:              module,
-		Chosen:              split.chosen,
-		KeptFunctions:       split.keptFunctions,
-		KeptData:            split.keptData,
-		SubtractedFunctions: split.subtractedFunctions,
-		SubtractedData:      split.subtractedData,
-	}, nil
+	program := &ProgramModule{
+		Module: module,
+		Chosen: split.chosen,
+	}
+	if compose {
+		program.Finish = func(m *ir.Module) error {
+			if split.finish == nil {
+				return fmt.Errorf("goc: this program module has already been finished")
+			}
+			finish := split.finish
+			split.finish = nil
+			if err := finish(m); err != nil {
+				return err
+			}
+			program.KeptFunctions = split.keptFunctions
+			program.KeptData = split.keptData
+			program.SubtractedFunctions = split.subtractedFunctions
+			program.SubtractedData = split.subtractedData
+			return nil
+		}
+		return program, nil
+	}
+	program.KeptFunctions = split.keptFunctions
+	program.KeptData = split.keptData
+	program.SubtractedFunctions = split.subtractedFunctions
+	program.SubtractedData = split.subtractedData
+	return program, nil
 }
 
 // loadedPackagePaths is every standard library package a compilation loaded,
@@ -354,6 +412,32 @@ func finishRuntimeModule(module *ir.Module, split *runtimeSplit, programFunction
 	module.GoHasMain = false
 
 	split.programSymbols = sortedUnique(programSymbols)
+}
+
+// markProgramSymbolExports gives a composed program module the export bits the
+// subtraction would have given it, before the optimizer runs.
+//
+// Without this a composed build loses the interface-call wrappers. The pack's
+// object calls them -- they are runtime-named but program-built, so the pack left
+// them undefined and recorded them in ProgramSymbols -- and in the composed
+// module nothing else references them, because the reference that would have is
+// the pack's own compiled code rather than IR. opt.DeadFuncElim keeps a function
+// that is referenced or exported, so in the subtract-then-optimize order the
+// export bit finishProgramModule had already assigned was what kept them; in the
+// optimize-then-subtract order that bit does not exist yet and 1300 of them are
+// deleted, leaving the link naming symbols nobody defines.
+//
+// It only ever sets the bit, never clears it. Clearing is finishProgramModule's
+// job and it has the information to do it; clearing here would undo
+// exportAssemblyReferencedFunctions, which is the same mistake in the other
+// direction (see the comment on the export assignment below).
+func markProgramSymbolExports(module *ir.Module, split *runtimeSplit) {
+	programSymbols := split.manifest.ProgramSymbolSet()
+	for _, function := range module.Funcs {
+		if programSymbols[ir.LinkerSymbol(function.Name)] {
+			function.Linkage.Export = true
+		}
+	}
 }
 
 // finishProgramModule turns a finished whole-program module into the program

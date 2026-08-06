@@ -3936,3 +3936,91 @@ this gate.
     re-cut. A measurement did force attention on the first of them, and
     re-cutting is the wrong answer to it: the baseline is the record that this
     code used to be faster.
+
+---
+
+# An IR pack: making the prebuilt pack carry IR instead of compiled objects
+
+Branch `ccwork/ir-pack`, off `integration/cache-wave` (`9518e12`).
+
+## The problem, reproduced first
+
+Baseline measurements on this tree, `goc/testdata/perf_bench/float/main.go`,
+private `CG12_PACK_CACHE`:
+
+| build | wall | `main_dotProduct` frame | instructions |
+|---|---:|---:|---:|
+| autopack ON, cold (builds the pack) | 20.11 s | | |
+| autopack ON, warm | **5.12 s** | **0xa0 = 160 B** | **95** |
+| `GOC_AUTOPACK=0`, monolithic | **16.32 s** | **0x40 = 64 B** | **72** |
+
+Confirms the brief exactly, on this box, with this compiler: the split default
+costs 31 extra bytes of frame and 23 extra instructions on a function that is
+entirely program-local, and the warm pack is 3.2x faster to build.
+
+## Design, before any code: what a goc pack can and cannot carry
+
+Two facts about goc decide the whole shape, and both are in the tree rather than
+in a judgement call.
+
+**1. The split is already subtractive and late.** `goc/compile.go:530` says it:
+"The split is applied last, on the finished whole-program module." A program
+built against a pack runs the *same whole-program front end* as a monolithic
+build and produces all 5083 functions; `finishProgramModule` then drops the
+~4483 the pack defines; and only then does `prebuilt.CompileProgram` call
+`opt.OptimizeModule`. So the degradation is caused by exactly one ordering
+decision -- **subtract, then optimise** -- and not by the pack's format.
+
+**2. goc's front end cannot be sliced by package, so pack IR cannot save it.**
+`funcDecl` does not only append to `mod.Funcs`. It fills five maps that live on
+the shared `gen` (`derive()` copies the struct, so the maps are shared by
+pointer): `typeTags`, `runtimeTypes`, `interfaceItabs`, `interfaceCallWrappers`,
+`interfaceCandidates`. Four whole-program steps *after* the lowering loop consume
+them --- `addInterfaceMethodWrappers`, `populateRuntimePointerTypes`,
+`clearUnavailableRuntimeMethodOffsets`, `addInterfaceItabLinks`. Their values are
+`types.Type` and `*types.Func`, i.e. go/types objects, which no pack can carry;
+and their contents are program-dependent, which is the same reason
+`goc/runtime_split.go:500` gives for handing the whole type region to the program
+module. Skipping `funcDecl` for a packed package therefore does not merely save
+time, it silently under-populates the module's type region and itab links.
+
+The consequence is worth stating plainly, because it inverts the brief's
+expectation: **an IR pack in goc cannot save the front end.** The 1.64 s that
+`funcDecl`+`globalDecl` costs (BUILD_CACHE.md §2.2) is not recoverable from a
+serialized artifact. What an IR pack can do is let the optimiser see the composed
+module -- which is the code-quality fix -- and what it costs is the optimiser and
+back-end saving that made the object pack worth 3.2x.
+
+## The three arms, and the first measurement
+
+`GOC_PACK_MODE` selects how a pack is consumed, so the arms can be compared on
+one tree without rebuilding the compiler (`cmd/goc/packmode.go`):
+
+- **`object`** — today's arrangement: subtract the pack's definitions from the
+  whole-program module, then optimise the ~600 functions left.
+- **`compose`** — optimise the whole program, pack functions included, then
+  subtract. No pack format change; the pack's object is still what links.
+- **`ir`** (the new default) — `compose`, plus: the program module's copy of each
+  packed function is replaced by the pack's own **optimised** body, decoded from
+  the pack's new IR member, before the optimiser runs.
+
+`goc/testdata/perf_bench/float/main.go`, `-O`, private cache, one run each:
+
+| arm | cold (builds the pack) | warm | `main_dotProduct` frame | insns | body vs monolithic |
+|---|---:|---:|---:|---:|---|
+| monolithic (`GOC_AUTOPACK=0`) | — | 16.32 s | 0x40 | 72 | — |
+| `object` | 20.14 s | **5.13 s** | 0xa0 | 95 | **differs** |
+| `compose` | 29.95 s | 15.10 s | **0x40** | **72** | **identical** |
+| `ir` | 27.11 s | **11.57 s** | **0x40** | **72** | **identical** |
+
+All four binaries run and exit 0 with identical output.
+
+**Code quality is genuinely restored**, and not merely by the two summary
+statistics the brief named: `main_dotProduct`'s instruction text is
+byte-for-byte the monolithic build's under both `compose` and `ir` (compared
+with addresses and branch targets stripped, since the two images place the
+function differently).
+
+**And the cost is most of what the pack was worth.** 5.13 s → 11.57 s. The IR
+member is worth 3.5 s of that (15.10 → 11.57), which is the optimiser work the
+pack's already-optimised bodies save.
