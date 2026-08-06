@@ -6124,3 +6124,50 @@ per program either way; it already holds the dispatchers and the itab links.
 
 It also restored the nine census sites: after the fix, the census differs from
 the whole-program control by exactly the eleven placement rows and nothing else.
+
+## bench-perf: the runtime cost, per benchmark
+
+`make bench-perf` on this branch, against the baseline committed on `main`.
+Every ratio is goc nanoseconds / host-toolchain nanoseconds, so lower is better
+and the control rows are a fixed spin loop that should not move at all.
+
+**All 44 rows are within tolerance.** The eleven `control/spin-fixed-work` rows
+average **0.9259**, against **0.9260** in the baseline — the box is the same box.
+
+The rows that moved at all, with the "resolved" column, which is the part of the
+change that survives both the baseline's and this run's intervals (a negative
+resolved figure means the run cannot tell the movement from zero):
+
+| program | case | baseline | this run | change | resolved | tol |
+|---|---|---:|---:|---:|---:|---:|
+| conc | chan/pingpong-unbuffered | 4.3782 | 4.1985 | **−4.1%** | +3.0% | 5.0% |
+| sortmap | map/build-probe | 6.0921 | 5.9433 | −2.4% | −4.7% | 14.5% |
+| gcpress | gc/alloc-churn | 5.9451 | 6.0677 | **+2.1%** | −2.9% | 9.5% |
+| gcpress | gc/live-heap-churn | 4.6294 | 4.6752 | +1.0% | −9.3% | 17.5% |
+| interp | interp/bytecode-loop | 19.0659 | 18.9151 | −0.8% | +0.7% | 5.0% |
+| json | json/marshal | 14.7342 | 14.8446 | +0.7% | −2.1% | 5.5% |
+| text | text/format-append | 7.6592 | 7.7116 | +0.7% | −10.2% | 12.8% |
+| regexp | regexp/anchored-lines | 4.0798 | 4.0400 | −1.0% | −0.2% | 5.0% |
+| regexp | regexp/replace | 5.9579 | 5.9324 | −0.4% | −4.2% | 10.7% |
+| everything else | | | | **< ±0.4%** | | |
+
+Only two rows resolve above zero at all — `chan/pingpong-unbuffered` at −4.1%
+(faster, +3.0% resolved) and `interp/bytecode-loop` at −0.8% (+0.7% resolved) —
+and both are improvements, which on a change that only ever adds heap
+allocations is code placement, not the change. Everything that could plausibly
+be the change is unresolved: `gc/alloc-churn` is the row where more heap
+allocation would show up first, and its +2.1% does not survive its own
+interval.
+
+**So the eleven allocation sites that moved to the heap are not visible in this
+suite.** That is the honest reading rather than "no cost": the suite's smallest
+detectable movement is 5.0–23.9% depending on the row, and three of the eleven
+sites are on the TLS handshake path, which no row here exercises. `bench-crypto`
+is the instrument that would see those, and it was not run (it needs an idle
+box and was not scheduled).
+
+The run itself reported one failure, and it is not a regression: the suite's own
+noise guard refused `text text/format-append`, whose one-repetition spread was
+13.43% here against 4.27% on the box that produced the baseline. That is a
+statement about the machine during that row, not about the ratio, which moved
++0.7%.
