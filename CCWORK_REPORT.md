@@ -3515,3 +3515,25 @@ Two of the eight do see the back end, and are the load-bearing ones here:
 
 `perf_suite_baseline.txt` and `crypto_signing_bench_baseline.txt` were not
 re-cut; see the timing sections below for whether a measurement forces it.
+
+## Package suites
+
+`make test-unit`'s package set — every package outside `goc`, `cmd/goc`,
+`difftest` and `cc` — **all green**, 26 packages, `ir` and `opt` and `arm64` and
+`stackcheck` among them.
+
+`TestParallelBackendIsByteIdenticalToSerial` **PASS**, all four worker counts
+(3, 8, 64, 256).
+
+`go test ./cmd/goc/...` minus the capability matrix: **434.99 s, one failure**,
+and it is the known one —
+
+    --- FAIL: TestCheckedRuntimeCoverageBaselineDenominator (0.03s)
+      capability "gc-invariants/promoted-local-root" is in neither the accepted
+      baseline nor testdata/runtime_coverage_baseline_pending.json
+
+`main` fails the same assertion at the same line. The capability it names varies
+between runs on `main` alone — three runs gave `slice-tail-pointer`,
+`promoted-local-root`, `slice-tail-pointer` — so the branch naming a different
+one than a given `main` run is map iteration order, not a different failure.
+Pre-existing, unrelated to all three branches.
