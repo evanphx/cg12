@@ -4053,3 +4053,102 @@ metadata, stack maps and the nosplit budget's facts, counted field by field
 rather than estimated — are **24.7 MB for the small program's 4131 functions,
 6.1 KB each**, against 30.1 MB for the IR half. So a fully persisted Option C
 memo for this program is about 55 MB, and buys the 2.00 s the back end costs.
+
+## What is left standing, and what stage 3 has to decide
+
+**1. The sound live set is the thing to attack.** Everything below 45% in the
+edit rows is the read closure: 1125 functions on small, 3850 on http, recomputed
+not because their memo was invalid but because something live *reads* them and
+the stage moves them. Two ways out, and they are the same choice stage 1 named,
+now priced properly:
+
+- Store what a reader actually reads at the moment it reads it. That is not the
+  whole body: the inliner and the unroller read `funcSize` and
+  `inlinableStructure` — an integer and a boolean — and need the body only when
+  they splice. Storing a per-round *profile* (size, inlinable, attributes) for
+  every function and the body only for the fifth of the module that is ever
+  spliced is a much smaller artifact than storing every intermediate body, and it
+  would take the closure to nothing.
+- Or make the reads not depend on the moment, by giving the inliner a size it can
+  agree on across rounds. That is a change to the cost model, not to the cache.
+
+**2. The whole-module identity check should not need the per-function memo to be
+exact, and today it carries it.** The 45% rows are the whole-module path; the
+per-function path delivers 19–27%. If stage 3 does nothing else, it should still
+keep the whole-module check, because it is the only part of the design that is
+correct by an argument rather than by measurement.
+
+**3. Persist the back end.** 24.7 MB and a codec, worth 2.00 s of 8.87 and
+11.90 s of 41.78 — the largest single number left on the table that does not
+need a design decision.
+
+**4. Stream the memo.** Peak RSS goes 3.80 → 5.18 GB on a cold http compile
+against a 5 GiB capability ceiling. One file per entry under a fanout, written as
+it is produced, fixes the peak and gives eviction at the same time.
+
+**5. Option B.** 19–22 points of the projection, untouched by this branch. The
+`-trimpath` work here was its blocker too and is now done.
+
+### Scope notes
+
+- **Packs were not touched.** `make verify-fast` builds and links against them
+  throughout and is green.
+- The unit format's version went 19 → 20, which is a cold rebuild for anything
+  holding an older unit and is handled as one everywhere it is read.
+- `cmd/splitprobe` and `cmd/memoc` are measurement scaffolding. `memo/` and the
+  `opt`/`ir`/`arm64` hooks are not: they are off unless a caller turns them on
+  (`opt.Session.Freeze` with an empty set, `arm64.SetFunctionCodeCache(nil)`),
+  and `goc` itself does not turn them on. What `goc -O` emits changed only by the
+  208 bytes the two round-trip fixes account for.
+
+## Guards
+
+Scaled to the change, which is a new package, hooks in `opt`, `ir` and `arm64`,
+and a compiler-wide path change.
+
+| guard | result |
+|---|---|
+| `go build ./...`, `go vet ./...`, `gofmt` | clean |
+| `go test ./ir ./opt ./memo ./arm64 ./analysis` | **all ok** |
+| `memo` tests (new, 7) | ok — the digest is the body and not the module, the round trip preserves the body, a corrupted unit is rejected, every key clause is checked including the SCC bit, the store round-trips, a missing file is a cold build, and **a frozen function is not transformed while an unfrozen one is** |
+| `go test ./goc -run TestGCDiff\|TestSlogAttrFrame\|TestRuntimeCoverage\|TestEscape.*Diag` | ok (the tests that read the file table) |
+| **`make verify-fast`** | **PASS in 4m0s** — build, vet, gofmt, unit, three corpus shards, corpus-parallel, matrix-default, matrix-opt, reducers, all green |
+| **byte-identity, memoised vs unmemoised** | **5 scenarios, 2 programs: object and translated assembly identical in all of them**, plus a per-function comparison of every finished body |
+| two worktrees of one commit | 0 of 5083 input digests differ, 0 of 4131 post-optimisation, image byte-identical |
+| `cmd/splitprobe`, 5 arms | the pipeline split is output-neutral when the pipeline is not rebuilt |
+
+`TestIRVerifyAudit` **does not exist in this tree** — nothing under any name
+close to it. `go test ./ir` covers `ir/verify_test.go`, and `make verify-fast`
+compiles the whole corpus, which is the check it was presumably meant to stand
+for. Said here rather than quietly substituted.
+
+`make verify-fast` failed on its first run, on `TestAllocationCensus`, and the
+failure was the trimpath fix working: eleven of the baseline's 14520 lines
+identify a type by a symbol whose name embedded `/home/evan/.ccwork/...`, so the
+committed baseline could only ever have matched on the machine that recorded it.
+Regenerated; every one of the eleven changes is confined to the type-symbol
+column and **not one allocation moved between the heap and the frame**.
+
+Not run, per the brief: the corpus suite on its own, the capability matrix on its
+own, `make test-unit`, the four audits on their own, the census on its own,
+determinism sweeps, the crash loops. (`verify-fast` runs the matrix, three corpus
+shards and the reducers as part of its own tier; that is the broad smoke the
+brief offered, not those gates run separately.)
+
+## Verdict
+
+**Both blockers cleared.** Absolute paths are out of `ir.SrcPos` *and* out of the
+three symbol families that were hashing a position — two worktrees of one commit
+now produce byte-identical images. The pipeline split is not the `changeLog`; it
+is the jump-thread budget, and `opt.Session` makes the split free.
+
+**Output is byte-identical**, on every scenario measured: two programs, cold,
+warm, a root-package edit and a leaf edit, object and translated assembly both.
+
+**The achieved saving is 45% warm against a 77–82% projection**, and the three
+pieces of the gap are named and sized: Option B is 19–22 points of it and is not
+built; the back end's memo is 12–16 points and is implemented but not persisted;
+and the rest is the live-set closure, which is where stage 1's arithmetic was
+wrong — its 96.2% work-hit rate assumed recomputing the splice closure, and the
+splice closure **does not emit the same bytes**. The sound closure gives 67–71%,
+which is why an edit saves 19–27% and not 45%.
