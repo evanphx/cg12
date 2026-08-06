@@ -5784,7 +5784,7 @@ the determinism sweeps and the crash loops were left to the gate that owns them.
 | `TestBinaryDeterministic` | pass |
 | `TestModuleRoundTripsThroughTheBinaryFormat` | pass (23.6 s) |
 | `TestIRVerifyAudit` | pass -- **1 559 314 function verifications across 406 programs, all clean** |
-| `make verify-fast` | **PASS in 4m58s**, 11/11 items (build, vet, gofmt, unit, corpus-parallel, corpus-sequential ×3, matrix-default, matrix-opt, reducers) |
+| `make verify-fast` | **PASS**, 11/11 items, twice (build, vet, gofmt, unit, corpus-parallel, corpus-sequential ×3, matrix-default, matrix-opt, reducers) -- 4m58s once the fixes were in, and again in 5m02s on the exact final commit, since two commits (a doc-comment correction and one added test) landed after the first run started |
 
 Two packages `verify-fast`'s `unit` item excludes were run separately, because
 `cc/` is the front end that produces most of the fields on this report and
@@ -5796,3 +5796,29 @@ committed file starts with the `cg12` magic, and the prebuilt runtime packs do
 not embed IR units (no `MarshalBinary` outside `ir/`, `memo/`, `cmd/cg12`,
 `cmd/viz` and `cmd/stagetime`, none of which persist a unit across compiler
 versions).
+
+## What this leaves for whoever picks up Stage 1
+
+Three things this branch found and did not take on, each stated so it is not
+rediscovered:
+
+1. **`memo.DataDigest` cannot police the encoder it digests through.** It hashes
+   `MarshalBinary`'s output, so any field the encoder drops is a field the digest
+   is blind to. It is a check on transport, not on fidelity, and the comment above
+   it should say so. Drop 1 lived under it for its whole life.
+2. **`memo.FuncDigest` now hashes a blob that contains a hash of itself.** It
+   could read the embedded digest and halve the memo's hashing cost. That changes
+   what a `memo.Digest` *is* and therefore every stored entry, so it belongs to
+   whoever owns the memo's on-disk compatibility.
+3. **`memo.ModuleDigest`'s `SymAttrs` clause is now belt-and-braces.** The format
+   carries `SymAttrs`, so a per-function unit that travelled with its module no
+   longer needs the key to cover it. It is still needed as written, because
+   `memo.MarshalFunc` deliberately does *not* carry module state (it costs 81 MB
+   against 30 MB to do so) -- but the reason has changed from "the format cannot"
+   to "the per-function unit chooses not to", and the comment should be updated
+   before someone reads the old one as a statement about the format.
+
+The measurement harness is scratch and lives outside the tree. If the movement
+numbers here need reproducing, it is 90 lines: compile `goc/testdata/hello.go`,
+optionally round-trip before or after `opt.OptimizeModule`, `arm64.CompileObject`,
+and report `debug/elf` section sizes and the object's sha256.
