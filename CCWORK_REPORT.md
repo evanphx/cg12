@@ -2586,3 +2586,24 @@ the direct ones: **125 of 2744 (4.56%)** for `hello.go` and **831 of 14568
 than leaving the next person to work it out from a ratio that does not mean
 anything.
 
+## Guards
+
+| guard | required | result |
+|---|---|---|
+| `TestIRVerifyAudit` (new) | pass | **PASS** — 1,559,314 function verifications across 406 programs, 0 rejected (7,899 distinct functions rejected before the fix) |
+| `TestFrameEscapeAudit` | pass | **PASS** |
+| `TestLoopAliasAudit` | pass | **PASS** |
+| `TestAllocationCensus` | pass | **PASS**, against the committed baseline unchanged — no census delta to review |
+| the corpus builds | 406/406 | **406/406** — `auditCorpus` fails if any program does not compile, and it did not |
+| capability matrix, default arm | 368/368 | **368 subtests PASS, 0 FAIL**, 1 EXPECTED FAILURE, 0 KNOWN GAP NOW PASSES; `ok ... 76.3s` |
+| capability matrix, `-O` arm | 368/368 | **368 subtests PASS, 0 FAIL**, same 367 + 1 split; `ok ... 95.5s` |
+| GC reducer `runtime_gc_promoted_local_root` `-O`, `GOMAXPROCS=3` | 0/20 at `GOGC=10` and default | **0/20 at `GOGC=10`, 0/20 at default** |
+| GC reducer `runtime_gc_type_mask_padding` `-O`, `GOMAXPROCS=3` | 0/20 at `GOGC=10` and default | **0/20 at `GOGC=10`, 0/20 at default** |
+| `go test ./ir` | pass | **PASS** (whole package, including the four new verifier tests and the two repaired round-trip fixtures) |
+| whole-module round trip, 4 configurations | decode | **decode OK and re-encode byte-identical** in all four |
+| determinism, and branch vs `main` byte-for-byte | byte-identical | *(recorded below when the run completes)* |
+
+The three new verifier tests and the round-trip test were each confirmed to fail
+on `main`'s `ir/verify.go` with the test files in place, and to pass with the
+fix — the fail-before check, not just a passing test.
+
