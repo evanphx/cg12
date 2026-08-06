@@ -48,10 +48,13 @@ type corpusAudit struct {
 	// it a total rather than a count of distinct sites.
 	shadowCounts opt.ShadowCounts
 	// verifyFailures is every ir.Verify diagnostic the corpus produces, keyed by
-	// the diagnostic itself. See TestIRVerifyAudit.
+	// the diagnostic itself -- which names one function, so the corpus's shared
+	// stdlib contributes each failing function once rather than once per program.
+	// See TestIRVerifyAudit.
 	verifyFailures map[string]string
-	// functions is how many functions were verified, summed over the corpus, so
-	// a failure can say what fraction of them it is.
+	// functions is how many verifications ran, summed over the corpus. It is not
+	// the denominator of verifyFailures, which is deduplicated; it is the size of
+	// the sweep.
 	functions int
 	// failures is every program that did not compile; either audit is
 	// meaningless if this is not empty.

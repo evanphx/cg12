@@ -2551,3 +2551,38 @@ crashed the compiler when it was, which amounts to the same thing.
 That is not a fix in its own right — it is the same one fix — but it is the
 second thing that was measurably unusable and is not any more.
 
+## Scope of the new check, stated so nobody assumes more than it does
+
+`verifySSA` only runs on unlowered functions (`Verify` gates it on
+`LoweredFor() == ""`, because lowering destructs SSA and reassigns temporaries
+freely). `defineClosureContext` is called from inside it, so both the entry
+seeding and the flag/temporary consistency check are **pre-lowering
+invariants**. After lowering, `stabilizeClosureContext` has copied the context
+into an ordinary temporary and nothing checks the pairing any more.
+
+That is the right place for it — it is where the exemption is granted, so it is
+where the exemption has to be kept honest — but it does mean a pass that broke
+the pairing *after* lowering would not be caught. Nothing does today.
+
+## The corpus-wide before figure
+
+The pre-fix count over the whole corpus, measured by putting the new audit test
+into a worktree at `main` (`76069d9`) and leaving `ir/verify.go` as `main` has
+it:
+
+    goc emitted IR that ir.Verify rejects: 7899 distinct diagnostics,
+    from 1559314 function verifications across 406 programs
+
+**7,899 distinct functions** across the corpus, all the same shape. After the
+fix, the same sweep: **0**, over the same 1,559,314 verifications.
+
+Those two numbers have different denominators and dividing them would be wrong,
+which is worth saying because the test's own failure message used to invite it.
+A diagnostic names one function and is counted once however many of the 406
+programs share it — and they share a lot, since every program links the same
+stdlib. `functions` counts every verification. The honest per-program rates are
+the direct ones: **125 of 2744 (4.56%)** for `hello.go` and **831 of 14568
+(5.70%)** for the http program. The test now says this in the message rather
+than leaving the next person to work it out from a ratio that does not mean
+anything.
+

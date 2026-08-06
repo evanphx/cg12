@@ -37,7 +37,7 @@ func TestIRVerifyAudit(t *testing.T) {
 	require.NotZero(t, audit.functions, "the audit must have verified something")
 
 	if len(audit.verifyFailures) == 0 {
-		t.Logf("%d functions across %d programs, all verified", audit.functions, audit.programs)
+		t.Logf("%d function verifications across %d programs, all clean", audit.functions, audit.programs)
 		return
 	}
 
@@ -52,7 +52,14 @@ func TestIRVerifyAudit(t *testing.T) {
 		shown[index] = failure + "\n      first seen compiling: " + audit.verifyFailures[failure]
 	}
 
-	t.Fatalf("goc emitted IR that ir.Verify rejects: %d distinct failures over %d functions in %d programs.\n"+
+	// The two counts have different denominators and are deliberately not
+	// divided: a diagnostic is deduplicated across programs (the corpus shares
+	// one stdlib, so the same function is compiled hundreds of times), while
+	// audit.functions counts every verification. A ratio of the two would mean
+	// nothing. To get a percentage, compile one program and count.
+	t.Fatalf("goc emitted IR that ir.Verify rejects: %d distinct diagnostics, from %d function\n"+
+		"verifications across %d programs (a diagnostic names one function and is counted once\n"+
+		"however many programs share it).\n"+
 		"Every pass downstream of the front end assumes what the verifier checks, so this is\n"+
 		"either a front end emitting malformed IR or a verifier whose model of well-formed IR\n"+
 		"is missing a case the front end legitimately produces. Decide which before changing\n"+
