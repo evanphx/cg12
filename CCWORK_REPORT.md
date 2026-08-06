@@ -2522,3 +2522,368 @@ longest test in the tree (183 s of 1121 s) with 56 cores idle. It is now bounded
 by `MemAvailable / 4.23 GiB` (the corpus's worst observed compile peak), the same
 way the capability matrix bounds its fan-out — right on both machines, passed by
 neither caller. `GOC_AUDIT_WORKERS` overrides it.
+
+## 5. Corpus suite, after — 8:15, same pass set, stable across repeats
+
+`go test -timeout 60m -count=1 -parallel 32 -v ./goc/...`, run twice back to back
+on the same idle box:
+
+| | before (`-parallel 10`, i.e. serial) | after, run 1 | after, run 2 |
+|---|---:|---:|---:|
+| wall clock | **18:57.13** | **8:15.56** | **8:26.66** |
+| test time reported by `go test` | 1121.146 s | — | — |
+| CPU | 396% (4.0 cores) | 1190% (11.9) | 1200% (12.0) |
+| peak RSS | 13.0 GiB | 28.3 GiB | 29.8 GiB |
+| PASS / SKIP / FAIL | 341 / 8 / 0 | **342 / 8 / 0** | **342 / 8 / 0** |
+
+**2.3x, and the answer is the same answer.** Checked, not assumed:
+
+* run 1's and run 2's `--- PASS` name sets are **byte-identical to each other**.
+* against the serial baseline the only difference in either direction is
+  `TestEveryTestIsParallelOrListedAsSequential`, the policy test this branch
+  adds. 341 → 342.
+* the `--- SKIP` sets are identical.
+
+Peak RSS more than doubled — 13.0 → 29.8 GiB — which is the cost of the
+concurrency and is **12% of the 243 GiB available**. Memory is nowhere near being
+the binding constraint; it is not what stops this going wider.
+
+What stops it going wider is the shape of the work, and the profile says so
+exactly. Of the 495 s:
+
+* **350 s is the sequential set** — 83 tests that must run one at a time, run
+  before anything else starts.
+* **145 s is the parallel set**, and that 145 s is one test:
+  `TestSlogAttrInFrameIsNotScannedAsAPointer` takes **144.17 s** on its own. 266
+  other tests finish inside its shadow.
+
+So `-parallel` beyond 32 buys nothing here: the critical path is a single test,
+not the width of the pool. That is also why §6 splits the suite across processes
+rather than raising the number further.
+
+The audit-pool change shows up cleanly in the same profile:
+`TestAllocationCensus` **183.12 s → 82.57 s** (2.2x) from unbinding the flat
+8-worker cap.
+
+## 6. The capability matrix, measured today in the old shape
+
+Unsharded, one arm after the other, `-count=1`, nothing else on the box — the way
+every gate has run it:
+
+| arm | wall | CPU | peak RSS | subtests PASS | FAIL | `EXPECTED FAILURE` | `KNOWN GAP NOW PASSES` |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| default | **101.18 s** | 2843% | 2.55 GiB | **368** | **0** | 1 | 0 |
+| `-O` | **140.82 s** | 2341% | 2.81 GiB | **368** | **0** | 1 | 0 |
+
+Both exit 0. The two `--- PASS` name sets were diffed against each other:
+**identical, 368 names, no difference in either direction**. This matches the
+wave-10 gate's 102.1 s / 144.4 s on the same box, so nothing on this branch has
+moved the matrix.
+
+**GUARD MET: both capability arms 368/368.**
+
+## 7. The full gate, before — 45.97 minutes
+
+The brief's description of a gate is four long things one after another: the
+corpus suite, the default arm, the `-O` arm, and a `main` control of each. Priced
+from the measurements above, all taken on this box today:
+
+| item | wall |
+|---|---:|
+| corpus suite, branch | 1137 s (18:57) |
+| capability matrix, default arm, branch | 101 s |
+| capability matrix, `-O` arm, branch | 141 s |
+| corpus suite, `main` control | 1137 s |
+| capability matrix, default arm, `main` control | 101 s |
+| capability matrix, `-O` arm, `main` control | 141 s |
+| **total, run one after another** | **2758 s = 45.97 min** |
+
+This is **composed from measured parts, not one stopwatch**, and it is worth
+being explicit about why that is legitimate here and where it is weakest.
+
+* The corpus figure is `main`'s own serial suite, measured by this job in §1.
+  Before this branch, the branch arm and the control arm ran *the same serial
+  code*, so 1137 s is the honest figure for both.
+* The matrix figures are from this branch, which does not touch the compiler,
+  `cmd/goc`, or any corpus program — so branch and control are the same
+  measurement.
+* What it leaves out makes it an **under**-estimate of the real gates: no
+  determinism sweep, no `test-goc-cmd`, no `test-ruby`, no unit tests, and no
+  time to build the control's worktree. The brief's own range for these jobs is
+  40–120 minutes, and 46 minutes for the four items alone sits at the bottom of
+  it, which is what it should do.
+
+## 8. `make verify-fast` — 3 minutes 58 seconds, everything green
+
+    VERIFY_FAST wall 237.95 s   cpu 2893% (28.9 of 64 cores)   maxrss 26.3 GiB
+
+    ITEM                      SECONDS  RESULT
+    build                           0  0
+    corpus-parallel               185  0
+    corpus-sequential-0           228  0
+    corpus-sequential-1            99  0
+    corpus-sequential-2           105  0
+    gofmt                           0  0
+    matrix-default                 40  0
+    matrix-opt                     41  0
+    reducers                       95  0
+    unit                           13  0
+    vet                             0  0
+
+    [verify] verify-fast PASS in 238s (3m58s)
+
+**Under four minutes against a ten-minute budget**, which bought enough headroom
+to put the *whole* corpus suite in the fast tier rather than a sample of it. That
+was not the plan going in; it is what the numbers allowed.
+
+Checked rather than assumed:
+
+* The corpus split runs **every test exactly once**. The parallel half is
+  `-skip` over the 83 listed names, the three sequential shards are a partition
+  of those 83, and the union was computed against `go test -list`:
+  350 = 267 + 83, `diff` empty. Not "should be" — computed.
+* `matrix-default` and `matrix-opt` each ran **92 subtests, 0 FAIL** — 368/4,
+  the shard-0 quarter of each arm.
+* The reducers really ran: 130 program executions across six cases, 0 failures.
+* `gofmt: clean`; `go vet ./...` silent.
+
+The item table also shows the scheduler doing its job: it admitted
+4+2+8+32+6+6+6 = **exactly 64** cores of declared weight and made the matrix arms
+and the reducers wait for a slot rather than oversubscribing.
+
+### What verify-fast cannot see
+
+Written out in `docs/verification.md` and in the Makefile target's comment. In
+short: three of every four capabilities on both arms; determinism
+(`scripts/determinism-check.sh -corpus` is the only thing that drives all 406
+programs to a written object and compares bytes, and nothing here substitutes);
+`test-ruby`; `test-goc-cmd`; the runtime coverage report; any comparison against
+`main`; any rare intermittent fault (the reducers run 5–40 repetitions, and
+RUNTIME_PLAN.md 5.10 records a fault that showed up 3 times in 53); and anything
+timing, ever.
+
+It is the right signal for *is this change broken*. It is not a merge gate.
+
+### A bug this run found in the script, and the guard added for it
+
+The first `make verify-fast` **exited 0 in 1.3 seconds having run nothing but
+`go build`**. `declare -a JOB_NAME` leaves the variable *unset* in bash, so
+`${#JOB_NAME[@]}` inside `spawn` was fatal under `set -u`, every spawn died, and
+the verdict loop cheerfully reported PASS over the one item that had a result.
+
+A verification script that reports PASS for the jobs that happened to start is
+the one failure mode it must not have, so the fix is two parts: initialise the
+arrays explicitly, and record every scheduled item in an `EXPECTED` list that the
+verdict reconciles against. An item with no result now prints `NEVER RAN` and
+fails the run, and a run that scheduled nothing at all fails too. Worth recording
+because it argues for itself: the silent-pass path existed for one commit and it
+was found by running the thing, not by reading it.
+
+## 9. The timing pre-flight still works — checked both ways
+
+Neither verify tier ever schedules `bench-perf` or `bench-crypto`. That is the
+design, not an omission: they pin a core and they refuse a busy box, and a tier
+that ran one alongside a 32-wide corpus would be measuring the corpus. They stay
+separate targets and `TestCryptoSigningBench`/`TestPerformanceSuite` are two of
+the six non-`placement` entries in `goc/sequential_tests.txt`, so they cannot be
+swept into a parallel run by accident either.
+
+Demonstrated rather than asserted, in both directions:
+
+**Accepts a quiet core.** Run while this job's `main` control was compiling (a
+serial suite, ~4 of 64 cores — so core 63 was quiet):
+
+    --- PASS: TestCryptoSigningBench (105.73s)
+    p256/sign-verify   baseline 24.0648  this run 23.9607  change -0.4%  resolved +0.3%  within tolerance (6%)
+    p256/verify        baseline 16.9991  this run 16.9367  change -0.4%  resolved +0.2%  within tolerance (6%)
+    p384/sign-verify   baseline 20.3676  this run 20.3292  change -0.2%  resolved +0.0%  within tolerance (6%)
+    rsa2048/sign-verify baseline 2.3470  this run  2.3324  change -0.6%  resolved -0.1%  within tolerance (6%)
+
+**Refuses a busy one.** Three spinners pinned to core 63 with `taskset`, then the
+same command:
+
+    the calibration burst got 25.1% of core 63 (floor 90%) -- it is sharing that core with something
+    core 63 spent 74.9% of the window on work that was not this run's (ceiling 10%), per /proc/stat
+    the burst's wall time spread 30.4% across 6 repetitions (ceiling 12%) -- the speed of this core
+      is changing underneath it
+    this box cannot support a trustworthy timing measurement, so make bench-crypto is refusing to start
+
+Refused in **1.6 seconds** instead of spending eleven minutes to say the same
+thing, and it named which of the three ceilings it tripped. Exit 2.
+
+**GUARD MET: the timing pre-flight is intact and no tier can schedule a timing
+run.**
+
+(Both `bench-crypto` figures above are incidental to this branch — it changes no
+compiler code — but the tolerance check passing on the committed baseline is
+worth having on the record.)
+
+## 10. `make verify-full` — every guard met, and one pre-existing failure surfaced
+
+    VERIFY_FULL wall 3365.27 s (56m05s, cold control)   cpu 2660%   maxrss 28.2 GiB
+
+    ITEM                      SECONDS  RESULT
+    build                           0  0
+    control-corpus               1142  0
+    control-matrix-default        147  0
+    control-matrix-opt            195  0
+    corpus-parallel               169  0
+    corpus-sequential-0           224  0
+    corpus-sequential-1           101  0
+    corpus-sequential-2           105  0
+    determinism                   410  0
+    determinism-opt               886  0
+    goc-cmd                       349  1     <-- pre-existing; see below
+    gofmt                           0  0
+    matrix-default-0..3      59/53/46/57  0
+    matrix-opt-0..3          62/53/49/56  0
+    reducers                      104  0
+    ruby                           45  0
+    unit                           10  0
+    vet                             0  0
+
+### The guards
+
+| guard | required | result |
+|---|---|---|
+| capability matrix, **default** arm | 368/368 | **368 PASS, 0 FAIL** summed across the four shards |
+| capability matrix, **`-O`** arm | 368/368 | **368 PASS, 0 FAIL** summed across the four shards |
+| the four corpus audits, check mode | pass | **PASS** — they are `corpus-sequential-0`, and the whole corpus suite is green in all four processes |
+| determinism, byte-identical, unoptimised | pass | **reproducible=406 varying=0 failed=0** over 4 rounds, 0 layout-only residues |
+| determinism, byte-identical, `-O` | pass | **reproducible=406 varying=0 failed=0** over 4 rounds, 0 layout-only residues |
+| targeted reducers, full counts | 0 failures | **PASS** |
+| `test-ruby` | pass | **PASS** (45 s) |
+| no baseline re-cut | — | **none.** No `-update-*` flag was passed anywhere in this job. |
+
+### The one failure, and it is not this branch's
+
+`goc-cmd` (`make test-goc-cmd`) failed on one test:
+
+    --- FAIL: TestCheckedRuntimeCoverageBaselineDenominator (0.03s)
+        capability "gc-invariants/slice-tail-pointer" is in neither the accepted baseline nor
+        testdata/runtime_coverage_baseline_pending.json; record why the baseline does not cover
+        it, or rerun and accept a new baseline
+
+Checked against `main` in a clean worktree at 76069d9:
+
+    --- FAIL: TestCheckedRuntimeCoverageBaselineDenominator (0.03s)   [byte-identical message]
+
+**Pre-existing on `main`, and this branch cannot have caused it:**
+`git diff main..HEAD --name-only` touches **no file under `cmd/goc/`** at all —
+the diff is `Makefile`, `docs/`, `scripts/`, `CCWORK_REPORT.md` and `goc/*_test.go`.
+
+It is a baseline-bookkeeping failure (a capability with no entry either way), not
+a compiler regression, and it is 0.03 s of pure data checking. It is here because
+**no gate has ever run `test-goc-cmd`** — the old recipe was corpus plus the two
+arms plus controls, and this test was outside all four. Widening the full tier
+found a standing failure on its first run. Not fixed here: cutting or accepting a
+coverage baseline is exactly the "do not re-cut any baseline" the brief rules
+out, and it wants a person to say why that capability is uncovered.
+
+## 11. The `main` control cache — 1484 s to 0.96 s
+
+Cold, on this run: `control-corpus` **1142 s** + `control-matrix-default`
+**147 s** + `control-matrix-opt` **195 s** = **1484 s (24.7 min)**.
+
+Warm, immediately after, `./scripts/verify.sh controls`:
+
+    [verify] REUSE  control-corpus         (recorded 2026-08-06T07:53:46+00:00, key 39c516698c86)
+    [verify] REUSE  control-matrix-default (recorded 2026-08-06T07:56:14+00:00, key 39c516698c86)
+    [verify] REUSE  control-matrix-opt     (recorded 2026-08-06T07:59:29+00:00, key 39c516698c86)
+    [verify] verify-controls PASS in 1s
+    CONTROLS wall 0.96 s
+
+**1484 s → 0.96 s.** And the key invalidates when it must — recomputed by hand
+against the recorded value:
+
+| key over | first 12 hex |
+|---|---|
+| `main` + current recipe (what was recorded) | `39c516698c86` ✓ matches |
+| a different `main` commit (`main~1`) | `607112c74db7` — **different** |
+| same `main`, one byte changed in `scripts/verify.sh` | `ff9460c1bc34` — **different** |
+
+### What is in the key and why
+
+`main` commit; CPU model, core count, total RAM, arch, **kernel release**;
+`go version`, `GOOS/GOARCH`, the system `cc` version; and a **sha256 of
+`scripts/verify.sh` itself**.
+
+* The machine and toolchain are in it because a control is a *measurement*, and
+  one taken on a different box or a different compiler is not a control for this
+  one — it is a different experiment.
+* Kernel release is in it because it moves scheduling and page-fault behaviour
+  and costs nothing to include. The price is an occasional needless re-measure;
+  that is the right side to err on.
+* The script's own hash is in it so that changing **what a control measures**
+  invalidates every record automatically, rather than depending on someone
+  remembering to bump a version constant. The cost is that a comment edit also
+  invalidates. Deliberate: cheap and never wrong in the dangerous direction.
+* Deliberately **not** in the key: the branch under test, the working tree, and
+  the time — anything describing the branch would defeat the reuse this exists
+  for.
+
+The cache lives at `${XDG_CACHE_HOME:-$HOME/.cache}/cg12/verify-controls`,
+**outside the working tree**, because ccwork jobs each get their own worktree and
+a tree-local cache would never hit across jobs — which is precisely the case that
+matters.
+
+One honest note on the cold figure: `control-corpus` costs 1142 s because `main`
+is still the serial tree. Once this branch lands, the same control costs about
+230 s, and a cold control drops from 24.7 min to about 9.5 min.
+
+## 12. `CG12_NOCACHE=1` still works
+
+The constraint was explicit and merge gates rely on it. Before the sequential
+list existed, the cold path at `-parallel 32` failed (§3, experiment E2). After:
+
+    CG12_NOCACHE=1 go test -timeout 60m -count=1 -parallel 32 ./goc/...
+    ok  github.com/evanphx/cg12/goc  550.938s      exit 0
+    NOCACHE wall 551.52 s   cpu 1253%   maxrss 38.2 GiB
+
+**PASS.** Nothing in this branch touches `goc/source_world.go` or the flag; the
+source-world map was already mutex-guarded and is shared across concurrent tests
+exactly as it was across sequential ones. 551 s against 495 s warm is the cost of
+re-parsing the stdlib per compile, which is what the flag is for.
+
+## 13. THE THREE NUMBERS
+
+### Corpus suite
+
+| | wall | note |
+|---|---:|---|
+| **before**, `-parallel 10` (i.e. serial) | **18:57** | 396% CPU = 4.0 of 64 cores |
+| **after**, one `go test -parallel 32` | **8:15** / 8:27 | two runs; what `make test-goc-corpus` now costs |
+| **after**, split across 4 processes by `verify.sh` | **3:44** / 3:48 | what a verify tier costs |
+
+**2.3x in one process, 5.1x split.** Same pass set, twice, byte-identical.
+
+### Full gate
+
+| | wall | measured or derived |
+|---|---:|---|
+| **before** — corpus + default arm + `-O` arm + a `main` control of each, one after another | **45:57** | derived: 2x(1137 + 101 + 141), every part stopwatched today |
+| **after**, same four items, warm control | **~5:44** | derived from the verify-full item table (corpus 224 s, matrix phase ~119 s over two admission waves, controls 0.96 s) |
+| **after**, `make verify-full` entire, cold control | **56:05** | stopwatched |
+| **after**, `make verify-full` entire, warm control | **31:21** | derived: 3365 − 1484 |
+
+**8.0x like-for-like.** The honest framing of the two totals: `verify-full` at
+31:21 warm is *not* comparable to the old 45:57, because it does strictly more —
+it adds both determinism sweeps (410 s + 886 s = **21.6 min, now the single
+largest thing in the tier**), `test-ruby`, `test-goc-cmd`, the unit tests, vet,
+gofmt and the full-count reducers, none of which the old four-item recipe ran. A
+gate that wanted only what the old recipe covered now costs **under six minutes**.
+
+### verify-fast
+
+| | wall |
+|---|---:|
+| `make verify-fast` | **3:58** |
+
+Against a ten-minute budget, which is why it carries the *whole* corpus suite and
+not a sample.
+
+**What it costs to skip:** three of every four capabilities on both arms; both
+determinism sweeps; `test-ruby`; `test-goc-cmd`; the coverage report; any
+comparison against `main`; any rare intermittent fault (reducers at 5–40
+repetitions, against a recorded 3-in-53 fault); and anything timing, ever.
+`docs/verification.md` has the table and the reasoning.

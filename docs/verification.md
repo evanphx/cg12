@@ -8,6 +8,26 @@ Two entry points:
 Everything below was measured on the reference worker: aarch64 Linux, 64 cores,
 250 GiB total / 243 GiB available, go1.26.1, otherwise idle.
 
+## The numbers
+
+| | before | after |
+|---|---:|---:|
+| goc corpus suite, one `go test` | **18:57** (4.0 of 64 cores) | **8:15** |
+| goc corpus suite, split across processes by `verify.sh` | — | **3:44** |
+| a gate's four items (corpus + both arms + a `main` control of each) | **45:57** | **~5:44** (warm control) |
+| `make verify-full`, which covers strictly more than those four | — | 56:05 cold control, **31:21** warm |
+| `make verify-fast` | did not exist | **3:58** |
+| the `main` control | re-measured every gate | **1484 s → 0.96 s** when the key matches |
+
+`TestAllocationCensus`, on its own, went 183.1 s → 82.6 s when its compile pool
+stopped being capped at a flat 8.
+
+`verify-full` should not be read against the old 45:57 as though they were the
+same run. It adds both determinism sweeps (410 s + 886 s — together now the
+largest thing in the tier), `test-ruby`, `test-goc-cmd`, the unit tests, vet,
+gofmt and the full-count reducers, none of which the old four-item recipe ran. A
+gate that wants only what that recipe covered costs under six minutes.
+
 ## Why this exists
 
 Verification in this tree took forty to a hundred and twenty minutes, which is
@@ -23,9 +43,31 @@ with `t.Parallel`, and no test in the package did, so the flag bounded nothing.
 `-parallel 10` and `-parallel 64` were the same command. Measured, the suite ran
 at **4.0 of 64 cores for nineteen minutes**, with 5% of memory in use.
 
-Raising the number would have bought exactly nothing. Every top-level test in
-`goc` now calls `t.Parallel` as its first statement, six documented exceptions
-aside, and `goc/parallelpolicy_test.go` fails if a new one does not.
+Raising the number would have bought exactly nothing. 267 of the 350 top-level
+tests in `goc` now call `t.Parallel` as their first statement, and
+`goc/parallelpolicy_test.go` fails if a new one does not.
+
+The other 83 are in `goc/sequential_tests.txt`, which says why about each. 77 of
+them are there because of a finding: at `-parallel 32`, `TestAllocationCensus`,
+`TestFrameEscapeAudit` and `TestInterfaceConversionsCallTheRuntimeHelpers` fail,
+with every difference in the conservative direction — an allocation the serial
+run keeps in a frame is on the heap. They pass at `-parallel 32` when nothing
+else in the process is compiling, and they still fail with `CG12_NOCACHE=1`, so
+the shared source world is not the mechanism. **Concurrent compiles inside one
+process perturb escape placement, and the root cause is not isolated.** Nothing
+in production does that — `goc` compiles one program per process, and
+`goc compile-batch` reads its request stream in a plain `for requests.Scan()`
+loop and compiles strictly in sequence within each worker — so this constrains
+how the suite may be parallelised rather than describing a shipped defect.
+
+Go runs every sequential top-level test to completion *before* it resumes any
+parallel one, so a listed test gets exactly the quiet process it had when the
+whole suite was serial. Nothing about how those 83 tests execute has changed,
+which is the reason this does not weaken the verification.
+
+The listed set is deliberately over-broad — every test that reaches a placement
+assertion by any call path, not the three observed to fail. The cost of an
+unnecessary entry is seconds; the cost of a missing one is a flaky gate.
 
 **A gate ran its long items one after another.** The corpus suite, the default
 capability arm, the `-O` arm, and a `main` control of each — four serial items on
@@ -44,6 +86,19 @@ at `GOMAXPROCS=1`), and every concurrent test can be compiling one. The default
 is `min(nproc, MemAvailable / TEST_MEMORY_PER_JOB, TEST_PARALLEL_CAP)`, which is
 32 on the reference worker and 8 on an eight-core laptop, neither caller needing
 to know about the other.
+
+**32 is where it stops because of what the profile says, not because memory ran
+out.** At `-parallel 32` the suite peaks at 29.8 GiB — **12% of the 243 GiB
+available** — so memory is nowhere near binding. What binds is the shape of the
+work: of the 495 s the suite takes in one process, 350 s is the sequential set
+(which no `-parallel` value touches) and the remaining 145 s is *one test*,
+`TestSlogAttrInFrameIsNotScannedAsAPointer`, inside whose shadow the other 266
+finish. Raising the number past 32 has nothing left to overlap.
+
+That is also why `scripts/verify.sh` splits the suite across **processes** rather
+than raising the number further: the sequential set and the parallel set share no
+compiler state when they are separate processes, so they cost the larger of the
+two instead of their sum. 8:15 in one process, 3:48 split.
 
 ## Timing suites are never scheduled by either tier
 
@@ -75,6 +130,29 @@ cannot be swept into a parallel run by accident either.
 | runtime coverage report + baseline diff | no | no — `make test-goc-coverage` |
 | comparison against a `main` control | **no** | yes (cached) |
 | anything timing | **never** | **never** |
+
+## How the suite is split across processes
+
+`scripts/verify.sh` runs the goc corpus as four concurrent `go test` processes,
+not one:
+
+* **`corpus-parallel`** — `-skip` over the 83 listed names, at
+  `-parallel $(GO_TEST_PARALLEL)`.
+* **`corpus-sequential-0..2`** — a partition of those 83, each at `-parallel 1`,
+  which is the same one-compile-at-a-time guarantee the in-process sequential
+  phase gives. The four corpus audits are pinned to shard 0 because they share a
+  single `sync.Once` corpus compile and splitting them would pay for it three
+  times.
+
+The split covers every test exactly once, and that is checked rather than
+asserted: the parallel half's `-skip` set is the exact complement of the union of
+the three shards' `-run` sets, verified against `go test -list` — 350 = 267 + 83,
+`diff` empty.
+
+Note that a plain `make test-goc-corpus`, or CI's `go test ./goc/...`, is still
+correct on its own: the listed tests have no `t.Parallel`, so Go runs them in its
+sequential phase before resuming anything. The process split is a speedup on top
+of a default that is already safe, never a precondition for it.
 
 ## What verify-fast cannot catch
 

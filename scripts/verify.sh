@@ -44,9 +44,9 @@ ROOT=$(pwd)
 GO=${GO:-go}
 tier=${1:-fast}
 case "$tier" in
-fast | full) ;;
+fast | full | controls) ;;
 *)
-	echo "usage: $0 [fast|full]" >&2
+	echo "usage: $0 [fast|full|controls]" >&2
 	exit 2
 	;;
 esac
@@ -88,8 +88,15 @@ LOGS=${VERIFY_LOGS:-${TMPDIR:-/tmp}/verify-$$}
 mkdir -p "$LOGS"
 
 started=$(date +%s)
-declare -a JOB_NAME JOB_PID JOB_WEIGHT
-declare -A JOB_RESULT JOB_SECONDS
+# Initialised empty, explicitly: `declare -a X` alone leaves X *unset* in bash,
+# and ${#X[@]} on an unset variable is a fatal error under `set -u`.
+declare -a JOB_NAME=() JOB_PID=() JOB_WEIGHT=()
+declare -A JOB_RESULT=() JOB_SECONDS=()
+# Every name ever spawned or controlled, so the verdict can prove it accounted
+# for all of them. Without this a bug in the scheduler loses a job silently and
+# the run reports PASS for the jobs that did start -- which is the one failure
+# mode a verification script must not have.
+declare -a EXPECTED=()
 admitted=0
 
 note() { printf '[verify] %s\n' "$*"; }
@@ -102,6 +109,7 @@ note() { printf '[verify] %s\n' "$*"; }
 spawn() {
 	local name=$1 weight=$2
 	shift 3 # name, weight, the literal --
+	EXPECTED+=("$name")
 	while [ $((admitted + weight)) -gt "$CORES" ] && [ ${#JOB_PID[@]} -gt 0 ]; do
 		reap_one
 	done
@@ -210,6 +218,7 @@ control_key() {
 control() {
 	local item=$1
 	shift 2 # item, the literal --
+	EXPECTED+=("control-$item")
 	local key entry
 	key=$(control_key) || {
 		note "control $item: cannot resolve ${VERIFY_CONTROL_REF:-main}; SKIPPED"
@@ -252,6 +261,19 @@ control() {
 	else
 		note "FAIL   control-$item (${JOB_SECONDS[control-$item]}s, exit $status) -- not recorded"
 	fi
+}
+
+# The three things a gate compares its own result against. Each is the same
+# command the branch arm runs, against a checkout of `main`.
+#
+# `-v` on the matrix arms is deliberate: the recorded log is what a gate diffs
+# its own `--- PASS` name set against, and without it there is no name set.
+run_controls() {
+	control corpus -- $GO test -timeout 60m -count=1 -parallel "$GOC_PARALLEL" ./goc/...
+	control matrix-default -- $GO test -timeout 30m -count=1 -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/... -v \
+		-args -runtime-status-compile-workers="$STATUS_WORKERS"
+	control matrix-opt -- $GO test -timeout 30m -count=1 -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/... -v \
+		-args -runtime-opt -runtime-status-compile-workers="$STATUS_WORKERS"
 }
 
 cleanup_controls() {
@@ -398,13 +420,13 @@ full)
 	drain
 
 	# The `main` control, reused when nothing that could change it has changed.
-	if [ -z "${VERIFY_NO_CONTROL:-}" ]; then
-		control corpus -- $GO test -timeout 60m -parallel "$GOC_PARALLEL" ./goc/...
-		control matrix-default -- $GO test -timeout 30m -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/... -v \
-			-args -runtime-status-compile-workers="$STATUS_WORKERS"
-		control matrix-opt -- $GO test -timeout 30m -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/... -v \
-			-args -runtime-opt -runtime-status-compile-workers="$STATUS_WORKERS"
-	fi
+	[ -z "${VERIFY_NO_CONTROL:-}" ] && run_controls
+	;;
+controls)
+	# The controls on their own. Useful for warming the cache ahead of a gate,
+	# and for seeing at a glance whether the recorded control is still valid --
+	# a second run of this prints REUSE for each item and costs nothing.
+	run_controls
 	;;
 esac
 
@@ -423,6 +445,20 @@ for name in "${!JOB_RESULT[@]}"; do
 	*) failed=$((failed + 1)) ;;
 	esac
 done
+
+# Everything that was meant to run must have a result. A missing one is a bug in
+# this script, and it has to be louder than a pass, not quieter: an item that
+# never ran is an item that never said no.
+for name in "${EXPECTED[@]}"; do
+	if [ -z "${JOB_RESULT[$name]:-}" ]; then
+		printf '%-24s %8s  %s\n' "$name" "-" "NEVER RAN"
+		failed=$((failed + 1))
+	fi
+done
+if [ "${#EXPECTED[@]}" = 0 ]; then
+	note "no items were scheduled at all -- that is a bug in $0, not a pass"
+	failed=$((failed + 1))
+fi
 echo
 if [ "$failed" = 0 ]; then
 	note "verify-$tier PASS in ${elapsed}s ($((elapsed / 60))m$((elapsed % 60))s)"
