@@ -3767,3 +3767,33 @@ for "which standard library tree is this". Two checkouts therefore still miss
 each other's *packs*. That is a key using a path where it means content; it does
 not affect what the compiler emits, and it is left alone here because the brief
 says not to touch packs.
+
+## The memoiser: first end-to-end saving
+
+`memo/` is the cache; `cmd/memoc` is a compiler that uses it and writes the
+object and the translated assembly, so a memoised compile and an unmemoised one
+can be compared byte for byte. `-no-memo` is the control: the same binary, the
+same split, the same `opt.Session`, the store ignored.
+
+**Small program (`goc/testdata/fmt_sprintf.go`, 5083 functions in, 4131 out),
+warm with nothing changed:**
+
+| arm | wall | front end | prefix | validate | lookup | **stage** | record | back end | store I/O |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| control (no memo) | **16.14 s** | 4.21 | 1.44 | — | — | **8.42** | — | 2.04 | — |
+| cold (empty memo) | 16.76 s | 4.19 | 1.42 | 0.13 | 0.00 | 8.56 | 0.27 | 2.01 | 0.04 |
+| **warm** | **8.87 s** | 4.15 | 1.43 | 0.13 | 0.36 | **0.00** | 0.00 | 2.00 | 0.10 |
+
+**45.0% end to end, and the object and the assembly are byte-identical to the
+control's** (`01af5728…`, `e5de208c…`).
+
+The stage went 8.42 s → 0.00 s. What is left is the front end (4.15 s) and the
+back end (2.00 s), neither of which Option C caches: **the front end is Option
+B's job and Option B is not built.** Against the stages Option C actually
+memoises, 8.42 of 8.42 s is gone.
+
+**The cold cost is +0.62 s on 16.14 (3.8%)**: 0.13 s validating (marshalling and
+hashing all 5083 post-prefix bodies, plus one call graph and SCC condensation),
+0.27 s recording, 0.04 s writing 30 MB. Stage 1 said to measure validation rather
+than assume it; it is **0.13 s, 0.8% of the compile**, and it is paid on every
+build, hit or miss.

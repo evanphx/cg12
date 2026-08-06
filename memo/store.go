@@ -71,6 +71,9 @@ func (s *Store) writeTo(w *bufio.Writer) error {
 	if err := putUvarint(memoVersion); err != nil {
 		return err
 	}
+	if _, err := w.Write(s.Data[:]); err != nil {
+		return err
+	}
 	names := make([]string, 0, len(s.Entries))
 	for name := range s.Entries {
 		names = append(names, name)
@@ -144,6 +147,7 @@ func Load(path string) (*Store, error) {
 		// cache uses, and the same rule ir's unit format uses.
 		return NewStore(), nil
 	}
+	copy(store.Data[:], r.bytes(32))
 	count := r.uvarint()
 	for i := uint64(0); i < count; i++ {
 		e := &Entry{}

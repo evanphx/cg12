@@ -148,6 +148,7 @@ func RunStage(m *ir.Module, session *opt.Session, stage []opt.Pass, store *Store
 		recursive[f.Name] = true
 	}
 	moduleDigest := ModuleDigest(m, o.Pipeline, o.Target, o.Compiler)
+	dataDigest := DataDigest(m)
 	result.DigestTime = time.Since(digestStart)
 
 	lookupStart := time.Now()
@@ -165,7 +166,7 @@ func RunStage(m *ir.Module, session *opt.Session, stage []opt.Pass, store *Store
 	// It is not a special case bolted on to make a benchmark look good; it is the
 	// case a build cache is in most of the time (touch a file, change nothing,
 	// build again) and it is the only case that is exact by construction.
-	if hit, err := wholeModuleHit(all, m, store, inputs, inputOf, recursive, moduleDigest); err != nil {
+	if hit, err := wholeModuleHit(all, m, store, inputOf, recursive, moduleDigest, dataDigest); err != nil {
 		return nil, err
 	} else if hit {
 		result.Hits = len(all)
@@ -247,6 +248,7 @@ func RunStage(m *ir.Module, session *opt.Session, stage []opt.Pass, store *Store
 	if err := refresh(all, m, store, used, deps, inputs, inputOf, recursive, moduleDigest, result); err != nil {
 		return nil, err
 	}
+	store.Data = dataDigest
 	result.RecordTime = time.Since(recordStart)
 	result.StoreBytes = store.Bytes()
 	for _, e := range store.Entries {
@@ -297,9 +299,12 @@ func runStage(m *ir.Module, session *opt.Session, stage []opt.Pass, o Options) {
 
 // wholeModuleHit checks that the store describes exactly this module, and if so
 // installs every finished body and drops what the stage dropped.
-func wholeModuleHit(all []*ir.Func, m *ir.Module, store *Store, inputs map[string]Digest,
-	inputOf map[*ir.Func]Digest, recursive map[string]bool, moduleDigest Digest) (bool, error) {
+func wholeModuleHit(all []*ir.Func, m *ir.Module, store *Store,
+	inputOf map[*ir.Func]Digest, recursive map[string]bool, moduleDigest, dataDigest Digest) (bool, error) {
 
+	if store.Data != dataDigest {
+		return false, nil // the globals moved; DeadFuncElim may drop a different set
+	}
 	if len(store.Entries) != len(all) {
 		return false, nil // a function appeared or left: not the same module
 	}

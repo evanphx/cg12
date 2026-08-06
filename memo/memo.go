@@ -114,6 +114,9 @@ type Entry struct {
 // Store is a set of memo entries, one per function name.
 type Store struct {
 	Entries map[string]*Entry
+	// Data is the data-section digest the entries were written under. See
+	// [DataDigest] for why it is here and not in every key.
+	Data Digest
 }
 
 // NewStore returns an empty store.
@@ -217,17 +220,31 @@ func ModuleDigest(m *ir.Module, pipeline, target, compiler string) Digest {
 	for _, name := range opt.CostInlineSelected(m) {
 		fmt.Fprintf(h, "costinline\x00%s\x00", name)
 	}
-	// The data section, because DeadFuncElim roots reachability at it: a function
-	// named only by a global is live, and a memo that did not cover the globals
-	// could keep a function the stage would have dropped. Encoded through the
-	// unit format rather than walked by hand, for the reason ir.CloneFunc gives:
-	// a hand-written walk is correct until someone adds a field.
-	if encoded, err := (&ir.Module{Data: m.Data}).MarshalBinary(); err == nil {
-		h.Write(encoded)
-	}
+
 	var out Digest
 	copy(out[:], h.Sum(nil))
 	return out
+}
+
+// DataDigest is the module's data section.
+//
+// It is deliberately *not* part of a per-function key. DeadFuncElim roots
+// reachability at the globals, so which functions the stage drops depends on
+// them -- but DeadFuncElim is rerun on every compile, from the actual module, so
+// a per-function memo does not need to know. Putting it in the per-function key
+// instead cost the whole cache on a one-character edit: changing 42 to 43 in the
+// program moves a string literal, and 4607 of 4608 entries were invalidated by a
+// clause none of them depended on.
+//
+// Where it *is* needed is the whole-module identity check, whose claim is that
+// the stage's entire output is the stored output -- including which functions
+// were dropped.
+func DataDigest(m *ir.Module) Digest {
+	encoded, err := (&ir.Module{Data: m.Data}).MarshalBinary()
+	if err != nil {
+		return Digest{}
+	}
+	return sha256.Sum256(encoded)
 }
 
 // Valid reports whether an entry may be used against the current compile, and

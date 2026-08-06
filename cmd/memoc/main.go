@@ -52,6 +52,7 @@ type timings struct {
 	Whole     bool    `json:"whole_module"`
 	StoreMB   float64 `json:"store_mb"`
 	MemoMB    float64 `json:"memo_mb"`
+	BackMB    float64 `json:"backend_mb"`
 	PeakMB    float64 `json:"peak_mb"`
 	ObjectSHA string  `json:"object_sha"`
 	AsmSHA    string  `json:"asm_sha"`
@@ -155,6 +156,7 @@ func main() {
 	check(err)
 	t.Backend = time.Since(start).Seconds()
 	t.BackHits = arm64.FunctionCodeCacheHits()
+	t.BackMB = float64(arm64.FunctionCodeCacheBytes()) / (1 << 20)
 	arm64.SetFunctionCodeCache(nil)
 
 	t.ObjectSHA = fmt.Sprintf("%x", sha256.Sum256(objectBuf.Bytes()))[:16]
@@ -200,7 +202,8 @@ func main() {
 				fmt.Fprintf(os.Stderr, "    miss: %-32s %d\n", r, result.MissReasons[r])
 			}
 		}
-		fmt.Fprintf(os.Stderr, "  object %s  asm %s  memo %.1f MB on disk\n", t.ObjectSHA, t.AsmSHA, t.MemoMB)
+		fmt.Fprintf(os.Stderr, "  object %s  asm %s  memo %.1f MB on disk, back-end entries %.1f MB\n",
+			t.ObjectSHA, t.AsmSHA, t.MemoMB, t.BackMB)
 	}
 	if *jsonOut != "" {
 		appendJSON(*jsonOut, t)
