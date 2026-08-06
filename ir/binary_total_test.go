@@ -23,6 +23,18 @@ import (
 
 // allFieldsSet requires every field of a struct to be non-zero, so that a
 // round-trip comparison actually exercises each one.
+//
+// Unexported fields count. They used to be exempt, and two of the format's
+// losses were hiding behind that exemption: ir.Func.nameSeq, whose absence made
+// a decoded module fail to assemble ("duplicate label"), and ir.Func.lowered,
+// whose absence disarmed the verifier's SSA gate, the interpreter's refusal to
+// run lowered IR, and MarkLowered's cross-target guard. A field being unexported
+// says who may write it, not whether the format has to carry it -- so an
+// exception has to be spelled with its name in skip, where the next reader sees
+// that somebody decided.
+//
+// It also records the type, so TestEveryTypeTheFormatCarriesIsGuarded can check
+// that the list of guarded types is not a list of types nothing guards.
 func allFieldsSet(t *testing.T, v any, skip ...string) {
 	t.Helper()
 	skipped := map[string]bool{}
@@ -31,9 +43,10 @@ func allFieldsSet(t *testing.T, v any, skip ...string) {
 	}
 	rv := reflect.ValueOf(v)
 	rt := rv.Type()
+	guardedTypes[rt.Name()] = true
 	for i := 0; i < rt.NumField(); i++ {
 		f := rt.Field(i)
-		if skipped[f.Name] || !f.IsExported() {
+		if skipped[f.Name] {
 			continue
 		}
 		require.Falsef(t, rv.Field(i).IsZero(),
@@ -43,6 +56,9 @@ func allFieldsSet(t *testing.T, v any, skip ...string) {
 			rt.Name(), f.Name)
 	}
 }
+
+// guardedTypes records every struct type some test put through allFieldsSet.
+var guardedTypes = map[string]bool{}
 
 // TestDataRoundTripsEveryField covers a data definition and its items.
 //
@@ -334,6 +350,102 @@ func blockNames(blocks []*Block) []string {
 	return names
 }
 
+// TestFuncRoundTripsEveryField covers the function record itself.
+//
+// Two of the drops this found are unexported and so were invisible to the guard
+// as it stood -- nameSeq, whose loss stopped the cache path assembling at all,
+// and lowered, whose loss disarmed three separate checks. allFieldsSet therefore
+// enumerates unexported fields too and makes the exceptions say their name.
+func TestFuncRoundTripsEveryField(t *testing.T) {
+	m := NewModule()
+	pair := &AggType{Name: "pair", Fields: []Field{{Sub: SubL}, {Sub: SubL}}}
+	m.AddType(pair)
+
+	f := m.NewFunc("f", ClsL)
+	f.Linkage = Linkage{Export: true, Thread: true, Section: ".text.hot", SecArgs: "ax"}
+	f.HasRet = true
+	f.Retty = ClsL
+	f.RetAgg = pair
+	f.RetValues = true
+	f.Variadic = true
+	f.CallConv = CallConvGoInternal
+	f.ManagedFrame = true
+	f.NoSplit = true
+	f.SystemStack = true
+	f.HasClosureContext = true
+	f.ForceInline = true
+	f.CostInline = true
+	f.NoInline = true
+	f.StackPointerWords = map[uint32]map[int]bool{1: {0: true, 8: true}}
+	f.PlacedAllocs = map[uint32]PlacedAlloc{1: {}}
+	// A scalar parameter ahead of the group, so the group's Index is not zero and
+	// its refs do not name temporary 0 -- allFieldsSet cannot tell either of those
+	// from a field nobody set.
+	f.Param("k", ClsW)
+	parts := f.ParamGroup("value", pair, ClsL, ClsL)
+	f.Aggregate(pair, parts...)
+	f.Temp(f.NewTemp("closure", ClsP)).ClosureContext = true
+	f.Word(1)
+	f.Entry().RetAggregate(parts...)
+	f.lowered = "arm64"
+	f.nameSeq = 12
+
+	allFieldsSet(t, *f,
+		"mod",          // the decoder's own module owns the decoded function
+		"PlacedAllocs", // diagnostic only, deliberately not carried; see ir/binary.go
+		"constIdx",     // derived from Consts and rebuilt on decode, not carried
+	)
+	allFieldsSet(t, f.ParamGroups[0])
+	allFieldsSet(t, f.AggregateValues[0])
+	allFieldsSet(t, f.AggregateValues[0].Parts[0])
+
+	data, err := m.MarshalBinary()
+	require.NoError(t, err)
+	back, err := DecodeModule(data)
+	require.NoError(t, err)
+
+	got := back.Funcs[0]
+	require.Equal(t, f.Name, got.Name)
+	require.Equal(t, f.Linkage, got.Linkage)
+	require.Equal(t, f.HasRet, got.HasRet)
+	require.Equal(t, f.Retty, got.Retty)
+	require.Equal(t, f.RetValues, got.RetValues)
+	require.Equal(t, f.Variadic, got.Variadic)
+	require.Equal(t, f.CallConv, got.CallConv)
+	require.Equal(t, f.ManagedFrame, got.ManagedFrame)
+	require.Equal(t, f.NoSplit, got.NoSplit)
+	require.Equal(t, f.SystemStack, got.SystemStack)
+	require.Equal(t, f.HasClosureContext, got.HasClosureContext)
+	require.Equal(t, f.ForceInline, got.ForceInline)
+	require.Equal(t, f.CostInline, got.CostInline)
+	require.Equal(t, f.NoInline, got.NoInline)
+	require.Equal(t, f.StackPointerWords, got.StackPointerWords)
+	require.Equal(t, f.LoweredFor(), got.LoweredFor())
+	require.Equal(t, f.nameSeq, got.nameSeq)
+	require.Equal(t, f.RetAgg.Name, got.RetAgg.Name)
+	require.Len(t, got.Params, len(f.Params))
+	require.Len(t, got.Temps, len(f.Temps))
+	require.Len(t, got.Consts, len(f.Consts))
+	require.Len(t, got.Blocks, len(f.Blocks))
+	require.Equal(t, f.Start.Name, got.Start.Name)
+	require.Len(t, got.ParamGroups, 1)
+	require.Equal(t, f.ParamGroups[0].Index, got.ParamGroups[0].Index)
+	require.Equal(t, f.ParamGroups[0].Count, got.ParamGroups[0].Count)
+	require.Equal(t, f.ParamGroups[0].Type.Name, got.ParamGroups[0].Type.Name)
+	require.Len(t, got.AggregateValues, 1)
+	require.Equal(t, f.AggregateValues[0].Parts, got.AggregateValues[0].Parts)
+	require.Equal(t, f.AggregateValues[0].Type.Name, got.AggregateValues[0].Type.Name)
+
+	// constIdx is not carried, but a decoded function that did not rebuild it
+	// appends a second copy of every constant a later pass interns.
+	before := len(got.Consts)
+	got.Word(1)
+	require.Equal(t, before, len(got.Consts),
+		"interning a constant the decoded function already holds must find it, not append it")
+
+	allFieldsSet(t, *got, "mod", "PlacedAllocs", "constIdx")
+}
+
 func TestInstrRoundTripsEveryField(t *testing.T) {
 	agg := &AggType{Name: "pair", Fields: []Field{{Sub: SubW}, {Sub: SubW}}}
 	in := Instr{
@@ -461,4 +573,85 @@ func roundTripInstr(t *testing.T, in Instr) Instr {
 	back, err := DecodeModule(data)
 	require.NoError(t, err)
 	return back.Funcs[0].Start.Instrs[0]
+}
+
+// formatTypesNotCarried names every struct type reachable from ir.Module that the
+// unit format deliberately does not carry, with the reason. A type is on this
+// list because somebody decided, not because nobody looked.
+var formatTypesNotCarried = map[string]string{
+	"AllocDecision": "Module.AllocDecisions is diagnostic only: no pass reads it, and a " +
+		"module with it empty compiles to the same code. It exists so the two escape " +
+		"analyses can be compared at the same allocation.",
+	"PlacedAlloc": "Func.PlacedAllocs is diagnostic only, for the same reason and by the " +
+		"same argument as AllocDecision.",
+	"constKey": "Func.constIdx's key. The index is derived from Func.Consts and is rebuilt " +
+		"on decode rather than carried -- but it must be rebuilt: see decFunc.",
+}
+
+// TestEveryTypeTheFormatCarriesIsGuarded is the guard on the guard.
+//
+// Extending allFieldsSet to a type stops a *field* being added to that type and
+// silently dropped. It does nothing about a whole *type* being added to the
+// format with no guard at all, which is the same failure one level up -- and the
+// format has grown types before.
+//
+// So the set of struct types the format has to carry is not a list anyone
+// maintains: it is computed, by walking ir.Module's type graph. Every type in it
+// must either have been through allFieldsSet or be on formatTypesNotCarried with
+// a reason.
+func TestEveryTypeTheFormatCarriesIsGuarded(t *testing.T) {
+	reachable := map[string]bool{}
+	var walk func(reflect.Type)
+	walk = func(rt reflect.Type) {
+		switch rt.Kind() {
+		case reflect.Pointer, reflect.Slice, reflect.Array:
+			walk(rt.Elem())
+		case reflect.Map:
+			walk(rt.Key())
+			walk(rt.Elem())
+		case reflect.Struct:
+			if reachable[rt.Name()] {
+				return
+			}
+			reachable[rt.Name()] = true
+			for i := 0; i < rt.NumField(); i++ {
+				walk(rt.Field(i).Type)
+			}
+		}
+	}
+	walk(reflect.TypeOf(Module{}))
+
+	for name := range reachable {
+		if reason, excused := formatTypesNotCarried[name]; excused {
+			require.NotEmpty(t, reason)
+			continue
+		}
+		require.Truef(t, guardedTypes[name],
+			"ir.%s is reachable from ir.Module, so the unit format has to carry it, and no "+
+				"test has put it through allFieldsSet. Write one (see the round-trip tests "+
+				"above), or -- if the format is right not to carry it -- add it to "+
+				"formatTypesNotCarried with the reason. A type nobody enumerated is a type "+
+				"whose fields the encoder can drop one at a time without anything failing.",
+			name)
+	}
+
+	for name := range formatTypesNotCarried {
+		require.Truef(t, reachable[name],
+			"ir.%s is excused from the format but is no longer reachable from ir.Module; "+
+				"drop the entry", name)
+	}
+}
+
+// TestGuardedTypesAreReallyGuarded checks the other direction: that guardedTypes
+// is a record of what ran and not a list that drifted. It is only meaningful when
+// the package ran as a whole, since a -run filter leaves the record empty.
+func TestGuardedTypesAreReallyGuarded(t *testing.T) {
+	if len(guardedTypes) == 0 {
+		t.Log("no allFieldsSet call ran in this invocation; nothing to check")
+		return
+	}
+	for name := range guardedTypes {
+		require.NotContainsf(t, formatTypesNotCarried, name,
+			"ir.%s is both guarded and excused from the format; one of the two is wrong", name)
+	}
 }
