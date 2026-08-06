@@ -6127,47 +6127,67 @@ the whole-program control by exactly the eleven placement rows and nothing else.
 
 ## bench-perf: the runtime cost, per benchmark
 
-`make bench-perf` on this branch, against the baseline committed on `main`.
-Every ratio is goc nanoseconds / host-toolchain nanoseconds, so lower is better
-and the control rows are a fixed spin loop that should not move at all.
+Two runs, one after the other on an otherwise idle box: the branch as it ships
+(conservative lowering), and the same binary with `GOC_LOWERING_WHOLE_PROGRAM=1`
+(the old, whole-program answer). Every ratio is goc nanoseconds / host-toolchain
+nanoseconds, so lower is better, and `control/spin-fixed-work` is a fixed spin
+loop that should not move at all.
 
-**All 44 rows are within tolerance.** The eleven `control/spin-fixed-work` rows
-average **0.9259**, against **0.9260** in the baseline — the box is the same box.
+### Against the committed baseline: all 44 rows within tolerance
 
-The rows that moved at all, with the "resolved" column, which is the part of the
-change that survives both the baseline's and this run's intervals (a negative
-resolved figure means the run cannot tell the movement from zero):
+The eleven control rows average **0.9259**, against **0.9260** in the committed
+baseline — the box is the box the baseline came from. No row is outside its
+tolerance. The largest apparent movements are
+`conc chan/pingpong-unbuffered` −4.1%, `sortmap map/build-probe` −2.4% and
+`gcpress gc/alloc-churn` +2.1%, and of the 44 only two resolve above zero at all
+after both intervals.
 
-| program | case | baseline | this run | change | resolved | tol |
-|---|---|---:|---:|---:|---:|---:|
-| conc | chan/pingpong-unbuffered | 4.3782 | 4.1985 | **−4.1%** | +3.0% | 5.0% |
-| sortmap | map/build-probe | 6.0921 | 5.9433 | −2.4% | −4.7% | 14.5% |
-| gcpress | gc/alloc-churn | 5.9451 | 6.0677 | **+2.1%** | −2.9% | 9.5% |
-| gcpress | gc/live-heap-churn | 4.6294 | 4.6752 | +1.0% | −9.3% | 17.5% |
-| interp | interp/bytecode-loop | 19.0659 | 18.9151 | −0.8% | +0.7% | 5.0% |
-| json | json/marshal | 14.7342 | 14.8446 | +0.7% | −2.1% | 5.5% |
-| text | text/format-append | 7.6592 | 7.7116 | +0.7% | −10.2% | 12.8% |
-| regexp | regexp/anchored-lines | 4.0798 | 4.0400 | −1.0% | −0.2% | 5.0% |
-| regexp | regexp/replace | 5.9579 | 5.9324 | −0.4% | −4.2% | 10.7% |
-| everything else | | | | **< ±0.4%** | | |
+### Paired against the same tree with the optimisation switched back on
 
-Only two rows resolve above zero at all — `chan/pingpong-unbuffered` at −4.1%
-(faster, +3.0% resolved) and `interp/bytecode-loop` at −0.8% (+0.7% resolved) —
-and both are improvements, which on a change that only ever adds heap
-allocations is code placement, not the change. Everything that could plausibly
-be the change is unresolved: `gc/alloc-churn` is the row where more heap
-allocation would show up first, and its +2.1% does not survive its own
-interval.
+This is the measurement that isolates the change, and it says something the
+baseline comparison cannot: the movements above are shared by the control run,
+so they are between-day drift and not this change.
 
-**So the eleven allocation sites that moved to the heap are not visible in this
-suite.** That is the honest reading rather than "no cost": the suite's smallest
-detectable movement is 5.0–23.9% depending on the row, and three of the eleven
-sites are on the TLS handshake path, which no row here exercises. `bench-crypto`
-is the instrument that would see those, and it was not run (it needs an idle
-box and was not scheduled).
+| row | whole-program | conservative | delta |
+|---|---:|---:|---:|
+| `sortmap map/build-probe` | 5.6547 | 5.9433 | +5.10% ‡ |
+| `chase chase/dram` | 1.0449 | 1.0227 | −2.12% |
+| `conc goroutine/spawn-join` | 3.9359 | 4.0151 | +2.01% |
+| `regexp regexp/replace` | 5.8221 | 5.9324 | +1.89% |
+| `json json/unmarshal` | 9.1713 | 9.3150 | +1.57% |
+| `json json/marshal` | 14.6395 | 14.8446 | +1.40% |
+| `interp interp/bytecode-loop` | 19.0664 | 18.9151 | −0.79% |
+| `regexp regexp/anchored-lines` | 4.0676 | 4.0400 | −0.68% |
+| `gcpress gc/live-heap-churn` | 4.6978 | 4.6752 | −0.48% |
+| `gcpress gc/alloc-churn` | 6.0463 | 6.0677 | **+0.35%** |
+| `conc chan/pingpong-unbuffered` | 4.2039 | 4.1985 | −0.13% |
+| the other 20 workload rows | | | **< ±0.45%** |
 
-The run itself reported one failure, and it is not a regression: the suite's own
-noise guard refused `text text/format-append`, whose one-repetition spread was
-13.43% here against 4.27% on the box that produced the baseline. That is a
-statement about the machine during that row, not about the ratio, which moved
-+0.7%.
+‡ The control run failed its own null check on exactly this row — the null arm,
+which is the same binary divided by itself and whose true value is 1.0000, came
+out at 0.9118 ± 5.13%. That is a systematic artefact of that run, so this row's
+control figure is not to be believed. Against the committed baseline the same
+row read 5.9433 vs 6.0921, i.e. −2.4%.
+
+**Across the 31 workload rows the median |delta| is 0.15% and every row except
+the discredited one is inside its own tolerance.** The four rows above 1% —
+`chase/dram`, `goroutine/spawn-join`, `regexp/replace`, `json/*` — carry
+tolerances of 8.8%, 16.4%, 10.7% and 5.5%/10.4%, set from their own noise, and
+each moved less than its own one-repetition spread.
+
+`gcpress gc/alloc-churn` is the row where eleven more heap allocations would
+show first. It moved +0.35%.
+
+**So the placement cost of item 1 is not visible in this suite.** That is the
+honest reading, not "no cost": the suite's smallest detectable movement is
+5.0–23.9% depending on the row, and three of the eleven sites that moved to the
+heap are on the TLS handshake path, which no row here exercises. `bench-crypto`
+is the instrument that would see those and it was not run — it pins a core and
+needs the box to itself, and it was not scheduled for this job.
+
+Both runs ended in a non-zero exit, and neither is a regression: the shipping
+run's noise guard refused `text text/format-append` (one-repetition spread
+13.43% here against 4.27% on the baseline box; the ratio itself moved +0.15%
+against the control), and the control run's null guard refused
+`sortmap map/build-probe` as above. Both are statements about the machine
+during those rows.
