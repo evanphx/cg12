@@ -127,6 +127,10 @@ func TestTempRoundTripsEveryField(t *testing.T) {
 	m := NewModule()
 	f := m.NewFunc("f", ClsW)
 	f.Temps = []*Temp{&tmp}
+	// The fixture marks the temporary as the incoming closure context, so the
+	// function has to say it receives one; ir.Verify, which DecodeModule runs,
+	// rejects a function that states only half of that.
+	f.HasClosureContext = true
 	f.Entry().RetVoid()
 
 	data, err := m.MarshalBinary()

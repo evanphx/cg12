@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/evanphx/cg12/goc"
+	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
 	"github.com/stretchr/testify/require"
 )
@@ -47,6 +48,15 @@ type corpusAudit struct {
 	// the corpus. A program compiled twice contributes twice, which is what makes
 	// it a total rather than a count of distinct sites.
 	shadowCounts opt.ShadowCounts
+	// verifyFailures is every ir.Verify diagnostic the corpus produces, keyed by
+	// the diagnostic itself -- which names one function, so the corpus's shared
+	// stdlib contributes each failing function once rather than once per program.
+	// See TestIRVerifyAudit.
+	verifyFailures map[string]string
+	// functions is how many verifications ran, summed over the corpus. It is not
+	// the denominator of verifyFailures, which is deduplicated; it is the size of
+	// the sweep.
+	functions int
 	// failures is every program that did not compile; either audit is
 	// meaningless if this is not empty.
 	failures []string
@@ -149,12 +159,13 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 	workers := auditCompileWorkers()
 
 	audit := &corpusAudit{
-		programs:     len(programs),
-		frameEscapes: make(map[string]string),
-		loopAliases:  make(map[string]string),
-		allocations:  make(map[string]string),
-		shadow:       make(map[string]string),
-		placements:   make(map[string]string),
+		programs:       len(programs),
+		frameEscapes:   make(map[string]string),
+		loopAliases:    make(map[string]string),
+		allocations:    make(map[string]string),
+		shadow:         make(map[string]string),
+		placements:     make(map[string]string),
+		verifyFailures: make(map[string]string),
 	}
 
 	var mutex sync.Mutex
@@ -185,6 +196,20 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 					mutex.Unlock()
 					continue
 				}
+				// ir.Verify is an instrument the tree already had and never ran
+				// over its own output, so 4-6% of the functions goc emitted
+				// failed it and nothing said so -- while ir.CloneFunc, which
+				// clones through the binary decoder and so through the verifier,
+				// quietly refused to clone any of them and turned off an
+				// optimisation for the whole set. It costs one linear walk per
+				// function against a compile that dominates everything here, so
+				// the corpus pass is where it belongs. See TestIRVerifyAudit.
+				var rejected []string
+				for _, function := range module.Funcs {
+					if err := ir.Verify(function); err != nil {
+						rejected = append(rejected, err.Error())
+					}
+				}
 				escapes := opt.FrameEscapes(module)
 				// The other half of the escape decision's correctness, and the
 				// half FrameEscapes is structurally blind to: an allocation left
@@ -209,6 +234,10 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 				disagreements, counts := opt.ShadowPlacement(module, opt.ComputeEscapeFacts(module))
 				name := filepath.Base(program)
 				mutex.Lock()
+				audit.functions += len(module.Funcs)
+				for _, failure := range rejected {
+					note(audit.verifyFailures, normalizeCorpusKey(failure), name)
+				}
 				for _, escape := range escapes {
 					note(audit.frameEscapes, normalizeCorpusKey(escape.Key()), name)
 				}
