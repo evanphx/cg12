@@ -235,6 +235,21 @@ func packSweep(compiler, work string) ([]configuration, map[bool]string) {
 // of every chain is visible to the walk at once. This is the arm that sees a
 // chain like syscall.runtime_AfterForkInChild's, whose upper frames live above
 // the runtime.
+//
+// A bare `goc program.go` no longer means that. Since the pack cache became the
+// default (cmd/goc/autopack.go), an ordinary compile finds or builds the pack its
+// import list needs and links against it, which is the split arm's module
+// boundary arriving without being asked for. The two switches below are what
+// keeps this arm whole, and both are named on purpose:
+//
+//   - GOC_AUTOPACK=0 is the switch whose meaning is "do not choose a pack", and
+//     it is the one that makes the module whole. Without it this arm silently
+//     measures split frames and the register is regenerated from a strictly
+//     weaker view than it documents itself as having.
+//   - CG12_NOCACHE=1 is what the pack arm three functions above sets, for the
+//     same reason it sets it: nothing in this measurement may be served out of a
+//     cache that some other compiler filled, or the heights are not this
+//     compiler's.
 func wholeConfiguration(compiler, program string, optimize bool) configuration {
 	arguments := []string{"-o", "/dev/null", program}
 	if optimize {
@@ -246,7 +261,7 @@ func wholeConfiguration(compiler, program string, optimize bool) configuration {
 		optimize: optimize,
 		original: containsName(originalWholePrograms, filepath.Base(program)),
 		run: func(string) (string, error) {
-			return compile(compiler, arguments)
+			return compile(compiler, arguments, "GOC_AUTOPACK=0", "CG12_NOCACHE=1")
 		},
 	}
 }
