@@ -5730,3 +5730,40 @@ Two of the seven were **not on the brief**, and both came from extending
 `allFieldsSet` rather than from looking for them: `Jmp.Likely`, and the
 `nameSeq`/`lowered` pair -- the second of which was the most serious defect on the
 branch, since it meant the cache path did not work at all.
+
+## Why none of this had been noticed
+
+Worth recording, because it says what to measure next time.
+
+**The whole-module round trip was checked, and checked the wrong thing.**
+`TestModuleRoundTripsThroughTheBinaryFormat` encodes, decodes, and re-encodes,
+and requires the two blobs to be equal. That is a fixed point over the
+*encoding*, and a field the encoder never writes is dropped identically on both
+passes -- so the check is blind to exactly the defect it looks like it covers.
+Every drop on this report passed it. What catches them is comparing the decoded
+*values* to the originals (`allFieldsSet` + the round-trip tests) and comparing
+the emitted *object*.
+
+**`cmd/stagetime` already decoded a pre-opt module** (`ir.DecodeModule(preOptEncoded)`)
+-- and only checked the error. It never ran the optimizer over what came back and
+never emitted from it, so `nameSeq`'s absence sat there behind a green check.
+
+**`memo.DataDigest` digests through the encoder it is meant to police.** It hashes
+`(&ir.Module{Data: m.Data}).MarshalBinary()`, so for any field the encoder drops
+the digest is equal on both sides of a difference. It could not have caught drop 1
+and it cannot catch the next one; the digest is a check on transport, not on
+fidelity.
+
+**`ir.Verify` does not look at `Data` at all**, which is where drop 1 lived.
+
+**Two of the drops were unexported**, and the guard exempted unexported fields.
+
+One consequence worth stating plainly, since it is the reason `memo` survived:
+the memo installs *finished* bodies and freezes them, so nothing creates a block
+in a decoded function afterwards and `nameSeq` never bit. `opt.InlineIntoNoSplitCallers`
+restores a rejected caller from a `CloneFunc` snapshot whose counter was zero, and
+`arm64.measureFunction` lowers a clone -- neither moved on `hello.go` (`plain` is
+byte-identical across the drop-5 fix), because the measure path stops before it
+emits labels and no rejected caller here grew a block afterwards. So on the
+non-cache path this fix closes a live hazard rather than a live defect. On the
+cache path it was the difference between an object and an error.
