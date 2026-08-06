@@ -5572,3 +5572,24 @@ cache that dropped `SymAttrs` emitted a *different program* of *identical size*,
 which no size check, and no check on the encoded bytes, would ever have noticed.
 The differing bytes fall out as `.text` 691, `.rela.debug_info` 37, `.rela.text`
 15, `.debug_line` 5, `.data` 2, `.debug_info` 2, `.symtab` 2, `.debug_loc` 1.
+
+## Drop 6 — `Jmp.Likely`. Not on the brief either. Safe by luck in goc.
+
+`encBlock` wrote the terminator's `Kind`, `Arg`, `To`, `To2`, `Args`, `Targets`,
+`Signed` and `Cases`, and not `Likely` (`ir/binary.go`). It is `__builtin_expect`'s
+hint about which edge of a conditional branch is taken almost always.
+
+The field's own doc comment calls it advisory, and it is -- advisory to the
+*branch*. It is not advisory to the code around it: `analysis/freq.go:277` biases
+the two edges' block frequencies by it, and that is what tells the register
+allocator to keep hot-edge values in registers and spill cold-edge ones. So a
+round trip that dropped it reallocated registers on both sides of every hinted
+branch.
+
+Set only by `cc/stmt.go:589` from `__builtin_expect`; goc emits none (census: 0),
+so **no movement on any path**.
+
+This one is the argument for item 5 of the brief in miniature. It was not on
+anyone's list, nobody had noticed it, and the only reason it is in this report is
+that extending `allFieldsSet` to `Block` and `Jmp` made the fixture enumerate the
+terminator's fields and the round trip refuse to return one of them.

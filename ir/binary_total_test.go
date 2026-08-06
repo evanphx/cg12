@@ -233,6 +233,107 @@ func TestModuleRoundTripsEveryField(t *testing.T) {
 	allFieldsSet(t, *back, "AllocDecisions")
 }
 
+// TestBlockRoundTripsEveryField covers a block and its terminator.
+//
+// Jmp.Likely was the drop this found, and it was not on anyone's list. It is
+// __builtin_expect's hint about which edge of a conditional branch is taken, and
+// analysis/freq.go reads it to bias the two edges' block frequencies -- which is
+// what tells the register allocator to keep hot-edge values in registers and
+// spill cold-edge ones. Losing it does not break the branch; it changes the
+// register allocation of everything around it.
+func TestBlockRoundTripsEveryField(t *testing.T) {
+	m := NewModule()
+	f := m.NewFunc("f", ClsW)
+	f.Param("k", ClsW)
+	// Temp 0 would make a Ref with a zero ID, which allFieldsSet cannot tell from
+	// an unset one, so the fixture works in temporaries the builder numbered later.
+	k := f.NewTemp("j", ClsL)
+	b := f.Entry() // first, so it is the function's start block
+	yes, no, target := f.NewBlock("yes"), f.NewBlock("no"), f.NewBlock("target")
+	yes.Ret(f.Word(1))
+	no.Ret(f.Word(2))
+	target.Ret(f.Word(3))
+
+	b.Name = "entry"
+	b.Sym = "entry.label"
+	b.ID = 7
+	b.SecondaryEntry = true
+	b.SyntheticSuccs = []*Block{target}
+	b.Pos = SrcPos{File: 1, Line: 2, Col: 3}
+	b.Phis = []*Phi{{Cls: ClsL, To: Ref{Kind: RefTemp, ID: 2}, Args: []Ref{k}, Blocks: []*Block{target}}}
+	b.Instrs = []Instr{{Op: OCopy, Cls: ClsL, To: Ref{Kind: RefTemp, ID: 3}, Args: []Ref{k}}}
+	f.NewTemp("p", ClsL)
+	f.NewTemp("q", ClsL)
+	b.Jmp = Jmp{
+		Kind:    JmpJnz,
+		Arg:     k,
+		To:      yes,
+		To2:     no,
+		Args:    []Ref{k},
+		Targets: []*Block{target},
+		Cases:   []SwitchCase{{Val: 3, Blk: target}},
+		Signed:  true,
+		Likely:  LikelyTo2,
+	}
+	// fn and curPos are builder state, not content: the decoder rebuilds the
+	// owner and no encoding of a position-stamping cursor would mean anything.
+	// Preds is derived -- the CFG pass fills it from the terminators, which are
+	// carried, so re-deriving it is exact.
+	allFieldsSet(t, *b, "fn", "curPos", "Preds")
+	allFieldsSet(t, b.Jmp)
+	allFieldsSet(t, *b.Phis[0])
+	allFieldsSet(t, b.Jmp.Cases[0])
+	allFieldsSet(t, b.Pos)
+
+	data, err := m.MarshalBinary()
+	require.NoError(t, err)
+	back, err := DecodeModuleUnverified(data) // the fixture's phi is deliberately ill-formed
+	require.NoError(t, err)
+
+	got := back.Funcs[0].Start
+	require.Equal(t, b.Name, got.Name)
+	require.Equal(t, b.Sym, got.Sym)
+	require.Equal(t, b.ID, got.ID)
+	require.Equal(t, b.SecondaryEntry, got.SecondaryEntry)
+	require.Equal(t, b.Pos, got.Pos)
+	// The body is TestInstrRoundTripsEveryField's subject; here only that the block
+	// carried it. (An Instr fixture with nil slices compares unequal to a decoded
+	// one with empty ones, which is not a dropped field.)
+	require.Len(t, got.Instrs, 1)
+	require.Equal(t, b.Instrs[0].Op, got.Instrs[0].Op)
+	require.Equal(t, b.Instrs[0].To, got.Instrs[0].To)
+	require.Equal(t, b.Instrs[0].Args, got.Instrs[0].Args)
+	// Block references come back as the decoder's own blocks, so compare by name.
+	require.Equal(t, []string{"target"}, blockNames(got.SyntheticSuccs))
+	require.Len(t, got.Phis, 1)
+	require.Equal(t, b.Phis[0].Cls, got.Phis[0].Cls)
+	require.Equal(t, b.Phis[0].To, got.Phis[0].To)
+	require.Equal(t, b.Phis[0].Args, got.Phis[0].Args)
+	require.Equal(t, []string{"target"}, blockNames(got.Phis[0].Blocks))
+	require.Equal(t, b.Jmp.Kind, got.Jmp.Kind)
+	require.Equal(t, b.Jmp.Arg, got.Jmp.Arg)
+	require.Equal(t, "yes", got.Jmp.To.Name)
+	require.Equal(t, "no", got.Jmp.To2.Name)
+	require.Equal(t, b.Jmp.Args, got.Jmp.Args)
+	require.Equal(t, []string{"target"}, blockNames(got.Jmp.Targets))
+	require.Equal(t, b.Jmp.Signed, got.Jmp.Signed)
+	require.Equal(t, b.Jmp.Likely, got.Jmp.Likely)
+	require.Len(t, got.Jmp.Cases, 1)
+	require.Equal(t, b.Jmp.Cases[0].Val, got.Jmp.Cases[0].Val)
+	require.Equal(t, "target", got.Jmp.Cases[0].Blk.Name)
+
+	allFieldsSet(t, *got, "fn", "curPos", "Preds")
+	allFieldsSet(t, got.Jmp)
+}
+
+func blockNames(blocks []*Block) []string {
+	names := make([]string, len(blocks))
+	for i, b := range blocks {
+		names[i] = b.Name
+	}
+	return names
+}
+
 func TestInstrRoundTripsEveryField(t *testing.T) {
 	agg := &AggType{Name: "pair", Fields: []Field{{Sub: SubW}, {Sub: SubW}}}
 	in := Instr{

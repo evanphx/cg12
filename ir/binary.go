@@ -624,6 +624,12 @@ func (e *enc) encBlock(b *Block, blockRef func(*Block)) {
 		e.iv(c.Val)
 		blockRef(c.Blk)
 	}
+	// Likely is __builtin_expect's hint about which edge is taken. It is advisory
+	// to the branch and not at all advisory to the code around it: analysis/freq.go
+	// biases the two edges' block frequencies by it, which is what tells the
+	// register allocator to keep hot-edge values in registers and spill cold-edge
+	// ones. A round trip that dropped it reallocated registers either side.
+	e.u8(byte(b.Jmp.Likely))
 }
 
 func (e *enc) encInstr(in *Instr, blockRef func(*Block)) {
@@ -1067,6 +1073,7 @@ func (d *dec) decBlock(b *Block, blockRef func() *Block) {
 			b.Jmp.Cases[i].Blk = blockRef()
 		}
 	}
+	b.Jmp.Likely = LikelyEdge(d.u8())
 }
 
 func (d *dec) decInstr(blockRef func() *Block) Instr {
