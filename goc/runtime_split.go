@@ -3,6 +3,7 @@ package goc
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"go/types"
 	"sort"
@@ -132,6 +133,17 @@ func (split *runtimeSplit) againstRuntime() bool {
 	return split != nil && split.mode == runtimeSplitAgainstRuntime
 }
 
+// ErrNoUsablePrebuiltRuntime reports that a program's closure contains no
+// offered pack's closure, so there is nothing to compile it against.
+//
+// It is a sentinel because one caller wants to tell this apart from every other
+// compile failure. A compile that chose its own pack from the cache -- see
+// cmd/goc/autopack.go -- treats "the pack I picked does not fit" as a reason to
+// fall back to the whole-program compile, and everything else as the program's
+// own error to report. Matching on the message would make that distinction a
+// property of the wording.
+var ErrNoUsablePrebuiltRuntime = errors.New("no offered prebuilt runtime is usable")
+
 // chooseManifest picks the pack this program will be compiled against: the one
 // carrying the most, of those whose closure the program's closure contains.
 //
@@ -161,7 +173,8 @@ func (split *runtimeSplit) chooseManifest(closure []string) error {
 		}
 	}
 	if best < 0 {
-		return fmt.Errorf("goc: none of the %d prebuilt runtimes offered is usable by this program", len(split.candidates))
+		return fmt.Errorf("goc: none of the %d prebuilt runtimes offered is usable by this program: %w",
+			len(split.candidates), ErrNoUsablePrebuiltRuntime)
 	}
 	split.chosen = best
 	split.manifest = split.candidates[best]

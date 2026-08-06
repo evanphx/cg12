@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -187,9 +188,24 @@ func compileBatchProgram(target goc.Target, packs *packSet, optimize bool, sourc
 	// printed: this process is shared, so anything written to its stderr belongs
 	// to no particular program.
 	var diagnostics strings.Builder
+	if packs == nil {
+		// No -runtime, so this worker picks each program's pack out of the cache
+		// the way a one-shot `goc file.go` does. Per program rather than per
+		// worker: a batch is a mixed bag of import lists, and the choice is the
+		// program's. See cmd/goc/autopack.go.
+		packs = autoPackFor(target, optimize, contents, &diagnostics)
+	}
 	if packs != nil {
 		err = linkAgainstPrebuiltRuntime(target, packs, name, contents, output, optimize, &diagnostics)
-		return batchError(err, &diagnostics)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, goc.ErrNoUsablePrebuiltRuntime) {
+			return batchError(err, &diagnostics)
+		}
+		// A pack that does not fit is a fit bug, not this program's error: fall
+		// through to the whole-program compile, as the one-shot path does.
+		autoPackDebugf(&diagnostics, "chosen pack did not fit; compiling whole-program")
 	}
 
 	var module *ir.Module

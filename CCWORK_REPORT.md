@@ -2365,3 +2365,45 @@ already holds **985 packs / 45 GB**, all written in the last week, entirely from
 opt-in `build-runtime` calls — which settles the eviction question before it is
 asked.
 
+## The numbers
+
+Wall clock, aarch64/64 cores/250 GiB, median of three, private pack cache
+(`CG12_PACK_CACHE` under the job's scratch, so the shared 45 GB cache was never
+touched or trimmed by this run). "monolithic" is `GOC_AUTOPACK=0` — today's
+default, the whole-program compile, with the in-memory source world still on.
+"cold" is an empty pack cache: it includes building and caching the pack. "warm"
+is a cache hit.
+
+Three programs: `small.go` is `println("hi")`; `hello.go` imports fmt, os,
+strings; `httpsrv.go` imports net/http, net/http/httptest, fmt, io, strings and
+runs a request against its own test server.
+
+### Default (no -O)
+
+| program | monolithic | cold | warm | warm vs monolithic |
+|---|---|---|---|---|
+| small   | 3.05 s  | 2.90 s + 2.9 s pack | 2.62 s  | 1.16× |
+| hello   | 6.45 s  | 10.35 s             | 4.90 s  | 1.32× |
+| httpsrv | 31.5 s  | 49.7 s              | 22.2 s  | 1.42× |
+
+### With -O
+
+| program | monolithic | cold | warm | warm vs monolithic |
+|---|---|---|---|---|
+| small   | 7.39 s  | 9.54 s  | 2.65 s | **2.79×** |
+| hello   | 16.22 s | 20.16 s | 5.24 s | **3.10×** |
+
+The two tables say different things and the difference is the finding.
+
+**A pack saves the back end and the optimiser, not the front end.** The split is
+subtractive and it happens at the very end: both halves run the same parse, the
+same type check, the same reachability walk and produce the same IR, and only
+then does the program module drop what the pack already defines
+(`goc/runtime_split.go:15`). So a warm compile still parses and type-checks the
+whole closure. Without `-O` that front end is most of the compile, and the win is
+16–42%. With `-O` the optimiser runs *after* the split, over a module the
+subtraction has emptied out, and the win is 2.8–3.1×.
+
+Cold is slower than monolithic, by the pack build. That is the deal: one compile
+pays, every later compile of any program with that import list collects.
+

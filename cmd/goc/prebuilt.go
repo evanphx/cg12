@@ -45,11 +45,12 @@ func buildRuntimeCommand(arguments []string, errorOutput io.Writer) int {
 	}
 	carried := splitCommaList(*packages)
 	cache := packCacheDirectory()
-	key, err := packCacheKey(runtimepack.Version, string(target), *optimize, carried, goc.StdlibRoot())
+	prefix, err := packCacheKeyPrefix(runtimepack.Version, string(target), *optimize, goc.StdlibRoot())
 	if err != nil {
 		// A key that cannot be computed means no caching, not a failed build.
 		cache = ""
 	}
+	key := packCacheKeyForPrefix(prefix, carried)
 	if readCachedPack(cache, key, *output) {
 		return 0
 	}
@@ -72,6 +73,15 @@ func buildRuntimeCommand(arguments []string, errorOutput io.Writer) int {
 	}
 	if err := writeCachedPack(cache, key, encoded); err != nil {
 		fmt.Fprintf(errorOutput, "goc: could not cache the prebuilt runtime: %v\n", err)
+	} else {
+		// Index it too, so an ordinary compile that needs this closure finds it
+		// rather than building its own copy. A pack built by hand and a pack
+		// built by a compile are the same artifact under the same key; the only
+		// thing that made them different was that one of them was in the index.
+		if err := writePackIndexEntry(cache, prefix, key, &pack.Manifest); err != nil {
+			fmt.Fprintf(errorOutput, "goc: could not index the prebuilt runtime: %v\n", err)
+		}
+		trimPackCache(cache)
 	}
 	return 0
 }
