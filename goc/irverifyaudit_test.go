@@ -18,23 +18,23 @@ import (
 // the record cannot drift, this one has a single acceptable answer. IR that
 // fails the verifier is IR no pass is entitled to assume anything about.
 //
-// The test exists because that answer was not the one the tree gave. ir.Verify
-// has been there for a while, and nothing on the path from the front end to the
-// backend ever called it: ir.DecodeModule and the lifter do, and neither sees a
-// goc compile, and opt/jumpthread does under CG12_JT_CHECK, where it panicked
-// the compiler on the first closure it touched -- so that arm was unusable too,
-// which is the same silence by another route.
+// The test exists because that answer was not the one the tree gave. goc emitted
+// IR its own verifier rejected -- 125 of 2744 functions (4.6%) for
+// testdata/hello.go, 831 of 14568 (5.7%) for the http program, 7899 distinct
+// functions over this whole corpus. Every one was a closure, deferwrap, gowrap
+// or methodvalue reading a captured variable. The defect was in the verifier:
+// its model of function entry knew about parameters and not about the closure
+// environment the ABI supplies. See ir.defineClosureContext.
 //
-// So goc emitted IR its own verifier rejected -- 125 of 2744 functions (4.6%)
-// for testdata/hello.go, 831 of 14568 (5.7%) for the http program, 7899
-// distinct functions over this whole corpus -- and it went unnoticed for as
-// long as it took someone to try decoding a module and find out. Every one was
-// a closure, deferwrap, gowrap or methodvalue reading a captured variable.
-//
-// The defect was in the verifier: its model of function entry knew about
-// parameters and not about the closure environment the ABI supplies. See
-// ir.defineClosureContext. But the reason it survived is that nothing ran it.
-// This is what runs it.
+// It survived because no test ran the verifier over what goc emits. It was not,
+// however, harmless while it waited. ir.CloneFunc clones a function by encoding
+// and decoding it, and ir.DecodeModule ends with VerifyModule -- so a rejected
+// function is a function that cannot be cloned, and opt.InlineIntoNoSplitCallers
+// clones a callee to measure its frame before inlining it. That optimisation was
+// therefore silently off for every closure, and the arm64 nosplit frame budget
+// could not measure 86 of the 465 functions it tries to measure on a
+// hello-world. A verifier false positive is not inert: it is an optimisation
+// nobody knows is disabled. Which is the argument for running the verifier here.
 //
 // It is nearly free: one linear walk per function, inside a corpus pass whose
 // cost is the compiles.

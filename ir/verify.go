@@ -171,6 +171,15 @@ func verifySSA(f *Func) error {
 // marked temporary must agree, and there must be exactly one such temporary, so
 // "no instruction assigns it" cannot become a way to smuggle a genuinely
 // undefined value past the use-before-definition check.
+//
+// A false positive here is not free, which is worth knowing before relaxing or
+// tightening any of this. CloneFunc clones a function by encoding it and calling
+// DecodeModule, and DecodeModule ends with VerifyModule -- so a function this
+// rejects is a function that cannot be cloned, and the passes that clone to
+// measure (opt.InlineIntoNoSplitCallers via arm64's nosplit frame budget) treat
+// that as "cannot inline" rather than as an error. While this check was wrong,
+// that optimisation was off for every closure in the program and nothing said
+// so.
 func defineClosureContext(f *Func, defined []bool) error {
 	context := -1
 	for _, t := range f.Temps {
