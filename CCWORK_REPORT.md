@@ -2611,3 +2611,100 @@ pack is a pack whose provenance is not fully known — but it means the first ru
 after this change is cold for everything, and the 45 GB already there is garbage
 that only eviction reclaims.
 
+## Guards
+
+| guard | result |
+|---|---|
+| capability matrix, default arm | **368/368**, 0 fail, 0 skip |
+| capability matrix, `-O` arm | **368/368**, 0 fail, 0 skip |
+| capability matrix **through the new auto-pack path** | **368/368**, 0 fail |
+| `TestAllocationCensus`, `TestFrameEscapeAudit`, `TestLoopAliasAudit` | pass (208 s) |
+| determinism: cold vs warm, byte-identical | yes, six ways — see below |
+
+The third row is the guard that matters most and it did not exist before. The
+matrix normally builds six packs by hand and passes them with `-runtime`, which
+exercises the *explicit* pack path. Run with `-runtime-status-prebuilt-runtime=false`
+the harness passes no `-runtime` at all, so every one of the 368 programs goes
+through `autoPackFor` — including through `goc compile-batch` workers, which is
+the batch arm of the new code. All 368 pass.
+
+That run is also the honest answer to the cache-growth question, measured rather
+than guessed: **368 capability programs produced 138 packs and 2.4 GB**, well
+inside the 20 GiB budget. And the wall clock is the point of the whole change:
+
+| the matrix, 368 programs | wall clock |
+|---|---|
+| hand-built packs passed with `-runtime` (today) | 71 s |
+| auto-packed, cold cache (builds all 138 packs) | 108 s |
+| auto-packed, warm cache | **67 s** |
+
+Automatic per-program packs on a warm cache beat the tree's hand-chosen six pack
+roots, with nobody having chosen anything.
+
+### Determinism, including its new failure mode
+
+Determinism used to mean "two runs of the same compile agree". A cached pack adds
+a second meaning: a compile that read a pack written by another process, possibly
+in another week, has to produce the same bytes as the compile that built it.
+Checked explicitly by compiling cold, compiling warm, and comparing:
+
+| program | default | `-O` |
+|---|---|---|
+| small   | identical | identical |
+| hello   | identical | identical |
+| httpsrv | identical | identical |
+
+plus warm-vs-warm identical, and `TestACachedCompileIsTheSameImageAsAColdOne` in
+the committed suite, which does the same for a fmt/sort/strings program and then
+runs it.
+
+`CG12_NOCACHE=1` produces an image byte-identical to `GOC_AUTOPACK=0`, which is
+the whole-program compile — so the gates' cold arm is the same compile it always
+was.
+
+### Eviction, end to end
+
+A cache holding two packs (139 MB) with a 150 MB budget, asked to build a third:
+the least recently used pack was evicted, its index entry with it, the cache came
+back to 83 MB, and the program built and ran. The sweep runs after a cached
+write, so a cache that is over budget and gains nothing new is left alone —
+eviction is a consequence of adding, not a background process.
+
+## One consequence to be explicit about
+
+**The default output binary changes.** A plain `goc file.go` used to produce a
+monolithic image and now produces a split one: the prebuilt runtime object, its
+sidecar, and the program module, linked in that order. Same program, different
+layout and different addresses.
+
+This is not a new configuration — it is the one the capability matrix has been
+running in both arms, and it is now 368/368 through the automatic path as well —
+but it is newly the *default*. Anything cut against the monolithic image
+describes something goc no longer emits by default. The two runtime benchmarks
+(`make bench-crypto`, `make bench-perf`) are unaffected: both are library tests
+in `./goc` that call the compiler in-process and never run `cmd/goc`. Their
+baselines were not touched, nor were any timing baselines re-cut.
+
+`GOC_AUTOPACK=0` gets the monolithic image back.
+
+## What it cost, and what is left
+
+The key is now computed on every compile rather than once per `build-runtime`.
+That is **206 ms**: 30 ms to walk the vendored tree, 131 ms to hash its 5423
+files and 73 MB (concurrently — it was 256 ms single-threaded, and that mattered
+much less when only an explicit command paid it), 3 ms for the goc binary, 26 ms
+for the C toolchain and its probe. It is 7.9% of a warm trivial compile and 0.9%
+of a warm net/http one.
+
+It is deliberately not memoised behind cheaper metadata. Recording the expensive
+digest against the tree's sizes and mtimes would take it to near zero, and would
+reintroduce exactly the hazard the tree-hash exists to avoid: a file whose
+content changed without its mtime changing is then a stale hit, and a stale hit
+is a wrong image. 206 ms of honest hashing is the right side of that trade.
+
+What is left is the front end. A warm goc still parses and type-checks the whole
+closure — the pack saves the back end and, under `-O`, the optimiser. That is why
+the win is 1.16–1.42× by default and 2.8–3.1× under `-O`, and why warm goc is
+still 16–40× warm gc. The next thing worth caching is the `sourceWorld` that
+`goc/source_world.go` builds and discards at process exit.
+
