@@ -3370,3 +3370,229 @@ output for 0.07% of functions before any caching exists. It is three functions
 and it is deterministic, so it is a bug to find rather than a design obstacle —
 but a byte-identity guard on a memoised compile will trip on it, so it has to be
 found first.
+
+## The three awkward passes, and a fourth that is worse than the three
+
+§3.4 names three passes that "do not fit the per-function model". Measured, in
+place, by wrapping each transform rather than by splitting the pipeline around
+it (so the pass identities and the shared `changeLog` are exactly a normal
+compile's):
+
+| | small | http |
+|---|---:|---:|
+| `UnrollRecursion` | **0.064 s**, 86 functions unrolled | **0.451 s**, 1398 unrolled |
+| `DeadFuncElim` | **0.077 s** | **0.318 s** |
+| `InlineIntoNoSplitCallers` | **0.340 s**, 227 measured, 111 accepted | **0.637 s**, 230 measured, 113 accepted |
+| call graph + SCC + call-site census | **0.499 s** over 10 rebuilds (0.050 s each) | **3.766 s** over 18 rebuilds (0.209 s each) |
+
+**`DeadFuncElim` is not awkward — rerun it.** §3.4 guessed ~0.14 s on small; it
+is 0.077 s, and 0.318 s on http. It only removes functions from `m.Funcs`; a
+function it drops is by construction referenced by nothing live, so no surviving
+body depends on the outcome. It is a pure function of the final bodies, which a
+memoised compile has. Rerun it and forget about it.
+
+**`UnrollRecursion` is not awkward either, and §3.4 is wrong to list it.** It
+splices through the same `spliceCall` as the inliner, so the recorded sets
+already cover it: the 86 functions it unrolls on small (1398 on http) carry
+their unrolled callees in their dependency sets like any other inline. Its one
+extra input is SCC membership, which is the same global the inliner needs
+anyway (below).
+
+**`InlineIntoNoSplitCallers` is genuinely awkward, and the measurement says how
+much that costs: 227 functions on small, 230 on http — 5.5% and 1.8% of the
+module.** Its input is a byte count the backend computes from the finished code,
+and `FrameBudget.Charge` spends a chain's headroom in call-graph order, so one
+accepted caller changes what a later caller on the same chain is allowed to do.
+That is a dependency on an ordering, not on a set, and no per-function key
+expresses it. The answer is not to express it: **exclude the ~230 nosplit
+callers the pass measures from the memo entirely** and let them take the full
+path. They are a fixed, small, nameable population — it does not grow with the
+program (227 → 230 as the module goes from 5083 to 14901 functions) because it
+is bounded by how many `nosplit` functions the runtime has, not by how much code
+is around them. Costing 5.5% of the module its memo is a far better trade than
+making the key model a frame budget.
+
+**The fourth thing, which §3.4 does not mention, is the standing cost of the
+whole-module analyses.** `inlineModule` rebuilds the call graph, its SCC
+condensation and the call-site census on every round — 10 rounds on small
+(0.499 s total), 18 on http (3.766 s). A memoiser skips the rounds, but it
+cannot skip the analysis entirely, because that is what tells it whether the
+recursion classification its key depends on still holds (below). One rebuild is
+**0.050 s on small and 0.209 s on http**.
+
+So the un-memoisable residue of the whole-module stage is one graph build plus
+`DeadFuncElim` plus `InlineIntoNoSplitCallers`:
+
+- small: 0.050 + 0.077 + 0.340 = **0.467 s** of a 16.16 s compile (2.9%)
+- http: 0.209 + 0.318 + 0.637 = **1.164 s** of a 74.4 s compile (1.6%)
+
+It shrinks as a fraction as the program grows, which is the right direction.
+
+## What the recorded set does not cover, and what that costs
+
+The set is what the inliner *read through `directCallee`* — the single choke
+point through which nothing crosses the function boundary without resolving a
+name. Three inputs reach an inlining decision without going through it, and each
+has to be accounted for or the key is unsound. Two of them turn out to be free;
+one is a real hole with a cheap fix.
+
+**The call-site census is a dead input today, and there is now a test saying so.**
+`worthInlining` derives its budget as `inlineOnceBudget/sites` floored at
+`inlineSmallBudget`. Both constants are **24**, so the quotient is at or below
+the floor for every `sites ≥ 1` and the budget is always 24 — the module-wide
+call-site count cannot change any decision. This matters because the census is
+the one input that is genuinely whole-program (every function that calls `g`
+contributes), so a live one would have forced every caller of `g` into every
+memo that mentions `g`. `TestCallSiteCountCannotChangeAnInlineDecisionToday`
+asserts the two constants are equal and fails the moment someone separates them,
+which is the moment the per-function key needs redesigning.
+
+**`selectCostInline` selects nothing on either Go program** — 0 functions on
+both. It fires only on callers containing a computed goto (`ir.JmpBr`), which is
+an interpreter's threaded dispatch loop; the Go programs have none. It is a live
+whole-module input for the C interpreter workloads and inert for Go, so it needs
+a clause in the key (a digest of the selected set) but costs nothing here.
+
+**SCC membership is a real hole.** `scc.recursive[callee]` gates inlining
+absolutely, and it is a property of the whole call graph, not of any function the
+recorded set names. The failure is constructible: `f` inlines small `g`; `g`
+calls large `x`, which `g` did not inline, so `x`'s own callees never entered
+`f`'s set; an edit makes `x`'s callee `y` call back into `g`'s component. Now `g`
+is recursive and `f` may no longer inline it — but nothing in `f`'s recorded set
+moved, so the key says the memo is valid and it is not.
+
+Neither measured edit produced a single instance (the analysis checks for
+exactly this: "changed output the key called valid" was **0** on both), but the
+hole is structural rather than statistical. The fix is cheap and is already
+paid for: **store the `recursive` bit of every function in the memo's set and
+validate it against the rebuilt SCC.** The graph rebuild costs 0.050 s / 0.209 s
+and the residue passes need it anyway.
+
+## The same measurement on http: the blast radius is absolute, not proportional
+
+| edit | program | input moved | output genuinely changed | **invalidated** | ratio | hit rate |
+|---|---|---:|---:|---:|---:|---:|
+| root-package | small (4131) | 1 | 1 | **2** | 2.00x | 99.95% |
+| root-package | http (12796) | 2 | 2 | **3** | 1.50x | 99.98% |
+| leaf `runtime.alignUp` | small (4131) | 1 | 29 | **31** | 1.07x | 99.25% |
+| leaf `runtime.alignUp` | http (12796) | 1 | 29 | **31** | 1.07x | **99.76%** |
+
+The leaf edit invalidates **the same 31 functions** on a module 3.1x larger.
+That is the strongest single result here. `alignUp`'s blast radius is a property
+of `alignUp` — how many functions inline it — and not of how much other code is
+in the module. So Option C's hit rate *improves* with program size (99.25% →
+99.76%) rather than degrading, which is the opposite of what a conservative key
+would do and the opposite of the risk this stage existed to test.
+
+The http root edit changed two functions rather than one, because inserting a
+statement in `main` moves `main.main` and the handler closure it defines. The
+key invalidated three: the two, plus one caller that had inlined one of them.
+
+**And the key was sound on all four.** Not one function changed its
+post-optimisation body while its recorded set said the memo was still valid.
+That is the property a memoiser miscompiles on, and it held on 4131 + 4131 +
+12796 + 12796 functions.
+
+## What Option C would actually deliver, arithmetic on measured inputs
+
+This is a projection, not an implementation. It multiplies `BUILD_CACHE.md`
+Part 2's stage times by the hit rates and residues measured above.
+
+Small (16.16 s: front end 4.08, prefix 1.44, whole-module remainder 8.58, back
+end 2.05):
+
+| | s |
+|---|---:|
+| Option B underneath (`funcDecl`+`globalDecl` 1.64 + prefix 1.44) | 3.08 |
+| whole-module remainder, less the 0.467 s residue, at the leaf edit's 99.25% | 8.05 |
+| back end, less the ~230 nosplit callers excluded from the memo, at 99.25% | 1.92 |
+| **saved** | **13.05 of 16.16 = 81%** |
+| less decoding the post-opt unit (§2.5: 0.36 s) | **12.69 = 79%** |
+
+http (74.4 s: front end 18.98, prefix 8.34, remainder 36.08, back end 11.49):
+
+| | s |
+|---|---:|
+| Option B underneath (8.19 + 8.34) | 16.53 |
+| remainder, less the 1.164 s residue, at 99.76% | 34.8 |
+| back end, less the excluded nosplit callers, at 99.76% | 11.25 |
+| **saved** | **62.6 of 74.4 = 84%** |
+| less decoding the post-opt unit (§2.5: 1.60 s) | **61.0 = 82%** |
+
+**79–82% against a stated ceiling of 85–86%**, and against Option B's 18–21%.
+The gap to the ceiling is not the miss rate — it is the residue, the decode, and
+the ~230 nosplit callers, in that order.
+
+Two things this arithmetic is optimistic about, stated so nobody has to
+rediscover them:
+
+- **A miss is not priced per function.** The whole-module remainder is a
+  fixpoint, not a sum of per-function costs. Re-running it for 31 missed
+  functions still pays for the pipeline scaffolding around them, so the real
+  cost of a miss is above its 0.75% share. With 31 of 4131 missing, the error is
+  small; with a `goc_memcpy` edit invalidating 1395, it is not.
+- **Validation is not priced at all.** Every build must hash each function's
+  post-prefix IR to compare against the recorded input digests. That is a walk
+  over the whole module. It is bounded by the cost of the digest the measurement
+  already computes, and it is the first thing stage 2 must measure rather than
+  assume.
+
+## Verdict: stage 2 is worth doing
+
+The brief's decision rule was explicit — ~30 invalidated functions means the
+ceiling is real; ~3000 means Option C is worth roughly Option B and should not be
+built. **It is 31, on both programs, for the hard edit.** The recorded set can
+say what the output already shows.
+
+The three facts that decide it:
+
+1. **The set is small and does not grow with the program.** Median 3 consulted
+   functions, p95 27, max 182 — and http, at 3.1x the functions, has median 3,
+   p95 25, max 181. goc's inliner reaches a bounded distance (24 instructions of
+   callee, +128 of caller growth), so the key's size is a property of the cost
+   model, not of the module.
+2. **Invalidation tracks the real blast radius to within 7%.** 31 against 29 for
+   the leaf edit, 2 against 1 and 3 against 2 for the root edits. The
+   conservatism a sound key costs — counting callees that were read and not
+   inlined — is two functions, not two thousand.
+3. **It was sound on every function of every comparison.** Zero cases of a
+   changed output the key called valid, across 33 854 function comparisons.
+
+What stage 2 has to build, in the order the measurement suggests:
+
+1. **A `-trimpath` equivalent.** Absolute build paths are in `ir.SrcPos`, so
+   today two checkouts share nothing. Nothing else matters if this is not fixed;
+   it is also Option B's problem.
+2. **Find the three functions the pipeline split moves** (`trimZeros`,
+   `decoderune`, `syscall.Write`). A byte-identity guard is the correctness
+   property of the whole design, and it cannot be turned on while the boundary
+   itself moves output.
+3. **The key**: per function, the recorded consulted set, each member's
+   post-prefix input digest, each member's `recursive` bit (to close the SCC
+   hole), plus `opt.PipelineIdentity()`, the target, `-O` and the goc binary
+   hash, exactly as §3.2 has them.
+4. **Exclude the ~230 nosplit callers `InlineIntoNoSplitCallers` measures.** They
+   are 5.5% of small and 1.8% of http, they do not grow with the program, and
+   they are the only population whose result depends on an ordering rather than
+   on a set.
+5. **Rerun, do not memoise: `DeadFuncElim` (0.077 s / 0.318 s), one call graph +
+   SCC build (0.050 s / 0.209 s), `InlineIntoNoSplitCallers` (0.340 s /
+   0.637 s).** `UnrollRecursion` needs neither — it splices through
+   `spliceCall`, so the recorded sets already cover it.
+6. **Measure validation cost before trusting the projection.**
+
+The one thing that would change this answer: the reverse fan-out tail. Editing
+`goc_memcpy`, `goc_memset`, `goc_storep`, `runtime.atomicstorep` or the
+heap-membership helpers invalidates a third of the module (1395 of 4131, 5462 of
+12796). That is the write-barrier and allocator core, it is a short list, and it
+is edited rarely — but a build-cache design that does not say this out loud
+would be a design that surprises somebody. **Option C is fast for edits to your
+own package and to ordinary library code, and roughly Option B for edits to the
+runtime's memory core.**
+
+### Scope note
+
+Packs were not touched, as instructed. `cmd/depsets` and `opt.Record` are
+measurement scaffolding: the recorder is nil unless `opt.Record` installs it, and
+the controls above show a recorded compile produces byte-identical output to an
+unrecorded one on all 4131 functions.
