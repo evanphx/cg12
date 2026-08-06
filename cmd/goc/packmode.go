@@ -29,9 +29,25 @@ import (
 //	         optimizer runs, so the passes converge on it instead of re-deriving
 //	         it. This is the mode the pack's IR member exists for.
 //
-// The default is ir: the point of carrying IR is that caching stops costing code
-// quality, and a default that still cost it would leave the tree in the state
-// this change exists to fix.
+// **The default is compose, and the reason is measured.** ir is 3.5 s faster
+// than compose on a warm compile of the float benchmark (11.57 s against
+// 15.10 s), and it costs code quality to get it: the inliner splices a callee
+// that has already been through unroll/ifconvert/tailmerge/gcm, where a
+// monolithic build splices the callee as it stands at that round of the inline
+// fixpoint and cleans up afterwards. Measured, `-perf-bench-only text` at nine
+// repetitions:
+//
+//	arm         text/parse goc/host ratio   against the baseline
+//	monolithic  7.7099                      -0.1%
+//	object      7.9482                      +2.9%  (within a 5.0% tolerance)
+//	compose     7.6764                      -0.6%
+//	ir          8.1908                      +6.1%  PAST TOLERANCE
+//
+// compose reproduces the monolithic number; ir is worse than the object pack it
+// replaces. A default that trades the thing this change exists to fix for a
+// quarter of the compile time would be the wrong default, so ir is a named arm
+// and not the default. Nothing writes the IR member unless it is selected, so an
+// ordinary pack is the size it always was.
 const packModeVariable = "GOC_PACK_MODE"
 
 type packMode struct {
@@ -53,7 +69,7 @@ var packModes = []packMode{
 func selectedPackMode() packMode {
 	requested := os.Getenv(packModeVariable)
 	if requested == "" {
-		requested = "ir"
+		requested = "compose"
 	}
 	for _, mode := range packModes {
 		if mode.name == requested {

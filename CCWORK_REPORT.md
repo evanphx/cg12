@@ -4024,3 +4024,138 @@ function differently).
 **And the cost is most of what the pack was worth.** 5.13 s → 11.57 s. The IR
 member is worth 3.5 s of that (15.10 → 11.57), which is the optimiser work the
 pack's already-optimised bodies save.
+
+## Is code quality genuinely restored, and is it byte-identical?
+
+Compared per function on the linked images, with the three quantities a linker
+chooses -- branch targets, `adrp` pages and the `#imm` of the instruction pairing
+with an `adrp` -- normalised away, since the pack image places the same code at
+different addresses. Everything else, including register allocation and
+instruction selection, is compared literally. (`$TMPDIR/fndiff3.py`; the
+normalisation is by mnemonic, not by pattern-matching hex, so a real immediate is
+still compared.)
+
+**The program's own package, `float/main.go`, 11 functions:**
+
+| arm | identical to monolithic | differing |
+|---|---:|---|
+| `object` | 7 / 11 | `main_main`, `main_dotProduct`, `main_report`, `main_measure` |
+| **`compose`** | **11 / 11** | — |
+| `ir` | 9 / 11 | `main_report` (448 vs 416 insns), `main_measure` (320 vs 296) |
+
+So `compose` reproduces a monolithic build's code for the program exactly. `ir`
+does not, and the reason is precise and expected: it seeds the module with the
+pack's **post-pipeline** bodies, so the inliner splices a callee that has already
+been through unroll / ifconvert / tailmerge / gcm, where a monolithic build's
+inline fixpoint splices the callee as it stands at that round and cleans up
+afterwards. Two of eleven functions come out bigger. That is the price of the
+3.5 s the IR member saves, and it is a real trade rather than a bug.
+
+**The whole image, `compose` vs monolithic: 4098 of 4493 common functions are
+identical.** The 395 that differ:
+
+| count | what |
+|---:|---|
+| 365 | functions supplied by the pack's own object, compiled in the pack's module rather than this program's. Pre-existing: this is what an object pack is. |
+| 27 | program-built interface-call dispatchers and go-internal func-value wrappers. **A strict subset of the 32 that already differ under `object`** -- so the split, not this change, is what makes them differ; `compose` narrows it. |
+| 3 | `@plt` stubs and `__do_global_dtors_aux`, emitted by `cc`, not by goc. |
+
+**So the honest answer to the byte-identity guard is: no, and here is exactly
+why.** A pack-linked image is two Go modules -- the pack's object plus the
+program's -- and the pack's object was compiled from the pack's own module. Its
+functions are what the pack build made them, whatever the program build's
+optimiser would have made them. Byte-identity of the *whole image* would require
+the program build to emit every function itself, which means giving up the pack's
+object as well as its optimiser saving, at which point the pack is a monolithic
+build with extra steps. What is restored, and what the brief was actually after,
+is that **the code the program build emits is the code a monolithic build emits**
+-- 11/11 under `compose`, and `main_dotProduct` back to 0x40/72 under both.
+
+## `make bench-perf` with auto-packing ON
+
+Run 1 (`GOC_PACK_MODE` unset, so `ir`; `GOC_AUTOPACK` unset, so on). **All 42
+rows within tolerance.** The seven measurements the brief listed as past
+tolerance under the object pack:
+
+| row | object pack (from the brief) | this run |
+|---|---:|---:|
+| `float/dot-product` | **+39.3%** | **+1.3%** |
+| `flate/decompress` | +18.6% | −1.8% |
+| `sort/ints` | +13.2% | +0.1% |
+| `mutex/uncontended` | +13.1% | −0.0% |
+| `flate/compress` | +12.3% | +0.3% |
+| `interp/bytecode-loop` | +8.1% | −0.8% |
+
+The run nevertheless reported FAIL, and not on a tolerance: the suite's noise
+gate fired, because `float/dot-product`'s one-repetition spread was 3.82% against
+the baseline's 0.15%. That is my fault rather than the compiler's -- I had a
+twelve-program compile-and-run sweep running on the same box at the same time.
+Rerun below on a quiet machine.
+
+## 1. What the pack carries, and what travels alongside it
+
+**IR for which packages:** all of them, in one unit. The pack's IR member is the
+whole prebuilt module serialized by `ir/binary.go` -- not a per-package slice.
+Per-package slicing is what BUILD_CACHE.md §3.3 costed out, and it is not needed
+here: a pack is already built as one closure and consumed as one closure, and
+`chooseManifest`'s containment rule means a program either takes the whole pack
+or none of it.
+
+**At what pipeline point:** *after* `opt.OptimizeModule` and *before* the back
+end. Two reasons, and they pull in opposite directions from BUILD_CACHE.md's
+per-package answer, which was "before the first inline fixpoint":
+
+  - It cannot be later. `arm64.CompileToObjectAndAssembly` mutates the module it
+    lowers, so IR taken after it is not the IR the object was built from.
+  - It should not be earlier, and this is the whole point of the member. Bodies
+    taken before the optimiser would save nothing: the program build's own front
+    end has already produced them (see §2 above -- goc lowers whole programs), so
+    a pre-optimisation pack body is a body the program build already has. Only
+    an *optimised* body carries work the program build would otherwise redo.
+
+**What travels alongside:**
+
+| gc's export data | goc's IR pack | why |
+|---|---|---|
+| inline cost (`CanInline`, `inlineMaxBudget`) | **nothing** | goc's inliner costs a body when it sees it (`opt/budget.go`), and it sees the whole body here rather than a summary. A carried cost would be a second answer to keep in step with the first. |
+| escape notes (`funcExt`) | **nothing** | `opt/escapefacts.go` is module-wide and runs over the composed module, so it recomputes rather than imports. Carrying them would be carrying an answer computed in the pack's module for use in the program's. |
+| ABI (`relocFuncExt`) | **already in the IR** | `ir.Func` carries `CallConv`, `AggArgs`, `RetAgg`, `ManagedFrame`; `ir/goabi.go` is not a separate side table. |
+| fingerprint (`[8]byte`, `checkFingerprint`) | **`Manifest.IRDigest`**, checked in `runtimepack.Unmarshal` | gc's reason exactly: a stale or truncated artifact must fail loudly, not miscompile. `ir/binary.go` has a magic tag and a version byte and no content digest. |
+| the compiled package | **still `Pack.Object`** | Carrying IR does not mean giving up the compiled member. gc's archive holds both, and so does this. |
+
+**The cost/benefit changes shape, and not in the direction the brief expected.**
+An IR pack does **not** save the front end -- §2 above shows why it cannot -- and
+it **does** give back the optimiser saving, which is larger than the back-end
+saving it also gives back. Measured on the float program: the object pack's warm
+compile spends 0.19 s in the optimiser and 0.18 s in the back end because the
+module is ~600 functions by then; composing puts all 5083 back, and that is the
+whole of the 5.13 s → 11.57 s. The IR member buys back 3.5 s of it.
+
+## 2. The key
+
+`packCacheKeyPrefix` already covers the target, `-O`, `arm64.TextLayoutIdentity()`,
+`opt.PipelineIdentity()`, every `GOC_`/`CG12_` variable
+(`compilerEnvironmentIdentity`), the hashed goc binary, the hashed stdlib tree and
+`cToolchainIdentity()`. An IR pack adds two clauses, both in
+`cmd/goc/packcache.go`:
+
+1. **`ir.BinaryVersion`** -- the IR format version, which is the minimum the brief
+   asked for. It is not covered by the hashed compiler in any way a reader can
+   rely on: `binVersion` is a constant compiled into the binary, so a *particular*
+   format change does move the hash, but nothing makes that true by construction,
+   and the failure mode if it is ever not true is a decoded module that is subtly
+   not the one written. Naming it in the key makes it true by construction.
+2. **`packModeIdentity()`** -- which of `object`/`compose`/`ir` built the pack.
+   An IR pack has a third member and a manifest naming an IR version, and a
+   program built against one is composed rather than subtracted; a pack built
+   under one mode is not the pack another mode wants. This is the same clause
+   `opt.PipelineIdentity()` is, for the same reason: the environment changes what
+   is produced without changing a byte of the compiler.
+
+`runtimepack.Version` also moves 2 → 3, which is a second, coarser guard: it is
+checked on read, so a version-2 pack in an existing cache is refused rather than
+read with a missing member.
+
+Not in the key, deliberately: `Manifest.IRDigest`. It is a *content* check, not a
+*key* clause -- it answers "is this artifact intact", which the key cannot,
+because the key is computed from the inputs and the digest from the output.
