@@ -2607,3 +2607,26 @@ The three new verifier tests and the round-trip test were each confirmed to fail
 on `main`'s `ir/verify.go` with the test files in place, and to pass with the
 fix — the fail-before check, not just a passing test.
 
+### A determinism-harness snag, recorded because it cost time
+
+Two things went wrong with `analysis/determinism` and neither was the compiler.
+
+First, `goc` resolves the standard-library overlay manifest relative to **its own
+build tree**, not its working directory:
+
+    load runtime: standard library overlay manifest
+    .../main-tree/stdlib/overlays/manifest.json: no such file or directory
+
+I had built a comparison `goc` inside a temporary `git worktree`, then removed
+the worktree while keeping the binary. The binary still ran, and failed every
+compile instantly — `round 0: 406 programs in 0.0s, 406 failed`. A `goc` binary
+is not relocatable away from the checkout it was built from. Worth knowing
+before anyone tries to cache or ship one.
+
+Second, `analysis/determinism` reports failures by **name only**. When 406 of
+406 programs "failed to compile" it printed 406 names and not one reason, and
+the reason was a single line available in the very reply it had already parsed
+(`response.Error`). Diagnosing it needed a hand-run of the batch protocol. That
+is a one-line improvement to a tool this repository leans on, and it is not
+made here only because it is not this branch's subject.
+
