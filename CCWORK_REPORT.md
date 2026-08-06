@@ -5679,3 +5679,54 @@ that already contains a hash of itself, so the memo pays sha256 twice on that
 path. It could read the embedded digest instead and halve it. That changes what a
 `memo.Digest` *is* (payload rather than blob) and therefore every stored entry, so
 it belongs to whoever owns the memo's on-disk compatibility, not to this branch.
+
+## Where it ends: three paths, one object
+
+With every drop closed, the same program compiled three ways emits the same
+bytes:
+
+```
+mode=plain          object=9991688 sha256=fc378a0afa89173a89c81e11d0e12859bbd2002115d95ea8705d28abaa5b0953
+mode=roundtrip      object=9991688 sha256=fc378a0afa89173a89c81e11d0e12859bbd2002115d95ea8705d28abaa5b0953
+mode=roundtrip-pre  object=9991688 sha256=fc378a0afa89173a89c81e11d0e12859bbd2002115d95ea8705d28abaa5b0953
+```
+
+At the branch base, `roundtrip` differed by 39336 bytes and `roundtrip-pre` did
+not produce an object at all.
+
+That third line is the one Stage 0 was for. It says: take goc's whole
+`hello.go` module -- 2152 functions, 6361 data definitions, the Go runtime behind
+it -- write it to bytes, read it back, run the *entire* whole-module optimizer
+over what came back, and emit. The result is the object, byte for byte.
+
+It also settles the fields the format deliberately does not carry, by measurement
+rather than by argument. `Block.Preds` is re-derived by `analysis/cfg.go` and
+`Func.constIdx` is rebuilt on decode; if either reconstruction were inexact, the
+cache path could not land on the same bytes. `Module.AllocDecisions` (227 of them
+on this program) and `Func.PlacedAllocs` are dropped outright, and the object does
+not notice -- which is what their doc comments claim and what nobody had checked.
+
+## Summary — the drops, and what each one moved
+
+| # | dropped | real in goc? | emitted-code movement |
+|---|---|---|---|
+| 1 | `DataItem.RelativeTo` | **real**, 1639 items | round trip: `.rela.data` −39336, **−1639 relocations**; object goes from differing to byte-identical |
+| 2 | `Const.Thread` | safe by luck, 0 | none, either path |
+| 3 | `AggType.Packed` | safe by luck, 0 | none, either path |
+| 4 | `Module.SymAttrs` | **real**, 84 symbols | cache path: **755 bytes differ, 691 of them in `.text`, at identical section sizes** |
+| 4 | `Module.SymAlign` | safe by luck, 0 | none |
+| 4 | `Module.Aliases` | safe by luck, 0 | none |
+| 5 | `Func.nameSeq` | **real** | cache path: **from "does not compile" (`a64: duplicate label "b4"`) to byte-identical** |
+| 5 | `Func.constIdx` (rebuild, not carry) | **real** | cache path: `.text` −256, `.rela.text` +408, `.data` −184, object −1128 |
+| 5 | `Func.lowered` | safe by luck, 0 | none; disarmed three checks (verifier SSA gate, interpreter refusal, `MarkLowered`) |
+| 6 | `Jmp.Likely` | safe by luck, 0 | none |
+
+Deliberately **not** carried, each with the reason in the source and now named as
+an explicit skip in the guard: `Module.AllocDecisions`, `Func.PlacedAllocs`
+(diagnostic-only), `Func.constIdx` (derived; rebuilt), `Block.Preds` (derived by
+the CFG pass), `Block.curPos` (a builder cursor).
+
+Two of the seven were **not on the brief**, and both came from extending
+`allFieldsSet` rather than from looking for them: `Jmp.Likely`, and the
+`nameSeq`/`lowered` pair -- the second of which was the most serious defect on the
+branch, since it meant the cache path did not work at all.
