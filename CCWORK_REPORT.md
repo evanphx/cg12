@@ -3797,3 +3797,259 @@ hashing all 5083 post-prefix bodies, plus one call graph and SCC condensation),
 0.27 s recording, 0.04 s writing 30 MB. Stage 1 said to measure validation rather
 than assume it; it is **0.13 s, 0.8% of the compile**, and it is paid on every
 build, hit or miss.
+
+## What it is
+
+`memo/` is the cache. Per function it stores the finished body (cg12's binary
+unit format), and a key made of clauses rather than one opaque hash, so a miss
+can say which clause moved:
+
+| clause | why |
+|---|---|
+| the function's own post-prefix body digest | it is the input |
+| for each member of the inliner's recorded **consulted** set: its name, its post-prefix digest, and its `recursive` bit | the set is stage 1's; the bit closes the SCC hole stage 1 named |
+| `ir.Module.SymAttrs` | the one piece of module state the per-function passes read |
+| the `CostInline` selection | the one live whole-module input that is neither |
+| the file table | positions are indices into it and a per-function unit does not carry it |
+| `opt.PipelineIdentity`, the target, the compiler binary's hash | the identity of the compile |
+
+The **data section is deliberately not in a per-function key**, and putting it
+there was a measured mistake: `DeadFuncElim` roots reachability at the globals,
+so it looks like it belongs — but `DeadFuncElim` is rerun on every compile from
+the actual module, so no per-function memo needs to know. With it in, changing
+`42` to `43` in the program moved a string literal and invalidated **4607 of
+4608** entries through a clause none of them depended on. It belongs to the
+whole-module check below, whose claim does cover which functions were dropped.
+
+A hit's body is installed and the function is **frozen** (`opt.Session.Freeze`,
+new): no pass in the stage may transform it, every pass may still read it. The
+back end's half is separate and simpler: lowering, allocation and emission read
+one function and read-only module facts — the property the parallel backend
+already relies on — so the finished code is a pure function of the finished body
+and the key is that body's digest, with no dependency set at all.
+
+Stage 1's four rulings are implemented as it left them: `DeadFuncElim` is rerun,
+`UnrollRecursion` needs nothing of its own, the `nosplit` population is excluded
+outright (475 of 5083 on small, 479 of 14901 on http — it does not grow with the
+program), and one call graph + SCC condensation is rebuilt to revalidate the
+`recursive` bits.
+
+### The whole-module check, which is the only part that is exact by construction
+
+Before the per-function lookup there is a whole-module one: if every function's
+post-prefix digest matches its entry, the module clause matches, the data digest
+matches, and the module holds exactly the functions the store was written from,
+then **the input to the stage is bit-for-bit the input the stored output came
+from**. The stage is a deterministic function of that input, so its output is the
+stored output — for every function, including the excluded ones, and including
+whatever the per-function key cannot express. It does not depend on any of the
+per-function reasoning being right.
+
+That is not a special case bolted on to flatter a benchmark; it is the case a
+build cache is in most of the time (build again, having changed nothing), and it
+is the case the "warm" rows below measure.
+
+## The numbers
+
+`cmd/memoc` is a compiler that uses the memo and writes the object and the
+translated assembly. `-no-memo` is the control: same binary, same split, same
+`opt.Session`, store ignored. Every row is one run on an otherwise idle box.
+
+### small — `goc/testdata/fmt_sprintf.go`, 5083 functions in, 4131 out
+
+| arm | wall | front end | prefix | validate | lookup | **stage** | record | back end | store I/O | **saving** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| control | **16.14** | 4.21 | 1.44 | — | — | **8.42** | — | 2.04 | — | — |
+| cold | 16.76 | 4.19 | 1.42 | 0.13 | 0.00 | 8.56 | 0.27 | 2.01 | 0.04 | **−3.8%** |
+| warm, nothing changed | **8.87** | 4.15 | 1.43 | 0.13 | 0.36 | **0.00** | 0.00 | 2.00 | 0.10 | **45.0%** |
+| warm, root-package edit | 12.37 | 4.20 | 1.44 | 0.16 | 0.20 | 3.81 | 0.12 | 2.06 | 0.09 | **23.4%** |
+| warm, leaf edit (`runtime.alignUp`) | 11.76 | 4.17 | 1.45 | 0.16 | 0.23 | 3.24 | 0.10 | 2.05 | 0.09 | **27.1%** |
+
+### http — `goc/testdata/stdlib_http_tls_client_server.go`, 14901 in, 12796 out
+
+| arm | wall | front end | prefix | validate | lookup | **stage** | record | back end | store I/O | **saving** |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| control | **76.11** | 19.79 | 8.36 | — | — | **36.16** | — | 11.67 | — | — |
+| cold | 79.26 | 19.60 | 8.42 | 0.89 | 0.00 | 37.02 | 1.10 | 12.03 | 0.12 | **−4.1%** |
+| warm, nothing changed | **41.78** | 19.10 | 8.36 | 0.90 | 1.20 | **0.00** | 0.00 | 11.90 | 0.32 | **45.1%** |
+| warm, leaf edit (`runtime.alignUp`) | 61.30 | 19.42 | 8.34 | 0.87 | 0.76 | 19.23 | 0.48 | 11.74 | 0.31 | **19.5%** |
+
+**Every one of those memoised compiles emits an object and a translated assembly
+byte-identical to its control's.** Checked as sha256 of both artifacts, on every
+row, plus a per-function comparison of all 5083 / 14901 finished bodies.
+
+| scenario | object | control |
+|---|---|---|
+| small, nothing changed | `01af572844ee64d8` | `01af572844ee64d8` |
+| small, root edit | `6fb91174cde51622` | `6fb91174cde51622` |
+| small, leaf edit | `052413aae94d9030` | `052413aae94d9030` |
+| http, nothing changed | `08159f8899915c3c` | `08159f8899915c3c` |
+| http, leaf edit | `a1a950950b183d9a` | `a1a950950b183d9a` |
+
+### The hit rate in practice
+
+| scenario | entries validated | **invalid** | served from the memo | recomputed to keep the reads honest | excluded (`nosplit`) |
+|---|---:|---:|---:|---:|---:|
+| small, nothing changed | 5083 | 0 | **5083 (100%)** | 0 | — |
+| small, root edit | 4608 | **2** (99.96% valid) | 3243 (63.8%) | 1363 | 475 |
+| small, leaf edit | 4608 | **56** (98.8% valid) | 3427 (67.4%) | 1125 | 475 |
+| http, leaf edit | 14422 | **56** (99.6% valid) | 10516 (70.6%) | 3850 | 479 |
+
+The root edit invalidates **2** — `main.main` and the closure it defines — which
+is exactly what stage 1 measured. The leaf edit invalidates **56 on both
+programs**, and stage 1's strongest single result survives: `alignUp`'s blast
+radius is a property of `alignUp`, not of how much other code is around it, so
+the hit rate improves with program size (98.8% → 99.6%).
+
+(56 rather than stage 1's 31 because this key is the sound one and stage 1's
+count was the recorded-set intersection alone: this one also fails an entry whose
+*own* recursion classification moved, and closes a frozen callee's transitive set
+in through its stored entry, both of which stage 1's arithmetic did not do.)
+
+## Against the 77–82% projection
+
+The projection is **not** met, and the gap is three specific things, two of which
+are not the memoiser's to close.
+
+| | small | http |
+|---|---:|---:|
+| stage 1's corrected projection | 77% | 82% |
+| ...of which Option B underneath (front end + prefix), **not built** | 19% | 22% |
+| so the ceiling available to Option C alone, on these measurements | **64.8%** | **62.8%** |
+| **achieved, warm, nothing changed** | **45.0%** | **45.1%** |
+| the same with the back-end memo persisted (it is in-process only) | 57.4% | 60.7% |
+| achieved, warm, leaf edit | 27.1% | 19.5% |
+
+Three separate statements, in order of size:
+
+1. **Option B is not built, and it is 19–22 points of the 77–82%.** The
+   projection is for Option B *plus* Option C. What this branch built is the
+   Option C half. On the warm no-edit row the front end costs 4.15 s of 8.87 and
+   19.10 s of 41.78 — 47% and 46% of what is left is a front end nothing caches.
+
+2. **The whole-module stage is fully memoised: 8.42 s → 0.00 s and 36.16 s →
+   0.00 s.** That half of Option C delivers everything the projection asked of
+   it, and more than it asked: the projection allowed a 0.467 s / 1.164 s residue
+   for the passes that must be rerun, and the whole-module identity check skips
+   even those, soundly.
+
+3. **The back end's memo is implemented and content-addressed but not persisted**,
+   so across processes it never hits: 2.00 s of small's 8.87 and 11.90 s of
+   http's 41.78 is a back end recompiling what it compiled last time. Persisting
+   it means writing a codec for the per-function code record (code, relocations,
+   block symbols, line rows, DWARF, Go metadata, stack maps, the nosplit budget's
+   facts). Its size is measured below; the work was not attempted here rather
+   than attempted badly, because a codec that drops a field emits a wrong object.
+
+### And the edit rows are the real correction to stage 1
+
+Stage 1 projected a **96.2% work-hit rate** on the leaf edit — 31 invalidated
+plus 125 splice sources, 156 of 4131 recomputed — and said the choice was
+between storing intermediate bodies and recomputing that closure, "and the
+arithmetic above uses the recompute reading". **The recompute reading, as stage 1
+defined it, does not emit the same bytes.** Measured, on the leaf edit:
+
+| live set | stage | object |
+|---|---:|---|
+| misses only (`-closure=none`) | 1.06 s | `101e71ee…` — **differs** |
+| misses + splice sources, stage 1's reading (`-closure=splice`) | 1.04 s | `152e5799…` — **differs** |
+| misses + everything a live function *reads that the stage moves* (`-closure=read`) | 3.24 s | `052413aa…` — **identical** |
+
+The mechanism, found by tracing one function through the stage pass by pass. The
+inliner and the unroller do not read a callee's *finished* body: they walk the
+SCC condensation bottom-up and size a callee with `funcSize` at that moment, and
+splice it as it stands. A frozen function stands at its finished body from the
+start. So a live function can see a callee that the reference compile would have
+shown it in an earlier state.
+
+It is not hypothetical and it is not rare enough to ignore. On the small program
+with **no misses at all** — where the only live functions are the 475 excluded
+`nosplit` ones — `runtime.unlockWithRank` measured 24 instructions or fewer at
+its finished size where the reference measured more, the unroller folded it into
+`runtime.sysMemStat.add`, and five functions and the object moved. Stage 1's
+splice closure does not catch it, because this is a *size* read and not a splice.
+
+So the sound live set is bigger than stage 1 costed, and this is the number that
+replaces its 96.2%:
+
+| | recomputed | of | **work-hit rate** |
+|---|---:|---:|---:|
+| stage 1's projection, small leaf | 156 | 4131 | 96.2% |
+| **measured, small leaf** | **1656** | 5083 | **67.4%** |
+| **measured, http leaf** | **4385** | 14901 | **70.6%** |
+
+The closure is nothing like the whole module only because of one fact worth
+keeping: **1736 of 5083 functions on the small program (4993 of 14901 on http)
+have the same body after the whole-module stage as before it.** A function the
+stage never moves reads the same at every moment, so freezing it is exact by
+construction and it never enters the closure. Without that the closure would be
+everything reachable from the live set, which from 475 runtime `nosplit`
+functions is most of the runtime.
+
+## What the memoiser found in the IR, which was not the memoiser's bug
+
+Getting a warm compile to emit the same object took fixing two things in cg12's
+binary unit format. Both are `ir.CloneFunc`'s problems as much as the memo's —
+`CloneFunc` round-trips through this encoder, and `InlineIntoNoSplitCallers` uses
+it to snapshot a caller it may have to restore.
+
+**1. `Func.StackPointerWords` was not carried, and it is not recoverable.**
+`ir.InferStackPointerWords` *adds* to that map rather than rebuilding it, so a
+function that lost it came back with a smaller pointer map and a smaller frame:
+`.text` 43712 bytes smaller and `.data` 30344 bytes larger across a whole module.
+It is what the collector scans a stack allocation by. The three inline attributes
+(`ForceInline`, `CostInline`, `NoInline`) were not carried either. Unit format
+version 19 → 20.
+
+**2. Inline provenance was written by value, which is faithful to the values and
+not to the graph — and consumers read the graph.** `arm64.buildInlineTree` opens
+and closes a DWARF inlined-subroutine context on `stack[k].site == chain[k]`,
+pointer identity. Decoding gave every instruction its own chain, so one inlined
+region became one region per instruction: **`.debug_info` 3.4 MB → 10.0 MB** for
+identical code. Interning equal chains on decode recovers most of it and is still
+not the same graph — two splices of one callee at one position are distinct
+nodes, and merging them left `.debug_info` 3141 bytes short. It is now a
+per-function site table addressed by index, which reproduces the sharing exactly
+and is *smaller* on the wire: the small program's memo went 36.9 MB → 30.1 MB.
+
+**Both fixes change what `goc -O` emits, by 208 bytes on the small program's
+image.** That is the snapshot-restore path in `InlineIntoNoSplitCallers`: the one
+caller it measures and rejects (`runtime.debugCallWrap1.func` on
+`runtime_lock_osthread`) was being restored without its stack-pointer-word map.
+The change is a fix, it is small, and it is stated here rather than found later.
+
+## What the memo costs
+
+| | small (5083 functions) | http (14901 functions) |
+|---|---:|---:|
+| memo file on disk | **30.1 MB** | **114.6 MB** |
+| per function | 5.9 KB | 7.7 KB |
+| writing it (cold) | 0.04 s | 0.12 s |
+| reading and validating it (warm) | 0.13 s validate + 0.36 s lookup | 0.90 s + 1.20 s |
+| peak RSS, control | — | 3.80 GB |
+| peak RSS, warm | — | 4.76 GB |
+| peak RSS, cold | — | 5.18 GB |
+
+Two things to read off that:
+
+- **Validation is cheap and stage 1 was right to ask.** Marshalling and hashing
+  every post-prefix body, plus one call graph and SCC condensation, is **0.13 s
+  of a 16.1 s compile (0.8%) and 0.90 s of 76.1 s (1.2%)**, paid on every build
+  whether it hits or misses. It got there by not carrying the module's file table
+  in every per-function unit: with the table in, the same walk cost 0.23 s and
+  the memo was 81 MB instead of 30 MB.
+- **Memory is where this costs most, and the direction is wrong.** http's peak
+  RSS goes 3.80 GB → 4.76 GB warm and 5.18 GB cold: the store is 114.6 MB on
+  disk but it is held decoded, alongside the module, and a cold run holds every
+  finished body's encoding as well as the module it came from.
+  `compileRuntimeCapabilityPeakBytes` is 5 GiB and a cold memoised http compile
+  is at 5.18 GB. **A memo that is streamed to disk per entry rather than held as
+  one map is the first thing to fix in stage 3**, and it is the same change that
+  gives it gc's per-entry file layout and an eviction story.
+
+**The back-end half, priced.** The per-function code records the back end would
+have to persist — code, relocations, block symbols, line rows, DWARF, Go
+metadata, stack maps and the nosplit budget's facts, counted field by field
+rather than estimated — are **24.7 MB for the small program's 4131 functions,
+6.1 KB each**, against 30.1 MB for the IR half. So a fully persisted Option C
+memo for this program is about 55 MB, and buys the 2.00 s the back end costs.
