@@ -4073,11 +4073,10 @@ is that **the code the program build emits is the code a monolithic build emits*
 
 ## `make bench-perf` with auto-packing ON
 
-Run 1 (`GOC_PACK_MODE` unset, so `ir`; `GOC_AUTOPACK` unset, so on). **All 42
-rows within tolerance.** The seven measurements the brief listed as past
-tolerance under the object pack:
+Run 1, under what was then the default arm (`ir`), with `GOC_AUTOPACK` on. **41
+of 42 rows within tolerance, one past.** The six measurements the brief named:
 
-| row | object pack (from the brief) | this run |
+| row | object pack (from the brief) | this run (`ir`) |
 |---|---:|---:|
 | `float/dot-product` | **+39.3%** | **+1.3%** |
 | `flate/decompress` | +18.6% | −1.8% |
@@ -4086,11 +4085,13 @@ tolerance under the object pack:
 | `flate/compress` | +12.3% | +0.3% |
 | `interp/bytecode-loop` | +8.1% | −0.8% |
 
-The run nevertheless reported FAIL, and not on a tolerance: the suite's noise
-gate fired, because `float/dot-product`'s one-repetition spread was 3.82% against
-the baseline's 0.15%. That is my fault rather than the compiler's -- I had a
-twelve-program compile-and-run sweep running on the same box at the same time.
-Rerun below on a quiet machine.
+The row past tolerance was `text/parse`, +6.5% against a 5.0% bar. The run also
+tripped the suite's noise gate (`float/dot-product`'s one-repetition spread 3.82%
+against the baseline's 0.15%), which was my fault -- a twelve-program
+compile-and-run sweep was on the same box. A quiet rerun reproduced `text/parse`
+at +6.2%, so it was a real regression and not noise; the triage below attributes
+it to the `ir` arm specifically, and the arm was demoted from the default because
+of it. The passing run is further down.
 
 ## 1. What the pack carries, and what travels alongside it
 
@@ -4315,3 +4316,21 @@ whole-module stage per function on its inline-dependency set -- is the only idea
 on the table that could give back both, and it was explicitly costed there as
 worth building *only if packs are given up*. Composing is what gives them up, in
 everything but name.
+
+### The three answers, in one place
+
+- **Does `bench-perf` pass with auto-packing on?** Yes. 42 of 42 rows within
+  tolerance, noise gate silent, `--- PASS: TestPerformanceSuite (653.08s)`.
+  `float/dot-product` reads −0.0% against the baseline where the object pack read
+  +39.3%, and `main_dotProduct` is back to a 64-byte frame and 72 instructions.
+- **Is IR-pack output byte-identical to a monolithic build?** Not the image, and
+  it cannot be: a pack-linked image is two Go modules and the pack's object was
+  compiled from the pack's own module. The program's own code is: 11 of 11
+  functions in the program package are byte-for-byte the monolithic build's
+  (disassembly, relocations normalised), 4098 of 4493 common functions across the
+  whole image, and `TestAComposedProgramIsCompiledLikeAMonolithicOne` pins it on
+  post-optimisation IR so it cannot drift back.
+- **Compile time.** Warm, two programs, quiet box: **15.2 s** composed, against
+  **5.1 s** for the object pack (3.0x worse) and **16.4 s** monolithic (7%
+  better). Cold: 30.7 s against the object pack's 20.3 s. The `ir` arm is 11.7 s
+  and is not the default, for the reason above.
