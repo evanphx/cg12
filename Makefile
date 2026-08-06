@@ -30,6 +30,8 @@
 #   verify-fast — build, vet, gofmt, unit, the corpus, one capability shard of
 #                 each arm, and the targeted reducers. Under ten minutes.
 #   verify-full — the exhaustive run, including a `main` control.
+#   verify-controls — the `main` controls alone: record them if the machine, the
+#                 toolchain or `main` has moved, reuse them if not.
 # docs/verification.md says what the fast tier can and cannot catch. Read it
 # before treating a green verify-fast as a merge signal.
 
@@ -42,7 +44,7 @@ GO ?= go
 # wrong thing: gates were briefed to pass `-parallel 10`, a number that came
 # from an eight-core laptop, to a sixty-four-core worker. It did not even do
 # that -- `-parallel` bounds tests that call t.Parallel, and until now no test in
-# the goc suite did, so the suite ran at 2.9 of 64 cores for twenty-one minutes.
+# the goc suite did, so the suite ran at 4.0 of 64 cores for nineteen minutes.
 #
 # The number is bounded by memory, not by cores. A goc compile of the corpus's
 # worst program peaks at 3.17 GiB of RSS at the default GOMAXPROCS (4.23 GiB at
@@ -133,7 +135,7 @@ PERF_BENCH_TIMEOUT ?= 45m
 .PHONY: all build test test-unit test-goc-corpus test-goc-cmd test-goc-status \
         test-goc-status-opt test-goc-coverage runtime-cover-diff test-ruby \
         test-cruby bench-crypto bench-crypto-update bench-perf bench-perf-update \
-        verify-fast verify-full verify-audits verify-reducers \
+        verify-fast verify-full verify-controls verify-audits verify-reducers \
         fmt vet clean
 
 # The default local check: build, then the whole suite.
@@ -286,6 +288,15 @@ verify-fast:
 verify-full:
 	GO=$(GO) GOC_PARALLEL=$(GO_TEST_PARALLEL) \
 	VERIFY_STATUS_SHARDS=$(VERIFY_STATUS_SHARDS) ./scripts/verify.sh full
+
+# The `main` controls on their own: measure them if the recorded ones no longer
+# match this machine, this toolchain and this `main`, and reuse them if they do.
+# Worth having separately so a gate can warm the cache ahead of time, and so
+# `is my control still valid` is a one-second question rather than a 25-minute
+# one. Measured: 1484 s to record all three cold, 0.96 s to confirm all three.
+verify-controls:
+	GO=$(GO) GOC_PARALLEL=$(GO_TEST_PARALLEL) \
+	VERIFY_STATUS_SHARDS=$(VERIFY_STATUS_SHARDS) ./scripts/verify.sh controls
 
 # The four corpus audits alone, in check mode against the committed baselines.
 # Called out because they are the cheapest high-value item in the tree: one

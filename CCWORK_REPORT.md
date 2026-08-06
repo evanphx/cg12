@@ -2887,3 +2887,52 @@ determinism sweeps; `test-ruby`; `test-goc-cmd`; the coverage report; any
 comparison against `main`; any rare intermittent fault (reducers at 5–40
 repetitions, against a recorded 3-in-53 fault); and anything timing, ever.
 `docs/verification.md` has the table and the reasoning.
+
+## 14. What changed, and what did not
+
+**Changed**
+
+| file | what |
+|---|---|
+| `goc/*_test.go` (31 files) | `t.Parallel()` on 267 top-level tests |
+| `goc/sequential_tests.txt` | new — the 83 that must not be, with a reason tag each and the measurement behind them |
+| `goc/parallelpolicy_test.go` | new — enforces both directions against that file |
+| `goc/corpusaudit_test.go` | audit compile pool: flat 8 → `MemAvailable / 4.23 GiB`, `GOC_AUDIT_WORKERS` override |
+| `Makefile` | `GO_TEST_PARALLEL` default on every `go test` target; `verify-fast`, `verify-full`, `verify-controls`, `verify-audits`, `verify-reducers` |
+| `scripts/verify.sh` | new — the tiers, the core-budget scheduler, the corpus split, the control cache |
+| `scripts/reducers.sh`, `scripts/gofmt-check.sh` | new |
+| `docs/verification.md` | new — the coverage table and the reasoning |
+
+**Not changed, deliberately**
+
+* No compiler code. `git diff main..HEAD` touches no non-test `.go` file at all.
+* No tolerance weakened, no audit skipped, no baseline re-cut. No `-update-*`
+  flag was passed anywhere in this job.
+* Nothing removed from the full tier — it gained `test-goc-cmd`, `test-ruby`,
+  the unit tests, vet and gofmt relative to the old four-item recipe.
+* `CG12_NOCACHE=1`: untouched and verified working (§12).
+* The timing pre-flight: untouched and verified working in both directions (§9).
+* `STATUS_SHARDS`/`STATUS_SHARD` semantics: untouched. The tiers use a separate
+  `VERIFY_STATUS_SHARDS` so a caller sharding by hand is unaffected.
+
+## 15. Left open
+
+1. **The root cause of §2/§3.** Concurrent compiles in one process change escape
+   placement, always conservatively, and I could not isolate why. Ruled out: the
+   shared source world (E2), any time or step budget in `opt/escape*.go`,
+   `sync.Pool`, goroutines in the escape analysis, package-level mutable state in
+   the compile path. Nothing in production compiles concurrently in one process,
+   so it is not urgent — but an analysis whose answer depends on what else the
+   process is doing is one whose answer is not a function of its input, and that
+   is worth knowing about.
+2. **`TestCheckedRuntimeCoverageBaselineDenominator`**, failing on `main` today
+   (§10). Wants a person to say why `gc-invariants/slice-tail-pointer` is
+   uncovered, or to accept a new baseline. Out of scope here by the brief's own
+   rule.
+3. **`determinism-opt` at 886 s** is now the largest single item in the full
+   tier — 44% of the warm-control total. It is a shell-driven sweep with its own
+   `-j`, so it was outside this branch's parallelism work. It is where the next
+   minute of turnaround is.
+4. **The 83-entry sequential list is over-broad on purpose.** Someone who
+   isolates (1) can shrink it, and 350 s of the corpus's critical path is the
+   prize.
