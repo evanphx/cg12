@@ -4229,3 +4229,15 @@ and `text/parse`, which the `ir` arm regressed:
 | `text/parse` (`ir` regressed this one) | +2.9% | +0.2% | 5.0% |
 | `map/build-probe` (the noisy row) | | -13.8%, resolved +5.8% | 14.5% |
 
+
+### The other guards
+
+**Fourteen representative programs compile, run, and produce byte-identical
+output to a monolithic build of the same source** under the `compose` default:
+`hello`, `fmt_sprintf`, `panic_recover`, `nested_defer`, `reflect_methods`,
+`reflect_makefunc`, `gc_struct`, `runtime_buffered_channel_fifo`,
+`runtime_atomic_value`, `stdlib_http_tls_client_server`, `adler32_marshal_loop`,
+`context_cancel`, `io_copy_n`, `filemode_string`. Same exit status, same stdout,
+in every case. (The same set passed under the `ir` arm earlier, before it was
+demoted.) The executables themselves differ from the monolithic ones, for the
+reason set out under byte-identity above: a pack image is two Go modules.

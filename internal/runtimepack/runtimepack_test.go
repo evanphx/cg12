@@ -79,3 +79,70 @@ func TestManifestSets(t *testing.T) {
 	assert.Equal(t, map[string]bool{"error_Error": true, "main_main": true}, manifest.ProgramSymbolSet())
 	assert.Equal(t, map[string]bool{"runtime/asm_arm64.s": true}, manifest.AssemblyFileSet())
 }
+
+// irPack is samplePack with the third member: the serialized prebuilt module a
+// program build inlines from.
+func irPack() *Pack {
+	pack := samplePack()
+	pack.IR = []byte("cg12\x13not-really-a-module-but-hashed-the-same-way")
+	pack.Manifest.IRVersion = 19
+	pack.Manifest.IRDigest = DigestOf(pack.IR)
+	return pack
+}
+
+func TestAPackCarryingIRRoundTrips(t *testing.T) {
+	original := irPack()
+
+	encoded, err := original.Marshal()
+	require.NoError(t, err)
+	decoded, err := Unmarshal(encoded)
+	require.NoError(t, err)
+
+	assert.Equal(t, original.Manifest, decoded.Manifest)
+	assert.Equal(t, original.Object, decoded.Object)
+	assert.Equal(t, original.Sidecar, decoded.Sidecar)
+	assert.Equal(t, original.IR, decoded.IR)
+}
+
+// The digest is the difference between a stale or truncated artifact being an
+// error and it being a miscompiled program: the IR is what the program build
+// inlines from, so a body that decoded to something other than what was written
+// would be spliced into the caller with nothing downstream to notice. gc checks
+// its export data's fingerprint in cmd/link for the same reason.
+func TestUnmarshalRefusesIRThatDoesNotMatchItsDigest(t *testing.T) {
+	pack := irPack()
+	encoded, err := pack.Marshal()
+	require.NoError(t, err)
+	encoded[len(encoded)-1] ^= 0xff
+
+	_, err = Unmarshal(encoded)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "the manifest records")
+}
+
+// And the other direction: a pack whose manifest claims IR it does not carry.
+func TestUnmarshalRefusesAMissingIRMember(t *testing.T) {
+	pack := irPack()
+	pack.IR = nil
+	encoded, err := pack.Marshal()
+	require.NoError(t, err)
+
+	_, err = Unmarshal(encoded)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no IR")
+}
+
+// An object-only pack still reads, and records no digest rather than the digest
+// of nothing.
+func TestAPackWithoutIRStillRoundTrips(t *testing.T) {
+	encoded, err := samplePack().Marshal()
+	require.NoError(t, err)
+
+	decoded, err := Unmarshal(encoded)
+
+	require.NoError(t, err)
+	assert.Empty(t, decoded.IR)
+	assert.Empty(t, decoded.Manifest.IRDigest)
+}

@@ -329,6 +329,13 @@ func TestEveryChangeThatWouldMakeAPackWrongProducesAMiss(t *testing.T) {
 	for name, environment := range map[string]string{
 		"the placement policy":      "GOC_FUNC_ALIGN=64",
 		"the optimization pipeline": "GOC_OPT_PIPELINE=bounded",
+		// How the pack is consumed. An ir pack has a third member and a manifest
+		// naming an IR format version, and a program built against one is composed
+		// rather than subtracted; a pack built under one mode is not the pack
+		// another mode wants. Without this clause a run under GOC_PACK_MODE=ir
+		// would link the object pack the previous run cached, which is the same
+		// stale-hit hazard GOC_OPT_PIPELINE is in the key for.
+		"how the pack is consumed": "GOC_PACK_MODE=ir",
 	} {
 		t.Run(name, func(t *testing.T) {
 			assert.Contains(t, compile(t, compiler, environment), "building pack ",
