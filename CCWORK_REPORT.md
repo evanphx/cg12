@@ -3680,3 +3680,92 @@ than that the instrument is asleep — but note that a reducer at 0/20 on both
 sides is a weak instrument by construction; it is the flate and p256 loops, 600
 runs of real decompression and real signature verification, that carry the
 weight here.
+
+## 4. The timing suites — **`bench-crypto` passes, `bench-perf` FAILS, and it is not noise**
+
+### `make bench-crypto` — **PASS**, 110.5 s
+
+Pre-flight green on core 63. All four rows inside the 6% tolerance, and all four
+moved slightly *faster*:
+
+| case | baseline | this run | change | resolved | verdict |
+|---|---|---|---|---|---|
+| `p256/sign-verify` | 24.0648 | 23.8659 | −0.8% | +0.4% | within tolerance |
+| `p256/verify` | 16.9991 | 16.9320 | −0.4% | +0.1% | within tolerance |
+| `p384/sign-verify` | 20.3676 | 20.2907 | −0.4% | +0.2% | within tolerance |
+| `rsa2048/sign-verify` | 2.3470 | 2.3352 | −0.5% | −0.3% | within tolerance |
+
+Sub-1% and inside both intervals, so per the baseline's own triage note there is
+nothing here to attribute to a placement shift or to anything else. **Not
+re-cut.**
+
+### `make bench-perf` — **FAIL, 7 rows past tolerance, reproduced twice**
+
+    interp    interp/bytecode-loop      19.0659 -> 20.6111    +8.1%  (resolved +8.0%)  PAST TOLERANCE
+    sortmap   sort/ints                  1.5375 ->  1.7408   +13.2%  (resolved +13.2%) PAST TOLERANCE
+    flate     flate/compress             4.9410 ->  5.5493   +12.3%  (resolved +11.4%) PAST TOLERANCE
+    flate     flate/decompress           4.7187 ->  5.5942   +18.6%  (resolved +18.4%) PAST TOLERANCE
+    conc      mutex/uncontended          1.3155 ->  1.4879   +13.1%  (resolved +13.0%) PAST TOLERANCE
+    gcpress   gc/pointer-write           7.5793 ->  4.7018   -38.0%  (resolved +37.1%) PAST TOLERANCE
+    float     float/dot-product          1.4991 ->  2.0879   +39.3%  (resolved +39.1%) PAST TOLERANCE
+
+Higher is slower. Two independent runs agree to within 0.3 of a percentage point
+on every row. Every `control/spin-fixed-work` denominator is within 0.3% of its
+baseline, so the instrument is not drifting; the pre-flight passed both times
+(core 62, 99.5%).
+
+### It is the split default, not branch 1, and not the box
+
+The same suite on the same tree in the same session, with `GOC_AUTOPACK=0` —
+i.e. the compiler compiling whole-program, as it did before branch 2:
+
+**PASS, 559.7 s, zero rows past tolerance.** The seven rows above:
+
+| row | default (split) | `GOC_AUTOPACK=0` (monolithic) |
+|---|---|---|
+| `interp/bytecode-loop` | +8.1% | +0.0% |
+| `sort/ints` | +13.2% | +0.1% |
+| `flate/compress` | +12.3% | +0.2% |
+| `flate/decompress` | +18.6% | +0.1% |
+| `mutex/uncontended` | +13.1% | −0.0% |
+| `gc/pointer-write` | −38.0% | −0.2% |
+| `float/dot-product` | +39.3% | +0.1% |
+
+Every one of the 42 rows is within ±0.5% of baseline under `GOC_AUTOPACK=0`.
+Two consequences:
+
+  1. **`ccwork/ir-verify-entry-blocks` costs nothing measurable.** It changes
+     emitted code on all 406 programs and grows `.text`, and on eleven workloads
+     and 42 rows it does not move a single one. That is a good result for
+     branch 1 and it is now measured rather than assumed.
+  2. **`ccwork/default-compile-cache` changes what the compiler emits, and on
+     six of these rows it emits materially slower code.** The suite is a
+     baseline-versus-tree gate and the tree it now measures is the split default.
+
+### It is code generation, not placement
+
+The crypto baseline's triage note says to check whether the instruction
+encodings changed before attributing a movement to layout. They changed. The
+same `main_dotProduct` — a program-local function, nothing to do with the
+standard library — out of the two builds of `perf_bench/float/main.go`:
+
+| | monolithic | split |
+|---|---|---|
+| frame | `sub sp, sp, #0x40` (64 bytes) | `sub sp, sp, #0xa0` (**160 bytes**) |
+| instructions in the function | 72 | **95** |
+| `str xzr` slot-zeroing stores | 2 | **6** |
+
+The split build spills its arguments to the stack, builds slice headers in
+memory and zeroes four more GC slots, where the monolithic build keeps them in
+registers. For a dependent multiply-add chain that is exactly where a 39% goes.
+
+I have not diagnosed *why* the program module's own code gets worse when the
+pack takes the standard library out of it — the subtraction happens at the end
+and the optimiser then runs over what is left (`goc/runtime_split.go:15`), so
+the natural suspicion is a module-wide analysis (escape summaries most likely)
+answering more conservatively when the definitions it summarises are gone. That
+is a hypothesis; the measurement above is not.
+
+**`perf_suite_baseline.txt` was not re-cut.** A measurement did force attention,
+and re-cutting is exactly the wrong response to it: the baseline is the record
+that this code used to be faster.
