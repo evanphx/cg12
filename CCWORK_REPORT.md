@@ -4760,10 +4760,12 @@ Host: aarch64 Linux, 64 cores, 250 GiB total / 243 GiB available, go1.26.1,
 cc 13.3.0 (Ubuntu), kernel 6.8.0-60-generic. Machine exclusive to this job.
 
 Diagnose-only brief: nothing in the compiler was fixed or refactored by this
-gate. The only tree changes are regenerated baselines and this report.
+gate. All eight baselines were regenerated from the merged tree and every one
+came back byte-identical to what is committed, so this report is the only
+change in the tree.
 
-**Status: IN PROGRESS — items are written here as they finish. Anything not
-recorded below did not finish and must be read as UNVERIFIED.**
+**Status: COMPLETE.** Every item below was run to exit and its exit status
+watched; nothing was left running.
 
 ## Item 0 — build
 
@@ -5125,4 +5127,156 @@ Both arms ran `scripts/reducers.sh full`, the gate counts.
 Both flate and p256 panic on a wrong answer rather than merely crashing, so
 these are correctness loops. 1040 executions per arm, 2080 in total, zero
 failures on either side.
+
+## Item 6 — `make bench-crypto` and `make bench-perf`, on an otherwise idle box
+
+Run alone, nothing else on the machine (load average 5.3 at launch, from these
+two). Both pre-flights passed on their own terms: crypto pinned to core 63
+(calibration burst got 99.4% of it, 0.0% lost, 1.0% spread, 2 of 64 cores busy),
+perf pinned to core 62 (99.4%, 0.6% lost, 0.8% spread). **Both exit 0.**
+
+### `make bench-crypto` — PASS, `ok ./goc 103.735s`
+
+| case | baseline index | this run | change | resolved | verdict |
+|---|---:|---:|---:|---:|---|
+| `p256/sign-verify` | 24.0648 | 23.9998 | −0.3% | +0.1% | within tolerance (6%) |
+| `p256/verify` | 16.9991 | 16.9714 | −0.2% | +0.0% | within tolerance |
+| `p384/sign-verify` | 20.3676 | 20.3653 | −0.0% | −0.2% | within tolerance |
+| `rsa2048/sign-verify` | 2.3470 | 2.3401 | −0.3% | −0.3% | within tolerance |
+
+The brief asked for the triage note to be read before attributing a single-digit
+swing to code quality. It did not need to be applied: every movement here is
+**≤0.3%**, and the "resolved" column — the part of the change that survives both
+confidence intervals — is at most 0.3% and mostly indistinguishable from zero.
+The baseline header's own account of the residual placement effect is "low single
+digits"; this run is an order of magnitude inside that. Branch 1 growing `.text`
+and branch 3 moving it 208 bytes produced **no measurable movement on the crypto
+signing path**, so there is nothing here to triage as either regression or
+placement.
+
+### `make bench-perf` — PASS
+
+All 40 rows (eleven programs × their cases, plus each program's
+`control/spin-fixed-work`) verdict **within tolerance**. The largest raw changes
+and what they resolve to:
+
+| row | change | resolved | tolerance |
+|---|---:|---:|---:|
+| `sortmap map/build-probe` | −5.2% | −3.6% | 14.5% |
+| `conc chan/pingpong-unbuffered` | −3.9% | +2.7% | 5.0% |
+| `conc goroutine/spawn-join` | −3.2% | −1.9% | 16.4% |
+| `gcpress gc/alloc-churn` | +3.1% | −1.0% | 9.5% |
+| `regexp regexp/replace` | −3.0% | −2.0% | 10.7% |
+| `gcpress gc/live-heap-churn` | −2.3% | −2.9% | 17.5% |
+| `json json/marshal` | +2.6% | −0.6% | 5.5% |
+| `text text/sprintf` | +1.9% | −5.0% | 16.6% |
+
+A negative "resolved" means the run cannot tell the movement from zero. Every
+row with a change above 2% has a negative or sub-3% resolved figure, and the
+eleven `control/spin-fixed-work` rows — the same fixed integer work in every
+binary, which is the suite's own check that the box did not move — are all
+within ±0.3%. Nothing here is a performance signal.
+
+## Item 7 — the memoiser's saving, re-measured independently
+
+Harness: `$TMPDIR/gate/memosaving.sh`. Three arms per program — `-no-memo`
+(baseline), `-memo M` with `M` removed first (cold), `-memo M` in place (warm) —
+**interleaved** within each repetition so any drift in the box hits all three
+arms equally. Five repetitions each. Run alone on an idle box, one compile at a
+time.
+
+| program | baseline | cold | warm | **warm saving** | **cold overhead** | warm hits |
+|---|---:|---:|---:|---:|---:|---|
+| `fmt_sprintf.go` (small, 5083 funcs) | 16.25 s | 16.85 s | 8.21 s | **49.4%** | **+3.7%** | 5083/5083, whole-module |
+| `stdlib_http_tls_client_server.go` (http, 14 901 funcs) | 75.57 s | 78.67 s | 41.58 s | **45.0%** | **+4.1%** | 14901/14901, whole-module |
+
+Medians of five; the individual runs, which show how tight this is:
+
+```
+small  baseline  16.27 16.22 16.25 16.19 16.25
+       cold      16.78 16.86 16.85 16.85 16.75
+       warm       8.28  8.23  8.21  8.21  8.16
+http   baseline  75.44 75.57 75.94 75.47 75.64
+       cold      78.31 78.84 78.67 78.31 78.73
+       warm      42.18 41.55 41.58 41.96 41.47
+```
+
+**The branch's numbers reproduce.** It claims 45% warm on both and +3.8%/+4.1%
+cold; measured here, 49.4%/45.0% warm and +3.7%/+4.1% cold. The small program
+comes out 4 points *better* than claimed, http exactly as claimed, and both cold
+overheads land on the claimed figure. Across all 30 compiles in this
+measurement the object digest never moved (`237ad34b7732f6b3` for small,
+`76fe6efbcd80dc4c` for http), so the timing runs are a thirtieth independent
+confirmation of the identity property.
+
+Two things the 45% does **not** cover, both of which the branch states and
+neither of which this gate contradicts: it is the *whole-module-hit* path (no
+edit), and the branch's own edit rows are 19–27%; and the back-end memo is
+implemented but not persisted, so a warm run still pays the back end unless it
+is in the same process.
+
+## What was not run, and what is therefore unverified
+
+Stated plainly rather than left to inference.
+
+* `make test-goc-coverage` and `make runtime-cover-diff` — the instrumented
+  coverage report and its baseline diff. Not in the brief, and neither verify
+  tier schedules it. The `cmd/goc` test that *checks the committed baseline's
+  denominator* did run, and it is Finding 2.
+* `make test-cruby` (`scripts/cruby-diff.sh`) — out of tree, not in the brief.
+  `test-ruby` (the C differential and the miniruby regressions) did run, inside
+  `verify-full`, and passed in 47 s.
+* The memoiser's `-closure splice` arm was not exercised. `memoc` defaults to
+  `-closure read`, the branch documents `splice` as *not* emitting the same
+  bytes, and every measurement here is on the default.
+* No conclusion is offered about branches 1 and 3's separate effects on emitted
+  code size. The `.text` growth and the 208-byte move are the branch's own
+  measurements; this gate measured their *consequences* (benchmarks, determinism,
+  matrix, reducers, debt register) and found none, but did not re-measure the
+  section sizes.
+
+## Verdict
+
+Every measurement asked for was run to completion and watched to exit. Two items
+failed and both are accounted for.
+
+**Byte-identity of memoised output: CONFIRMED, and more strongly than the branch
+claimed it.** 16 programs (the branch tested 2), five arms each, 80 `memoc`
+compiles plus 30 more in the timing run: the object bytes are identical in every
+arm of every program — warm, cold, and against a stale memo after a root edit
+that provably moved the output. The one qualification is on the branch's
+*wording*: the "translated assembly" half of its claim is the module's
+translated Plan 9 assembly, the same 157 KB blob for eight of the sixteen
+programs, and it is close to empty as a check. The object comparison carries the
+claim, and it holds.
+
+**Two checkout paths: CONFIRMED, and newly true.** 12 of 12 comparisons
+identical on the merge (six programs, `-O` and unoptimised, two worktrees at 53
+and 104 characters, each with its own `cmd/goc` build). The same experiment on
+`main` is 8 of 8 **different**. This is the first commit in the tree where two
+checkouts of one commit produce the same image.
+
+**The measured saving reproduces**: 49.4% warm on the small program and 45.0% on
+http against a 45%/45% claim, at +3.7%/+4.1% cold overhead against a +3.8%/+4.1%
+claim.
+
+**But the merged tree is red.** `go test ./goc/...` — and therefore
+`make test-goc-corpus`, `make verify-fast` and `make verify-full` — fails on
+`c114580` and passes on `main` (`21ca7b3`), measured on this box in the same run
+as `control-corpus`. The cause is Finding 1: a semantic merge conflict between
+branch 1's two new tests and a parallel-test policy that landed on `main` after
+branch 1 was cut. No emitted code is implicated and the repair is two lines, but
+merging as it stands turns `main`'s own gate red.
+
+### **NOT SAFE TO MERGE TO MAIN** — on one defect, with a named repair
+
+Not safe *as `c114580` stands*. It becomes safe when `TestIRVerifyAudit` and
+`TestModuleRoundTripsThroughTheBinaryFormat` either call `t.Parallel()` as their
+first statement or are listed in `goc/sequential_tests.txt` with a reason tag
+(the sequential list is the likely correct side: `TestIRVerifyAudit` shares the
+audits' `sync.Once` corpus compile, and `sequential_tests.txt` already lists its
+co-users), and `go test ./goc/...` is re-run green. Nothing else found in this
+gate stands between this merge and `main`:
+`TestCheckedRuntimeCoverageBaselineDenominator` fails identically on `main` and
+is not this merge's to answer for.
 
