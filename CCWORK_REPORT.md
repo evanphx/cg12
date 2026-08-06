@@ -3571,3 +3571,46 @@ separately built compilers.
 And the 1638-configuration sweep above is the wider statement: with all of that
 extra inlining, **no configuration was rejected by the budget and no recorded
 chain grew by one byte**.
+
+## 2. Determinism
+
+### `scripts/determinism-check.sh` was comparing two different compiles
+
+The five-program arm on the merged tree, before any change:
+
+    hello.go        round1:DIFFERENT(7d3a5c5c…/23533968…)  round2:DIFFERENT(7d3a5c5c…/23533968…)
+    fmt_sprintf.go  round1:DIFFERENT(e0e4903e…/ec82d502…)  round2:DIFFERENT(e0e4903e…/ec82d502…)
+    … 10 of 10 DIFFERENT
+
+**This is not non-determinism**, and the hashes say so: each column reproduces
+exactly across both rounds. Isolated to the module shape with four compiles of
+`hello.go`:
+
+| compile | image |
+|---|---|
+| plain `goc`, twice | `23533968…`, `23533968…` |
+| `GOC_AUTOPACK=0` | `7d3a5c5c…` |
+| `CG12_NOCACHE=1` | `7d3a5c5c…` |
+
+`CG12_NOCACHE=1` used to mean "do not read the on-disk cache" and now also means
+"do not choose a pack", so the script's cold arm takes the whole-program path
+while its warm arm takes the split one. Two different compiles, both perfectly
+deterministic, reported as a determinism failure. On `main` the same two
+compiles are `988ae906…` and `988ae906…` — identical, because there was no
+second path to take.
+
+Fixed (`scripts/determinism-check.sh`): cold is now an empty private
+`CG12_PACK_CACHE` and warm is a hit in the same one, a fresh cache per round.
+The whole-program image is deliberately not compared against the split one —
+they are different modules and always will be; what matters is that each is
+reproducible.
+
+After the fix, and this is also the answer to "cold vs warm byte-identity":
+
+| | round 1 | round 2 |
+|---|---|---|
+| default, 5 programs | **identical 5/5** | **identical 5/5** |
+| `-O`, 5 programs | **identical 5/5** | **identical 5/5** |
+
+20 of 20 identical, and the cold image equals the warm one byte for byte, so a
+pack written by one process and read by another produces the same executable.
