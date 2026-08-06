@@ -34,6 +34,7 @@ const pointerWidth = 8
 // word, a mixture, none at all, and an array long enough to need more than one
 // mask byte.
 func TestTypeGCMasksArePaddedToAPointerWord(t *testing.T) {
+	t.Parallel()
 	module, err := goc.CompileExecutable("masks.go", []byte(`
 package main
 

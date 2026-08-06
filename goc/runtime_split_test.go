@@ -80,6 +80,7 @@ func buildSplit(t *testing.T) (*RuntimeModule, *runtimepack.Manifest, *ProgramMo
 // throw, so one built from the runtime root would silently miss the program's own
 // implementations.
 func TestPrebuiltRuntimeLeavesTheInterfaceDispatchersToTheProgram(t *testing.T) {
+	t.Parallel()
 	runtimeModule, _, program := buildSplit(t)
 
 	assert.Contains(t, runtimeModule.ProgramSymbols, "error_Error")
@@ -102,6 +103,7 @@ func TestPrebuiltRuntimeLeavesTheInterfaceDispatchersToTheProgram(t *testing.T) 
 // the program module's. Two copies would break dispatch, because cg12 compares
 // descriptors by pointer.
 func TestPrebuiltRuntimeLeavesTheTypeRegionToTheProgram(t *testing.T) {
+	t.Parallel()
 	runtimeModule, _, program := buildSplit(t)
 
 	for _, data := range runtimeModule.Module.Data {
@@ -127,6 +129,7 @@ func TestPrebuiltRuntimeLeavesTheTypeRegionToTheProgram(t *testing.T) {
 // to a symbol the module does not define is refused by the backend rather than
 // mislinked -- so the closure is checked here, where the message is useful.
 func TestProgramModuleKeepsWhatItsRelativeOffsetsAddress(t *testing.T) {
+	t.Parallel()
 	_, _, program := buildSplit(t)
 
 	defined := map[string]bool{}
@@ -157,6 +160,7 @@ func TestProgramModuleKeepsWhatItsRelativeOffsetsAddress(t *testing.T) {
 // is what a monolithic build would have emitted. That is the property the whole
 // design rests on, and it is cheap to check at the IR level.
 func TestKeptSymbolsMatchAMonolithicBuild(t *testing.T) {
+	t.Parallel()
 	_, _, program := buildSplit(t)
 	monolithic, err := CompileExecutableFor(TargetARM64, "split.go", []byte(splitTestProgram))
 	require.NoError(t, err)
@@ -190,6 +194,7 @@ func TestKeptSymbolsMatchAMonolithicBuild(t *testing.T) {
 // that the runtime is compiled once. A regression that stopped subtracting would
 // still pass every behavioural test, just slowly, so the ratio is asserted.
 func TestProgramModuleSubtractsTheRuntime(t *testing.T) {
+	t.Parallel()
 	_, _, program := buildSplit(t)
 
 	assert.Greater(t, program.SubtractedFunctions, 2000)
@@ -202,6 +207,7 @@ func TestProgramModuleSubtractsTheRuntime(t *testing.T) {
 // produce an image that links cleanly and behaves as though the program's own
 // definition never existed. The digest check turns that into a build error.
 func TestDriftedDataIsRefused(t *testing.T) {
+	t.Parallel()
 	runtimeModule, manifest, _ := buildSplit(t)
 
 	drifted := ""
@@ -223,6 +229,7 @@ func TestDriftedDataIsRefused(t *testing.T) {
 // The itablinks name is duplicated so goc does not depend on the backend's
 // metadata emitter. Keep the two in step.
 func TestModuleItabLinksNameMatchesGometa(t *testing.T) {
+	t.Parallel()
 	assert.Equal(t, gometa.ModuleItabLinksName, gometaModuleItabLinksName)
 }
 
@@ -231,6 +238,7 @@ func TestModuleItabLinksNameMatchesGometa(t *testing.T) {
 // against it. Such a datum is strictly poorer than the program's own, so it goes
 // to the program module -- the same reason the whole type region does.
 func TestDegradedItabsGoToTheProgram(t *testing.T) {
+	t.Parallel()
 	runtimeModule, _, program := buildSplit(t)
 
 	for _, data := range runtimeModule.Module.Data {

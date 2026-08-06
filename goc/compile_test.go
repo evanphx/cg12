@@ -14,6 +14,7 @@ import (
 )
 
 func TestCompileLowersSyncAtomicCallsToIntrinsics(t *testing.T) {
+	t.Parallel()
 	source := []byte(`package atomictest
 
 import "sync/atomic"
@@ -73,6 +74,7 @@ func exercise(word *uint32, wide *uint64) {
 }
 
 func TestCompileLowersConstantTimeBoolConversion(t *testing.T) {
+	t.Parallel()
 	source := []byte(`package constanttimetest
 
 import "crypto/subtle"
@@ -115,6 +117,7 @@ func equal(left byte, right byte) int {
 }
 
 func TestCompilePreservesIdenticalInterfaceHeader(t *testing.T) {
+	t.Parallel()
 	source := []byte(`package main
 
 type statusError struct{}
@@ -163,6 +166,7 @@ func main() {
 }
 
 func TestCompileExecutableSchedulesImportedPackageInitializers(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("crypto_init.go", []byte(`package main
 
 import (
@@ -195,6 +199,7 @@ func main() {
 }
 
 func TestCompilePreservesSyncAtomicPointerWriteBarrierCalls(t *testing.T) {
+	t.Parallel()
 	source := []byte(`package atomictest
 
 import (
@@ -269,6 +274,7 @@ func functionCallsSymbol(function *ir.Func, symbol string) bool {
 }
 
 func TestCompileExecutableKeepsClosureCapturesLiveAtSafepoints(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("closure_capture.go", []byte(`package main
 
 func use(value *int) {
@@ -323,6 +329,7 @@ func main() {
 }
 
 func TestCompileExecutablePreservesDeferReturnRecoveryEntry(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("defer_recovery.go", []byte(`package main
 
 func trigger() {
@@ -539,6 +546,7 @@ func main() {
 }
 
 func TestRuntimeTypeKeyCanonicalizesAliasesInGenericArguments(t *testing.T) {
+	t.Parallel()
 	// Every type here is synthesized at token.NoPos, so the set is only needed
 	// to satisfy the signature; no position is ever rendered from it.
 	fset := token.NewFileSet()
@@ -572,6 +580,7 @@ func TestRuntimeTypeKeyCanonicalizesAliasesInGenericArguments(t *testing.T) {
 }
 
 func TestTypeKeysDistinguishLocalNamedTypes(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "local_types.go", `package sample
 
@@ -634,6 +643,7 @@ func second() {
 }
 
 func TestAssemblyPackageDefinesIncludeConstantsAndStructLayouts(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "layout.go", `package layout
 const answer = 42
@@ -683,6 +693,7 @@ type outer struct {
 }
 
 func TestAssemblyABI0OffsetsAlignResultArea(t *testing.T) {
+	t.Parallel()
 	sizes := types.SizesFor("gc", runtime.GOARCH)
 	parameters := types.NewTuple(
 		types.NewVar(token.NoPos, nil, "ptr", types.NewPointer(types.Typ[types.Uint32])),
@@ -702,6 +713,7 @@ func TestAssemblyABI0OffsetsAlignResultArea(t *testing.T) {
 }
 
 func TestAssemblyABI0OffsetsPackNarrowParameters(t *testing.T) {
+	t.Parallel()
 	sizes := types.SizesFor("gc", runtime.GOARCH)
 	parameters := types.NewTuple(
 		types.NewVar(token.NoPos, nil, "left", types.Typ[types.Uint8]),
@@ -721,6 +733,7 @@ func TestAssemblyABI0OffsetsPackNarrowParameters(t *testing.T) {
 }
 
 func TestCompileCoreGo(t *testing.T) {
+	t.Parallel()
 	m, err := Compile("sum.go", []byte(`package main
 func sum(n int64) int64 { s := int64(0); for i := int64(1); i <= n; i++ { if i == 3 { continue }; s += i }; return s }
 func main() { if sum(5) != 12 { for { break } } }
@@ -737,6 +750,7 @@ func main() { if sum(5) != 12 { for { break } } }
 }
 
 func TestCompileWidensArrayIndexBeforePointerOffset(t *testing.T) {
+	t.Parallel()
 	module, err := Compile("index.go", []byte(`package main
 
 type pair struct {
@@ -758,6 +772,7 @@ func pick(values *[4]pair, index uint32) int {
 }
 
 func TestCompileWidensSliceBoundsBeforeDescriptorMath(t *testing.T) {
+	t.Parallel()
 	module, err := Compile("slice.go", []byte(`package main
 
 func tail(data []byte, offset uint32) []byte {
@@ -774,6 +789,7 @@ func tail(data []byte, offset uint32) []byte {
 }
 
 func TestCompileGeneratesWrapperForPromotedInterfaceMultiResultMethod(t *testing.T) {
+	t.Parallel()
 	module, err := Compile("promoted.go", []byte(`package main
 
 type scanner interface {
@@ -812,6 +828,7 @@ func Test() int {
 }
 
 func TestCompileGeneratesWrapperForInterfaceMethodExpression(t *testing.T) {
+	t.Parallel()
 	module, err := Compile("method_expression.go", []byte(`package main
 
 type reader interface {
@@ -845,6 +862,7 @@ func Test() int {
 }
 
 func TestMethodValueWrapperNamesDoNotCollideAtSameSourcePosition(t *testing.T) {
+	t.Parallel()
 	position := token.Position{Line: 1056, Column: 8}
 	readLock := methodValueWrapperName("crypto/tls", "sync.RWMutex.RLock", position, 100)
 	unlock := methodValueWrapperName("crypto/tls", "sync.Mutex.Unlock", position, 100)
@@ -862,6 +880,7 @@ func TestMethodValueWrapperNamesDoNotCollideAtSameSourcePosition(t *testing.T) {
 }
 
 func TestStaticInitializerIgnoresKeyedStructFieldNames(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "initializer.go", `package initializer
 type debugVars struct {
@@ -899,6 +918,7 @@ var dbgvars = []*debugVar{
 }
 
 func TestStaticInitializerRejectsMapLiteral(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "initializer.go", `package initializer
 type holder struct {
@@ -928,6 +948,7 @@ var global = holder{values: map[string]int{"answer": 42}}
 }
 
 func TestStaticNonEmptyInterfaceKeepsImplementationMethodReachable(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("interface.go", []byte(`package main
 
 type stringError string
@@ -967,6 +988,7 @@ func main() {}
 }
 
 func TestCompileAllowsExternalLinknameDeclaration(t *testing.T) {
+	t.Parallel()
 	module, err := Compile("linkname.go", []byte(`package main
 import _ "unsafe"
 //go:linkname external runtime.external
@@ -982,6 +1004,7 @@ func main() { _ = external(42) }
 }
 
 func TestCompileAppliesLinknameToInterfaceGlobal(t *testing.T) {
+	t.Parallel()
 	module, err := Compile("linkname_interface.go", []byte(`package main
 import _ "unsafe"
 
@@ -1014,6 +1037,7 @@ var linkedError error = stringError("boom")
 }
 
 func TestCompilePreservesNoSplitDirective(t *testing.T) {
+	t.Parallel()
 	module, err := Compile("nosplit.go", []byte(`package main
 
 //go:nosplit
@@ -1035,6 +1059,7 @@ func helper() {}
 }
 
 func TestCompilePreservesSystemStackDirective(t *testing.T) {
+	t.Parallel()
 	module, err := Compile("systemstack.go", []byte(`package main
 
 //go:systemstack
@@ -1056,6 +1081,7 @@ func helper() {}
 }
 
 func TestCompileMarksRuntimeNextFreeFastNoSplit(t *testing.T) {
+	t.Parallel()
 	module, err := Compile("malloc.go", []byte(`package runtime
 
 type mspan struct{}
@@ -1095,6 +1121,7 @@ func (s *mspan) nextFreeIndex() uint16 {
 }
 
 func TestCompileMarksSystemStackFunctionLiteralNoSplit(t *testing.T) {
+	t.Parallel()
 	module, err := Compile("systemstack_literal.go", []byte(`package runtime
 
 func systemstack(fn func())
@@ -1166,6 +1193,7 @@ func main() {
 }
 
 func TestCompileExecutableStackAllocatesTraceEventVariadicBacking(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("trace_start.go", []byte(`package main
 
 import (
@@ -1192,6 +1220,7 @@ func main() {
 }
 
 func TestCompileKeepsAssignedNonEscapingAddressOnStack(t *testing.T) {
+	t.Parallel()
 	module, err := Compile("address.go", []byte(`package main
 type pair struct { left, right int }
 func sum(value *pair) int { return value.left + value.right }
@@ -1209,6 +1238,7 @@ func Test() int {
 }
 
 func TestCompileExecutableIncludesRuntimeAndMainInitTask(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("main.go", []byte(`package main
 var initialized int
 func init() { initialized = 41 }
@@ -1341,6 +1371,7 @@ func main() {
 }
 
 func TestCompileExecutableIncludesNativeRuntimeOverlay(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" || runtime.GOARCH != "arm64" {
 		t.Skip("the initial runtime overlay targets linux/arm64")
 	}
@@ -1378,6 +1409,7 @@ func TestCompileExecutableIncludesNativeRuntimeOverlay(t *testing.T) {
 }
 
 func TestCompileExecutableUsesExactRuntimeFIPSIndicator(t *testing.T) {
+	t.Parallel()
 	source := `package main
 
 import (
@@ -1441,6 +1473,7 @@ func main() {
 }
 
 func TestCompileExecutableIncludesReachableSyscallAssembly(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("main.go", []byte(`package main
 import "syscall"
 func main() {
@@ -1462,6 +1495,7 @@ func main() {
 }
 
 func TestExportAssemblyReferencedFunctions(t *testing.T) {
+	t.Parallel()
 	module := ir.NewModule()
 	referenced := module.NewFuncVoid("runtime.morestackc")
 	referenced.Entry().RetVoid()
@@ -1481,6 +1515,7 @@ func TestExportAssemblyReferencedFunctions(t *testing.T) {
 }
 
 func TestCompileExecutableExportsSingleArgumentLinkname(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("main.go", []byte("package main\nfunc main() {}\n"))
 	if err != nil {
 		t.Fatal(err)
@@ -1499,6 +1534,7 @@ func TestCompileExecutableExportsSingleArgumentLinkname(t *testing.T) {
 }
 
 func TestCompileExecutableUsesAggregateABIForInterfaceResults(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("main.go", []byte(`package main
 import "sync"
 var values sync.Map
@@ -1539,6 +1575,7 @@ func main() {
 }
 
 func TestCompileExecutableBridgesInstantiatedFunctionValuesToGoInternal(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("main.go", []byte(`package main
 
 type record struct {
@@ -1589,6 +1626,7 @@ func main() {
 }
 
 func TestCompileBareFunctionValueAdapterDoesNotUseManagedFrame(t *testing.T) {
+	t.Parallel()
 	module, err := Compile("function_value.go", []byte(`package main
 
 func addTwo(value int) int {
@@ -1623,6 +1661,7 @@ func call() int {
 }
 
 func TestCompileStaticFunctionValueUsesGoInternalAdapter(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("main.go", []byte(`package main
 
 type payload struct {
@@ -1671,6 +1710,7 @@ func main() {
 }
 
 func TestCompileExecutableUsesAggregateABIForInterfaceMethodWrapperParameters(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("main.go", []byte(`package main
 
 type Writer interface {
@@ -1725,6 +1765,7 @@ func main() {
 }
 
 func TestCompileExecutableInterfaceDispatchFallbackUsesRuntimeDiagnostic(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("main.go", []byte(`package main
 
 type valueSource interface {
@@ -1765,6 +1806,7 @@ func main() {
 }
 
 func TestCompileExecutableRepresentsSlicesAsGroupedScalarValues(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("main.go", []byte(`package main
 func shorten(values []int) { values = values[:1] }
 func tail(values []int) []int { return values[1:] }
@@ -1836,6 +1878,7 @@ func main() {
 }
 
 func TestCompileExecutableStoresGlobalSliceHeaderInline(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("main.go", []byte(`package main
 var values = []int{7, 11, 13}
 func main() { _ = values }
@@ -1865,6 +1908,7 @@ func main() { _ = values }
 }
 
 func TestCompileExecutablePreservesKeyedGlobalSliceIndices(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("main.go", []byte(`package main
 var values = []uint8{1: 7, 4: 11, 13}
 func main() { _ = values }
@@ -1893,6 +1937,7 @@ func main() { _ = values }
 }
 
 func TestCompileExecutableInitializesNestedGlobalArrays(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("main.go", []byte(`package main
 var values = [2][3]uint8{{1, 2, 3}, {4, 5, 6}}
 func main() { _ = values }
@@ -1967,6 +2012,7 @@ func main() { _ = tests[0].expect[0].line }
 }
 
 func TestCompileExecutableKeepsInlinedFloatComparisonsTyped(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("main.go", []byte(`package main
 import "fmt"
 func main() {
@@ -2000,6 +2046,7 @@ func main() {
 }
 
 func TestCompileRecordsExactGlobalPointerWords(t *testing.T) {
+	t.Parallel()
 	m, err := Compile("globals.go", []byte(`package main
 type node struct {
 	next *node
@@ -2043,6 +2090,7 @@ var values []int
 }
 
 func TestCompilePromotedInterfaceMethodWrappersExtractEmbeddedReceiver(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("promoted_reader.go", []byte(`package main
 
 type reader interface {
@@ -2103,6 +2151,7 @@ func main() {
 }
 
 func TestCompileInterfaceMethodWrappersDistinguishSignatures(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("unwrap_interfaces.go", []byte(`package main
 
 type singleUnwrapper interface {
@@ -2167,6 +2216,7 @@ func main() {
 }
 
 func TestCompileErrorsUnwrapWrappersHaveUniqueObjectSymbols(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("errors_unwrap.go", []byte(`package main
 
 import "errors"
@@ -2216,6 +2266,7 @@ func testARM64SanitizeSymbol(name string) string {
 }
 
 func TestCompilePromotedInterfaceMethodWrappersLoadScalarReceiver(t *testing.T) {
+	t.Parallel()
 	module, err := CompileExecutable("promoted_scalar.go", []byte(`package main
 
 type node interface {
@@ -2264,6 +2315,7 @@ func main() {
 }
 
 func TestSharedTypeParameterUsesOnePointerWord(t *testing.T) {
+	t.Parallel()
 	constraint := types.NewInterfaceType(nil, nil)
 	constraint.Complete()
 	name := types.NewTypeName(token.NoPos, nil, "T", nil)
@@ -2280,6 +2332,7 @@ func TestSharedTypeParameterUsesOnePointerWord(t *testing.T) {
 }
 
 func TestCompileEmptySelect(t *testing.T) {
+	t.Parallel()
 	_, err := Compile("empty_select.go", []byte("package p\nfunc f() { select {} }"))
 	if err != nil {
 		t.Fatal(err)

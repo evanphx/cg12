@@ -83,6 +83,7 @@ func aggregateProbeGen(fset *token.FileSet) *gen {
 // middle, alone, nested, and as an array of a pointer-shaped element -- along
 // with the ordinary shapes that must not move.
 func TestGoABIAggregateAgreesWithTheTypeLayout(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "layout.go", `package layout
 
@@ -203,6 +204,7 @@ type Mixed struct {
 // what followed it was a uint64 holding a number, which is why that is the one
 // that killed programs.
 func TestGoABIAggregatesAgreeWithTheirTypesInTheStdlib(t *testing.T) {
+	t.Parallel()
 	packages := []string{"log/slog", "sync/atomic", "weak", "runtime"}
 	for _, path := range packages {
 		t.Run(path, func(t *testing.T) {

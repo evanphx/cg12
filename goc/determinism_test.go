@@ -66,6 +66,7 @@ func main() {
 // omits a datum's relocation base, pointer words and typelink flag, and those
 // reach the image too.
 func TestCompilingTheSameSourceTwiceGivesTheSameModule(t *testing.T) {
+	t.Parallel()
 	first, err := CompileExecutableFor(TargetARM64, "determinism.go", []byte(determinismTestProgram))
 	require.NoError(t, err)
 	second, err := CompileExecutableFor(TargetARM64, "determinism.go", []byte(determinismTestProgram))

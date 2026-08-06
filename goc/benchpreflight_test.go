@@ -416,6 +416,7 @@ func runBenchPreflightBurst(self string, pin []string, rounds int) (benchPreflig
 // binaries with. It skips unless the pre-flight asked for it, so an ordinary run
 // of this package never executes it.
 func TestBenchPreflightCalibrationBurst(t *testing.T) {
+	t.Parallel()
 	requested := os.Getenv(benchPreflightBurstEnv)
 	if requested == "" {
 		t.Skipf("%s is not set; this is the timing pre-flight's calibration burst, not a test of the compiler",

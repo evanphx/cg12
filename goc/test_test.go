@@ -7,6 +7,7 @@ import (
 )
 
 func TestDiscoverPackageTests(t *testing.T) {
+	t.Parallel()
 	tests, _, err := discoverPackageTests(HostTarget(), "container/list")
 	if err != nil {
 		t.Fatal(err)
@@ -25,6 +26,7 @@ func TestDiscoverPackageTests(t *testing.T) {
 }
 
 func TestDiscoverExternalPackageTests(t *testing.T) {
+	t.Parallel()
 	tests, hasExternalTests, err := discoverPackageTests(HostTarget(), "sort")
 	if err != nil {
 		t.Fatal(err)
@@ -49,6 +51,7 @@ func TestDiscoverExternalPackageTests(t *testing.T) {
 }
 
 func TestCompilePackageTests(t *testing.T) {
+	t.Parallel()
 	module, tests, err := CompileTestExecutable("container/list")
 	if err != nil {
 		t.Fatal(err)
@@ -85,6 +88,7 @@ func TestCompilePackageTests(t *testing.T) {
 }
 
 func TestMatchingPackageTestsSelectsTopLevelRunPattern(t *testing.T) {
+	t.Parallel()
 	tests := []PackageTest{
 		{Name: "TestAlpha", PackagePath: "example"},
 		{Name: "TestBeta", PackagePath: "example"},
@@ -101,6 +105,7 @@ func TestMatchingPackageTestsSelectsTopLevelRunPattern(t *testing.T) {
 }
 
 func TestMatchingPackageTestsRejectsInvalidPattern(t *testing.T) {
+	t.Parallel()
 	_, err := matchingPackageTests(nil, "[")
 	if err == nil {
 		t.Fatal("invalid pattern unexpectedly succeeded")

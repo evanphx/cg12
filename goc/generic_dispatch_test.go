@@ -121,6 +121,7 @@ func namedType(t *testing.T, pkg *types.Package, name string) types.Type {
 }
 
 func TestTypeParameterMethodSelection(t *testing.T) {
+	t.Parallel()
 	info, pkg, selectors := checkTypeParameterMethodSelectionSource(t)
 
 	pointerToAlpha := types.NewPointer(namedType(t, pkg, "alpha"))
@@ -226,6 +227,7 @@ func TestTypeParameterMethodSelection(t *testing.T) {
 }
 
 func TestTypeParameterMethodSelectionIgnoresNonMethodSelections(t *testing.T) {
+	t.Parallel()
 	info, pkg, selectors := checkTypeParameterMethodSelectionSource(t)
 	selector := selectors["viaTypeParameter"]
 	require.NotNil(t, selector)

@@ -30,6 +30,7 @@ import (
 // away from the mistake, and because a program that loses a buffered element
 // only fails once the sweeper has reclaimed it.
 func TestChannelElementDescriptorCarriesPointerMetadata(t *testing.T) {
+	t.Parallel()
 	module, err := goc.Compile("channels.go", []byte(`
 package main
 
@@ -87,6 +88,7 @@ func makeAll() (chan *box, chan string, chan pair, chan int) {
 // A separate stub emitted only for channels is how the metadata drifted in the
 // first place.
 func TestChannelElementDescriptorIsTheSharedRuntimeTypeDescriptor(t *testing.T) {
+	t.Parallel()
 	module, err := goc.Compile("shared.go", []byte(`
 package main
 

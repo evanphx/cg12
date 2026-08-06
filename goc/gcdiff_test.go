@@ -91,6 +91,7 @@ const gcDifferentialHeader = `# goc's allocation placement against cmd/compile's
 // every -m diagnostic it saw, because a message it silently skipped would
 // remove a decision from one side of the matrix and read as agreement.
 func TestEscapeDifferentialAgainstGC(t *testing.T) {
+	t.Parallel()
 	if !*measureGCDifferential && !*updateGCDifferential {
 		t.Skip("pass -escape-gc-differential to build the corpus with the host Go toolchain and compare")
 	}
@@ -250,6 +251,7 @@ var differentialProgram = flag.String("escape-gc-differential-program", "",
 // answering "is this line a real hole", which is the only question the corpus
 // number cannot answer for itself.
 func TestEscapeDifferentialProgram(t *testing.T) {
+	t.Parallel()
 	if *differentialProgram == "" {
 		t.Skip("pass -escape-gc-differential-program=testdata/x.go to explain one program")
 	}

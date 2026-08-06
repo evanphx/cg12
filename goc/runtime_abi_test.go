@@ -10,6 +10,7 @@ import (
 )
 
 func TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes(t *testing.T) {
+	t.Parallel()
 	loader := newSourceLoader(token.NewFileSet(), HostTarget())
 	pkg, err := loader.Import("runtime")
 	require.NoError(t, err)
@@ -95,6 +96,7 @@ func TestRuntimeAssemblyOffsetsMatchStandardLibraryTypes(t *testing.T) {
 }
 
 func TestInternalABIArrayTypeOffsetsMatchRuntime(t *testing.T) {
+	t.Parallel()
 	loader := newSourceLoader(token.NewFileSet(), HostTarget())
 	pkg, err := loader.Import("internal/abi")
 	require.NoError(t, err)

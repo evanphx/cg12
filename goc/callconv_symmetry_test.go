@@ -38,6 +38,7 @@ import (
 // Both backends now resolve from the *callee*: see calleeConventions in
 // amd64/convention.go and arm64/convention.go, which carry the identical rule.
 func TestGoInternalFunctionsMakeUnmarkedPlatformCalls(t *testing.T) {
+	t.Parallel()
 	const src = `package main
 
 type counter struct{ n int }

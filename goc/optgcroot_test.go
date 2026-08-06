@@ -30,6 +30,7 @@ import (
 // reallocated over the object, and at GOMAXPROCS=1 so the collection happens at
 // the runtime.GC() call rather than on some other thread's schedule.
 func TestOptimizedLoopCarriedPointerStaysAGCRoot(t *testing.T) {
+	t.Parallel()
 	output := runCorpusProgramOutputOptimizedBy(t,
 		filepath.Join("testdata", "runtime_opt_loop_carried_root.go"),
 		optimizeProgramFunctions,
@@ -58,6 +59,7 @@ func TestOptimizedLoopCarriedPointerStaysAGCRoot(t *testing.T) {
 // wrote -- so it fails the same way on every run rather than depending on what
 // happened to be left behind.
 func TestOptimizedInterfaceLocalSurvivesStackGrowth(t *testing.T) {
+	t.Parallel()
 	output := runCorpusProgramOutputOptimizedBy(t,
 		filepath.Join("testdata", "runtime_opt_promoted_interface_root.go"),
 		optimizeProgramFunctions)

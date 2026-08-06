@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -85,13 +86,67 @@ func auditCorpus(t *testing.T) *corpusAudit {
 
 // compileCorpusForAudits runs the audits over each program. Compilation
 // dominates the cost, so the programs run concurrently, bounded so a
-// corpus-wide run does not multiply goc's several-hundred-megabyte peak by the
-// core count.
-func compileCorpusForAudits(programs []string) *corpusAudit {
-	workers := runtime.GOMAXPROCS(0)
-	if workers > 8 {
-		workers = 8
+// corpus-wide run does not multiply goc's peak by the core count.
+//
+// The bound used to be a flat 8. That was the right number on the machine it was
+// written on and badly wrong on a 64-core, 243 GiB worker, where it made this
+// the single longest test in the tree: 183 s of the corpus suite's 1121 s, with
+// 56 cores idle. It is now bounded by memory the same way the capability matrix
+// bounds its compile fan-out -- MemAvailable divided by a measured per-compile
+// peak -- so the same code is right on both machines and neither caller has to
+// pass anything.
+//
+// auditCompilePeakBytes is the corpus's worst observed compile, not its average:
+// 4.23 GiB at GOMAXPROCS=1 for stdlib_http_tls_client_server.go. Sizing on the
+// worst case is the point -- the pool has no way to know which program a worker
+// will draw next, so a bound built on the average is a bound that is wrong
+// exactly when several expensive programs land together.
+//
+// The tests that read this audit are all listed in sequential_tests.txt, so this
+// pool has the process to itself; it does not have to leave room for the
+// parallel half of the suite. GOC_AUDIT_WORKERS overrides it.
+const auditCompilePeakBytes = 4.23 * (1 << 30)
+
+func auditCompileWorkers() int {
+	if setting := os.Getenv("GOC_AUDIT_WORKERS"); setting != "" {
+		if workers, err := strconv.Atoi(setting); err == nil && workers > 0 {
+			return workers
+		}
 	}
+	workers := runtime.GOMAXPROCS(0)
+	if available := availableMemoryBytes(); available > 0 {
+		if byMemory := int(float64(available) / auditCompilePeakBytes); byMemory < workers {
+			workers = byMemory
+		}
+	}
+	return max(workers, 1)
+}
+
+// availableMemoryBytes reports MemAvailable, or 0 when it cannot be read.
+// MemAvailable rather than MemFree deliberately: page cache is reclaimable, and
+// treating it as unavailable would serialize the audits on any machine that has
+// been doing I/O -- which, after a corpus compile, is every machine.
+func availableMemoryBytes() uint64 {
+	meminfo, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(meminfo), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 || fields[0] != "MemAvailable:" {
+			continue
+		}
+		kilobytes, err := strconv.ParseUint(fields[1], 10, 64)
+		if err != nil {
+			return 0
+		}
+		return kilobytes * 1024
+	}
+	return 0
+}
+
+func compileCorpusForAudits(programs []string) *corpusAudit {
+	workers := auditCompileWorkers()
 
 	audit := &corpusAudit{
 		programs:     len(programs),

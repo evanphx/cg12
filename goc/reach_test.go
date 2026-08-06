@@ -14,6 +14,7 @@ import (
 )
 
 func TestRuntimeInitDeclarationsHaveUniqueOrderedSymbols(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	loader := newSourceLoader(fset, HostTarget())
 	if _, err := loader.Import("runtime"); err != nil {
@@ -47,6 +48,7 @@ func TestRuntimeInitDeclarationsHaveUniqueOrderedSymbols(t *testing.T) {
 }
 
 func TestRuntimeInitTaskContainsEveryPackageInitializer(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	loader := newSourceLoader(fset, HostTarget())
 	if _, err := loader.Import("runtime"); err != nil {
@@ -85,6 +87,7 @@ func TestRuntimeInitTaskContainsEveryPackageInitializer(t *testing.T) {
 }
 
 func TestSHA256ReachabilityUsesExactSource(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "main.go", `package main
 import "crypto/sha256"
@@ -124,6 +127,7 @@ func Test() byte { return sha256.Sum256(nil)[0] }
 }
 
 func TestTypeSwitchInterfaceCaseMakesConcreteMethodsReachable(t *testing.T) {
+	t.Parallel()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "main.go", `package main
 

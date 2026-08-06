@@ -23,6 +23,7 @@ import (
 // Compiling functions concurrently turned it into a data race, which is how it
 // was found.
 func TestEachFunctionsControlFlowStaysInsideThatFunction(t *testing.T) {
+	t.Parallel()
 	source := []byte(`package main
 
 func returnBeforeDefer() int {

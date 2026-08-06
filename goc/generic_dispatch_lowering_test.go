@@ -126,6 +126,7 @@ func Test() int {
 // may route through the constraint interface's method symbol, which has no
 // body and would be reached with a receiver that is not an interface value.
 func TestTypeParameterMethodCallsLowerToTheConcreteMethod(t *testing.T) {
+	t.Parallel()
 	module, err := goc.Compile("dispatch.go", []byte(genericDispatchSource))
 	require.NoError(t, err)
 
@@ -205,6 +206,7 @@ func TestTypeParameterMethodCallsLowerToTheConcreteMethod(t *testing.T) {
 // disturb: a real interface value still dispatches through the synthesized
 // interface method wrapper.
 func TestOrdinaryInterfaceDispatchIsUnchanged(t *testing.T) {
+	t.Parallel()
 	module, err := goc.Compile("iface.go", []byte(`package main
 
 type alpha struct{ n int }

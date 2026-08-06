@@ -216,6 +216,7 @@ func genFieldIdentity(value reflect.Value) string {
 // versus per-generator split: every field is either inherited by derive or reset
 // by it, and which one is not left to chance.
 func TestDeriveClassifiesEveryGenField(t *testing.T) {
+	t.Parallel()
 	wholeCompilation := make(map[string]bool, len(wholeCompilationGenFields))
 	for _, name := range wholeCompilationGenFields {
 		wholeCompilation[name] = true
@@ -264,6 +265,7 @@ func TestDeriveClassifiesEveryGenField(t *testing.T) {
 // which turns "unsupported on amd64" into "unsupported on " without changing
 // which tests fail.
 func TestDeriveKeepsTarget(t *testing.T) {
+	t.Parallel()
 	for _, target := range []Target{TargetARM64, TargetAMD64} {
 		parent := &gen{target: target, mod: ir.NewModule()}
 		derived := parent.derive()

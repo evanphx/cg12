@@ -9,6 +9,7 @@ import (
 )
 
 func TestExtractRuntimeCoverage(t *testing.T) {
+	t.Parallel()
 	coverage := &RuntimeCoverage{
 		Blocks: []RuntimeCoverageBlock{{ID: 0}, {ID: 1}, {ID: 2}},
 	}
@@ -32,6 +33,7 @@ func TestExtractRuntimeCoverage(t *testing.T) {
 }
 
 func TestRuntimeCoverageUsesSelectedRuntimeFilesAndChunkedCounters(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" || runtime.GOARCH != "arm64" {
 		t.Skip("runtime coverage targets linux/arm64")
 	}

@@ -19,6 +19,7 @@ import (
 // case passes through the Go parser/type checker, cg12 IR, native machine-code
 // emitter, ELF writer, system linker, and finally the host CPU.
 func TestExecutionCorpus(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		body string
@@ -262,6 +263,7 @@ func TestExecutionCorpus(t *testing.T) {
 }
 
 func TestAdvancedExecutionCorpus(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name, body string
 		want       int
@@ -549,6 +551,7 @@ func TestAdvancedExecutionCorpus(t *testing.T) {
 }
 
 func TestRuntimePanicRecover(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func trigger() {
@@ -594,6 +597,7 @@ func Test() int {
 }
 
 func TestRuntimeDeferReturnValues(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 var returnOrderValue = 1
@@ -646,6 +650,7 @@ func Test() int {
 // later results (returned via caller pointers) were captured into the closure by
 // value rather than by reference.
 func TestRuntimeDeferModifiesLaterNamedResults(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 func triple() (a int, b int, c int) {
 	defer func() { a += 1; b += 10; c += 100 }()
@@ -665,6 +670,7 @@ func Test() int {
 // shared frame descriptor would leave every deferred call observing the last
 // registration's capture.
 func TestRuntimeRepeatedDeferCapturesEachRegistration(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 var loopOrder []int
@@ -711,6 +717,7 @@ func Test() int {
 }
 
 func TestStandardLibrarySHA256(t *testing.T) {
+	t.Parallel()
 	runCase(t, `package main
 
 import "crypto/sha256"
@@ -727,6 +734,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryUTF8(t *testing.T) {
+	t.Parallel()
 	runCase(t, `package main
 
 import "unicode/utf8"
@@ -738,6 +746,7 @@ func Test() int {
 }
 
 func TestUnsafeSliceHeaderDereference(t *testing.T) {
+	t.Parallel()
 	runCase(t, `package main
 
 import "unsafe"
@@ -752,6 +761,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryUTF16(t *testing.T) {
+	t.Parallel()
 	runCase(t, `package main
 
 import "unicode/utf16"
@@ -763,6 +773,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryUTF16DecodeAllocations(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import (
@@ -787,6 +798,7 @@ func Test() int {
 }
 
 func TestRuntimeDynamicGlobalInitializerUsesImportedGlobal(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import . "path"
@@ -804,6 +816,7 @@ func Test() int {
 }
 
 func TestRuntimeMultiResultGlobalInitializers(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 var pairCalls int
@@ -837,6 +850,7 @@ func Test() int {
 }
 
 func TestRuntimePackageInitializersRunInDeclarationOrder(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 var initializationStep int
@@ -868,6 +882,7 @@ func Test() int {
 }
 
 func TestRuntimeCallArgumentsSurviveInterfaceNormalization(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func inspect(err error, pointer *int, marker int, bytes []byte) int {
@@ -895,6 +910,7 @@ func Test() int {
 }
 
 func TestRuntimeKeyedGlobalSliceLiteral(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 var values = []uint8{1: 7, 4: 11, 13}
@@ -906,6 +922,7 @@ func Test() int {
 }
 
 func TestRuntimeNestedGlobalArrayLiteral(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 var values = [2][3]uint8{{1, 2, 3}, {4, 5, 6}}
@@ -923,6 +940,7 @@ func Test() int {
 }
 
 func TestRuntimeReturnedSlicePromotesCallerArray(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func expose(array *[32]byte) []byte {
@@ -952,6 +970,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryHex(t *testing.T) {
+	t.Parallel()
 	runCase(t, `package main
 
 import "encoding/hex"
@@ -963,6 +982,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryAdler32(t *testing.T) {
+	t.Parallel()
 	runCase(t, `package main
 
 import "hash/adler32"
@@ -974,6 +994,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryAdler32WriteString(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import (
@@ -1017,6 +1038,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryBinary(t *testing.T) {
+	t.Parallel()
 	runCase(t, `package main
 
 import "encoding/binary"
@@ -1030,6 +1052,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryMD5(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "crypto/md5"
@@ -1042,6 +1065,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibrarySHA1(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "crypto/sha1"
@@ -1054,6 +1078,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryFNVConstructor(t *testing.T) {
+	t.Parallel()
 	runCase(t, `package main
 
 import "hash/fnv"
@@ -1066,6 +1091,7 @@ func Test() int {
 }
 
 func TestRuntimeSliceValueSemanticsAcrossABI(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func shorten(values []int) {
@@ -1116,6 +1142,7 @@ func Test() int {
 }
 
 func TestRuntimeSliceValuesThroughInterfaceMethod(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type transformer interface {
@@ -1148,6 +1175,7 @@ func Test() int {
 }
 
 func TestRuntimeSliceValuesThroughMethodValue(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type cutter struct {
@@ -1175,6 +1203,7 @@ func Test() int {
 }
 
 func TestRuntimeEscapingMethodValuePreservesReceiver(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type pair struct {
@@ -1199,6 +1228,7 @@ func Test() int {
 }
 
 func TestRuntimeOnceValueReturningFunction(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "sync"
@@ -1215,6 +1245,7 @@ func Test() int {
 }
 
 func TestRuntimeReflectRecognizesConcreteInterfaceMethods(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import (
@@ -1238,6 +1269,7 @@ func Test() int {
 }
 
 func TestRuntimeReflectNewUsesCanonicalPointerType(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "reflect"
@@ -1258,6 +1290,7 @@ func Test() int {
 }
 
 func TestRuntimeReflectDistinguishesLocalNamedTypes(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "reflect"
@@ -1302,6 +1335,7 @@ func Test() int {
 }
 
 func TestRuntimeReflectiveInterfaceAssertionKeepsMethodReachable(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "reflect"
@@ -1342,6 +1376,7 @@ func Test() int {
 }
 
 func TestRuntimePointerReflectsValueReceiverMethod(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "reflect"
@@ -1378,6 +1413,7 @@ func Test() int {
 }
 
 func TestRuntimeReflectTypeAssertSupportsDirectInterfaceValue(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import (
@@ -1422,6 +1458,7 @@ func Test() int {
 }
 
 func TestRuntimeErrorStoredThroughInterfaceParameter(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "errors"
@@ -1452,6 +1489,7 @@ func Test() int {
 }
 
 func TestRuntimeReflectSetZeroClearsPointerField(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "reflect"
@@ -1473,6 +1511,7 @@ func Test() int {
 }
 
 func TestRuntimeReflectCallPassesStructWithStringAndSliceFields(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "reflect"
@@ -1510,6 +1549,7 @@ func Test() int {
 }
 
 func TestRuntimeDispatchesMethodPromotedFromEmbeddedInterface(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "io"
@@ -1546,6 +1586,7 @@ func Test() int {
 }
 
 func TestRuntimeMethodExpressionFunctionValuePreservesReceiver(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type accumulator struct {
@@ -1566,6 +1607,7 @@ func Test() int {
 }
 
 func TestRuntimePromotesImplicitPointerReceiverWhenReceiverEscapes(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type state struct {
@@ -1608,6 +1650,7 @@ func Test() int {
 }
 
 func TestRuntimeGenericReceiverMethodValueUsesInstantiatedSymbol(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type box[T any] struct {
@@ -1627,6 +1670,7 @@ func Test() int {
 }
 
 func TestRuntimeInterfaceMethodReturningStringSurvivesStackGrowth(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type stringValue struct {
@@ -1656,6 +1700,7 @@ func Test() int {
 }
 
 func TestRuntimeFunctionFieldReturnsNonEmptyInterface(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type counterValue interface {
@@ -1696,6 +1741,7 @@ func Test() int {
 }
 
 func TestRuntimeForwardedMultiResultConvertsConcreteToInterface(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type counterValue interface {
@@ -1729,6 +1775,7 @@ func Test() int {
 }
 
 func TestRuntimeStackArgumentsPreserveInterfaceDataWord(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type valueSource interface {
@@ -1761,6 +1808,7 @@ func Test() int {
 }
 
 func TestRuntimeDeferredPointerMethodOnStructFieldUsesFieldAddress(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "sync"
@@ -1787,6 +1835,7 @@ func Test() int {
 }
 
 func TestRuntimeDeferredRWMutexLockTransition(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "sync"
@@ -1815,6 +1864,7 @@ func Test() int {
 }
 
 func TestRuntimeInterfaceReadReturnsMultipleValuesAcrossStackGrowth(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type reader interface {
@@ -1852,6 +1902,7 @@ func Test() int {
 }
 
 func TestRuntimePointerInInterfaceSurvivesStackGrowth(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type value struct {
@@ -1880,6 +1931,7 @@ func Test() int {
 }
 
 func TestRuntimeReflectUpdatesConcretePointerStoredInInterface(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "reflect"
@@ -1899,6 +1951,7 @@ func Test() int {
 }
 
 func TestRuntimeReflectValueEqualDistinguishesDifferentPointers(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "reflect"
@@ -1924,6 +1977,7 @@ func Test() int {
 }
 
 func TestRuntimeReflectWalksPointerStoredInInterface(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "reflect"
@@ -1964,6 +2018,7 @@ func Test() int {
 }
 
 func TestRuntimeJSONUpdatesConcretePointerStoredInInterface(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "encoding/json"
@@ -1991,6 +2046,7 @@ func Test() int {
 }
 
 func TestRuntimeGlobalNamedIntegerErrorInterface(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type errno uintptr
@@ -2013,6 +2069,7 @@ func Test() int {
 }
 
 func TestRuntimeEnvironmentUpdateAndLookup(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "os"
@@ -2036,6 +2093,7 @@ func Test() int {
 }
 
 func TestRuntimeReturnedStringsInStructLiteral(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type config struct {
@@ -2080,6 +2138,7 @@ func Test() int {
 }
 
 func TestRuntimeAddressesOfSliceAndMapLiterals(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2093,6 +2152,7 @@ func Test() int {
 }
 
 func TestRuntimeNestedGlobalStructLiteral(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type inner struct {
@@ -2117,6 +2177,7 @@ func Test() int {
 }
 
 func TestRuntimeGlobalByteSliceFromConstantString(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 var literal = []byte("null")
@@ -2135,6 +2196,7 @@ func Test() int {
 }
 
 func TestRuntimeMapGrowthKeepsDirectoryBackingAlive(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2156,6 +2218,7 @@ func Test() int {
 }
 
 func TestRuntimeMapCompositeKeyUsesGeneratedEquality(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type key struct {
@@ -2175,6 +2238,7 @@ func Test() int {
 }
 
 func TestRuntimeIncrementInterfaceKeyedMapElement(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2188,6 +2252,7 @@ func Test() int {
 }
 
 func TestRuntimeGenericMapRangeUsesRuntimeIterator(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "maps"
@@ -2212,6 +2277,7 @@ func Test() int {
 }
 
 func TestRuntimeNestedSlicePointerSurvivesEscapingRangeValue(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "runtime"
@@ -2237,6 +2303,7 @@ func Test() int {
 }
 
 func TestRuntimeEscapingSlicePointerKeepsBackingAlive(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "runtime"
@@ -2266,6 +2333,7 @@ func Test() int {
 }
 
 func TestRuntimeInterfaceSliceStoresUseWriteBarriers(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "runtime"
@@ -2300,6 +2368,7 @@ func Test() int {
 }
 
 func TestRuntimeSliceValuePassedToGoroutine(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func shorten(values []int, done chan int) {
@@ -2324,6 +2393,7 @@ func Test() int {
 }
 
 func TestRuntimeClosurePassedToGoroutine(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2338,6 +2408,7 @@ func Test() int {
 }
 
 func TestRuntimeClosureWithArgumentsPassedToGoroutine(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2351,6 +2422,7 @@ func Test() int {
 }
 
 func TestRuntimeGoroutineClosureSurvivesGarbageCollection(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "runtime"
@@ -2380,6 +2452,7 @@ func Test() int {
 }
 
 func TestRuntimeNestedDeferInDeferredClosure(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func worker(done chan int) {
@@ -2399,6 +2472,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryOnceFuncSharesCapture(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "sync"
@@ -2416,6 +2490,7 @@ func Test() int {
 }
 
 func TestRuntimeSelectSendDefault(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2431,6 +2506,7 @@ func Test() int {
 }
 
 func TestRuntimeSelectChoosesDefault(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2446,6 +2522,7 @@ func Test() int {
 }
 
 func TestRuntimeSelectReceiveDefault(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2465,6 +2542,7 @@ func Test() int {
 }
 
 func TestRuntimeSelectReceiveChoosesDefault(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2480,6 +2558,7 @@ func Test() int {
 }
 
 func TestRuntimeSelectMultipleChannels(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2497,6 +2576,7 @@ func Test() int {
 }
 
 func TestRuntimeSelectWithoutCommunicationCases(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func maybeBlock(enabled bool) {
@@ -2517,6 +2597,7 @@ func Test() int {
 }
 
 func TestRuntimeSliceToArrayConversionCopiesValue(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2529,6 +2610,7 @@ func Test() int {
 }
 
 func TestRuntimeSliceToArrayPointerConversionBoxesPointer(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2543,6 +2625,7 @@ func Test() int {
 }
 
 func TestRuntimeIntegerToStringConversion(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2564,6 +2647,7 @@ func Test() int {
 }
 
 func TestRuntimeAppendStringEllipsis(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2580,6 +2664,7 @@ func Test() int {
 }
 
 func TestRuntimeAppendMakeToNilSlice(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2595,6 +2680,7 @@ func Test() int {
 }
 
 func TestRuntimeMakeEmptySliceIsNonNil(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -2613,6 +2699,7 @@ func Test() int {
 }
 
 func TestRuntimeReflectMakeEmptySliceIsNonNil(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "reflect"
@@ -2640,6 +2727,7 @@ func Test() int {
 }
 
 func TestRuntimeLengthOfSliceFieldInRangedStruct(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type field struct {
@@ -2662,6 +2750,7 @@ func Test() int {
 }
 
 func TestRuntimeAppendInterfaceValuesCopiesHeaders(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "runtime"
@@ -2701,6 +2790,7 @@ func Test() int {
 }
 
 func TestRuntimeAppendNonEmptyInterfaceAcrossStackGrowth(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type value interface {
@@ -2735,6 +2825,7 @@ func Test() int {
 }
 
 func TestMultiValueAssignmentConvertsConcreteResultToInterface(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type value interface {
@@ -2775,6 +2866,7 @@ func Test() int {
 }
 
 func TestRuntimeReturnedStringStoredInSlice(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "regexp"
@@ -2812,6 +2904,7 @@ func Test() int {
 }
 
 func TestRuntimeStaticGlobalSpecialFloatArray(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "math"
@@ -2828,6 +2921,7 @@ func Test() int {
 }
 
 func TestRuntimeMathARM64Assembly(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "math"
@@ -2860,6 +2954,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryRegexpMatchString(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "regexp"
@@ -2879,6 +2974,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryRegexpErrorMethod(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import (
@@ -2919,6 +3015,7 @@ func Test() int {
 }
 
 func TestRuntimeMultiValueCallExpandsAsArguments(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func values() (string, int) {
@@ -2939,6 +3036,7 @@ func Test() int {
 }
 
 func TestRuntimeInterfaceToInterfaceAssertionPreservesDescriptor(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type value interface {
@@ -2974,6 +3072,7 @@ func Test() int {
 }
 
 func TestRuntimeRangeOverFunction(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func values(yield func(int) bool) {
@@ -3001,6 +3100,7 @@ func Test() int {
 }
 
 func TestRuntimeNamedInterfaceResultAddress(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "unsafe"
@@ -3030,6 +3130,7 @@ func Test() int {
 }
 
 func TestRuntimeAtomicValueChannelRoundTrip(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "sync/atomic"
@@ -3047,6 +3148,7 @@ func Test() int {
 }
 
 func TestRuntimeContextCancelDone(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "context"
@@ -3065,6 +3167,7 @@ func Test() int {
 }
 
 func TestRuntimeStringSliceConversionsCopy(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -3091,6 +3194,7 @@ func Test() int {
 }
 
 func TestRuntimeRangeOverUntypedStringConstant(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -3108,6 +3212,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryFileModeString(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "io/fs"
@@ -3122,6 +3227,7 @@ func Test() int {
 }
 
 func TestRuntimeStackPassedSliceSurvivesGarbageCollection(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "runtime"
@@ -3147,6 +3253,7 @@ func Test() int {
 }
 
 func TestRuntimePointerSliceBackingScansElements(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "runtime"
@@ -3169,6 +3276,7 @@ func Test() int {
 }
 
 func TestRuntimePointerToSliceLocalEscapes(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "runtime"
@@ -3188,6 +3296,7 @@ func Test() int {
 }
 
 func TestRuntimeClosureSurvivesGarbageCollectionInCallee(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "runtime"
@@ -3212,6 +3321,7 @@ func Test() int {
 }
 
 func TestRuntimeConditionalEscapingClosureCapturesParameter(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type holder struct {
@@ -3246,6 +3356,7 @@ func Test() int {
 }
 
 func TestRuntimeClosurePassedToEscapingParameter(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 var saved func()
@@ -3274,6 +3385,7 @@ func Test() int {
 }
 
 func TestRuntimeInterfaceSwitchBoxesTypedScalarCases(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type status uintptr
@@ -3306,6 +3418,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryContainerList(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "container/list"
@@ -3325,6 +3438,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryContainerRing(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "container/ring"
@@ -3346,6 +3460,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibrarySort(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "sort"
@@ -3375,6 +3490,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibrarySortFindExhaustive(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "sort"
@@ -3403,6 +3519,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryContainerHeap(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "container/heap"
@@ -3445,6 +3562,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryMaps(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "maps"
@@ -3464,6 +3582,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryMapsCloneGlobal(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "maps"
@@ -3485,6 +3604,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryBufio(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import (
@@ -3513,6 +3633,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryBufioLinesAfterRead(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import (
@@ -3549,6 +3670,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryASCII85(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "encoding/ascii85"
@@ -3572,6 +3694,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryBase32(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "encoding/base32"
@@ -3595,6 +3718,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryBase64(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "encoding/base64"
@@ -3618,6 +3742,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryCSV(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import (
@@ -3637,6 +3762,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryIOCopyN(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import (
@@ -3656,6 +3782,7 @@ func Test() int {
 }
 
 func TestRuntimeGlobalStructSliceInitializer(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type entry struct {
@@ -3678,6 +3805,7 @@ func Test() int {
 }
 
 func TestRuntimeNestedGlobalSliceInitializer(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type result struct {
@@ -3734,6 +3862,7 @@ func Test() int {
 }
 
 func TestRuntimeStringStructFieldCompoundAssignment(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type holder struct {
@@ -3752,6 +3881,7 @@ func Test() int {
 }
 
 func TestRuntimeInterfaceChannelRoundTrip(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type problem int
@@ -3789,6 +3919,7 @@ func Test() int {
 }
 
 func TestRuntimeAddressRetainedThroughInterface(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type incrementer interface {
@@ -3819,6 +3950,7 @@ func Test() int {
 }
 
 func TestRuntimeAddressOfStringParameterEscapes(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "runtime"
@@ -3851,6 +3983,7 @@ func Test() int {
 }
 
 func TestRuntimeZeroSizeConcreteInterfaceEquality(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type empty struct{}
@@ -3867,6 +4000,7 @@ func Test() int {
 }
 
 func TestRuntimeEscapingSliceOfLocalArray(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 import "runtime"
@@ -3907,6 +4041,7 @@ func Test() int {
 }
 
 func TestRuntimeGoCallWithBlankParameters(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 var done = make(chan bool, 1)
@@ -3924,6 +4059,7 @@ func Test() int {
 }
 
 func TestRuntimeDeferredDelete(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func removeAfterReturn(values map[int]int) {
@@ -3943,6 +4079,7 @@ func Test() int {
 }
 
 func TestRuntimeDeferredAndAsynchronousClose(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func closeOnReturn(channel chan int) {
@@ -3963,6 +4100,7 @@ func Test() int {
 }
 
 func TestRuntimeChannelReceiveCommaOKAssignment(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -3983,6 +4121,7 @@ func Test() int {
 }
 
 func TestMixedInterfaceConcreteEqualityExecution(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type errorCode uintptr
@@ -4009,6 +4148,7 @@ func Test() int {
 }
 
 func TestInterfaceSliceElementConcreteEqualityExecution(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func Test() int {
@@ -4031,6 +4171,7 @@ func Test() int {
 }
 
 func TestRepositoryStandardLibraryRuntimeNumCPU(t *testing.T) {
+	t.Parallel()
 	runCase(t, `package main
 
 import "runtime"
@@ -4042,6 +4183,7 @@ func Test() int {
 }
 
 func TestMapExecution(t *testing.T) {
+	t.Parallel()
 	runCase(t, `package main
 
 func Test() int {
@@ -4079,6 +4221,7 @@ func Test() int {
 }
 
 func TestTypeSwitchExecution(t *testing.T) {
+	t.Parallel()
 	runCase(t, `package main
 
 func classify(value any) int {
@@ -4104,6 +4247,7 @@ func Test() int {
 }
 
 func TestCapturedClosureExecution(t *testing.T) {
+	t.Parallel()
 	runCase(t, `package main
 
 func Test() int {
@@ -4118,6 +4262,7 @@ func Test() int {
 }
 
 func TestGenericFunctionLiteralParameterExecution(t *testing.T) {
+	t.Parallel()
 	runCase(t, `package main
 
 func apply[T ~int](value T) int {
@@ -4134,6 +4279,7 @@ func Test() int {
 }
 
 func TestRuntimeGenericInterfaceFieldPreservesDescriptor(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type genericHolder[T any] struct {
@@ -4158,6 +4304,7 @@ func Test() int {
 }
 
 func TestRuntimeNamedSliceCommaOKTypeAssertion(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 type byteSequence []byte
@@ -4179,6 +4326,7 @@ func Test() int {
 }
 
 func TestRuntimeMultiValueReturnBoxesConcreteSliceAsInterface(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 func source() ([]int, error) {
@@ -4250,6 +4398,7 @@ func runCase(t *testing.T, src string, want int, optimized bool) {
 // not return the original value. This is the end-to-end guarantee the safepoint
 // root set (now derived purely from GCRef) underwrites.
 func TestRuntimeStackGrowthRelocatesInteriorPointers(t *testing.T) {
+	t.Parallel()
 	runExecutableCase(t, `package main
 
 //go:noinline

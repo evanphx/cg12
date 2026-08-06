@@ -2338,3 +2338,187 @@ One thing noticed and not changed: `crypto_signing_bench_baseline.txt` says the
 run takes "about eight minutes". Measured twice today on an idle box it is
 1m43s. The pre-flight's own message quotes the measured figure rather than the
 committed one.
+
+# VERIFICATION TURNAROUND — `ccwork/verification-turnaround` off `main` (76069d9)
+
+Host: aarch64 Linux, 64 cores, 250 GiB total / 243 GiB available, go1.26.1,
+exclusive. Everything below was run and watched by this job unless marked
+UNVERIFIED. Sections are appended as each result lands.
+
+## 0. The brief's diagnosis is half right, and the half that is wrong matters
+
+The brief says every gate ran `go test -parallel 10 ./goc/...`, that the 10 came
+from an 8-core laptop, and that raising it is the first win. The conclusion — the
+box is idle — is **correct and worse than stated**. The mechanism is **not**.
+
+`./goc/...` is a **single package** (`github.com/evanphx/cg12/goc`, 349 top-level
+tests, 45 files, 19,101 lines of test) and it contains **zero calls to
+`t.Parallel()`**:
+
+    $ go list ./goc/...
+    github.com/evanphx/cg12/goc
+    $ grep -rn '\.Parallel()' goc/ | wc -l
+    0
+
+`go test -parallel N` bounds *tests that call `t.Parallel`*. With no test opting
+in, **`-parallel` is inert**: 10 and 64 are the same command. Every gate that
+"ran the corpus at -parallel 10" was running it at -parallel 1, and every gate
+that had instead been told to pass 48 would have measured exactly the same wall
+clock. Raising the number alone buys nothing.
+
+What the box was actually doing during the baseline run, sampled from
+`/proc/stat` every 15 s:
+
+    busy 4.5% of 64 cores = 2.9 cores
+
+**2.9 of 64 cores for twenty-one minutes.** The residual parallelism is inside a
+single compile (`arm64` backend workers, GOMAXPROCS-sized) and inside the three
+or four audit tests that run their own pools; the 349 tests themselves are a
+serial queue.
+
+So the fix is not "change 10 to 48". It is "make the suite parallel at all, then
+size the cap by measurement" — which is what the rest of this report does.
+
+## 1. Corpus suite, before — 1121 s at 4.0 of 64 cores
+
+Measured by this job on `main` (76069d9), exactly the command every gate was
+briefed with, plus `-v` for a per-test profile:
+
+    /usr/bin/time -v go test -timeout 60m -parallel 10 -v ./goc/...
+
+    ok  github.com/evanphx/cg12/goc  1121.146s      exit 0
+    341 PASS, 8 SKIP, 0 FAIL
+
+    Elapsed (wall clock) time            18:57.13
+    Percent of CPU this job got          396%
+    Maximum resident set size            13,627,420 kB  (13.0 GiB)
+
+**396% is 4.0 of 64 cores**, and that agrees with the independent `/proc/stat`
+sampling above (2.9 cores averaged over the window; 4.0 is the process's own
+figure over its whole life, which includes the audit block's 8-worker pool).
+Peak RSS 13.0 GiB out of 243 available — **5%**.
+
+This is the number to beat, and it is worth being precise about what it says:
+the machine was 94% idle and had 95% of its memory free for nineteen minutes,
+and no setting the caller could have passed would have changed that.
+
+## 2. THE FINDING: the goc suite is not safe to run in parallel as it stands
+
+At `-parallel 32` the suite runs in **4:01 instead of 18:57** — and **fails**:
+
+    Percent of CPU this job got     2121%   (21.2 of 64 cores, up from 4.0)
+    Elapsed (wall clock) time       4:01.12
+    Maximum resident set size       13,311,592 kB (12.7 GiB — no higher than serial)
+    FAIL                            exit 1
+
+Three tests, and they are not three unrelated tests:
+
+| test | failure |
+|---|---|
+| `TestInterfaceConversionsCallTheRuntimeHelpers` | "a `...any` object that stays in the frame should not be built by a call to `runtime.newobject`" |
+| `TestFrameEscapeAudit` | 2 new publications, both `main.addressIntoANonRetainingVariadic`, `allocation_counts.go:549:34` |
+| `TestAllocationCensus` | new heap sites: `main.forwardVariadicPastAnInterface`, plus a long tail of stdlib sites (`context.cancelCtx.propagateCancel`, `sha256`, `sha512`, `internal/bisect`, `internal/godebug`, `internal/poll`, `internal/strconv`) |
+
+All three are **escape-placement** results, and all three moved in the same
+direction — allocations the serial run keeps in a frame are on the heap here.
+The same three pass at `-parallel 10`-as-briefed (which is to say, serially): the
+baseline run in §1 is 341 PASS / 0 FAIL on this identical tree.
+
+So this is not a slow test timing out and it is not a flaky assertion. **The
+compiler's placement decisions depend on what else the process is compiling at
+the time.** That is the shared resource, and it is in the compiler, not in the
+test.
+
+The prime suspect is the shared source world (`goc/source_world.go`). Compiles in
+one process share parsed stdlib packages by pointer — `adopt` copies the map but
+not the units, on the stated ground that "they are read-only once the world is
+frozen" — and every concurrent compile in a `go test` process draws from the same
+frozen world. If any unit is in fact written during a compile, concurrent
+compiles interfere and the loser's placement changes. `CG12_NOCACHE=1` is exactly
+the switch that turns that sharing off, so it is also the experiment; §3 runs it.
+
+_(experiment and disposition follow)_
+
+## 3. Isolating it: two experiments, one hypothesis refuted
+
+**E1 — the same five tests, alone, at `-parallel 32`.**
+
+    go test -count=1 -parallel 32 ./goc/ -run '^(TestAllocationCensus|TestFrameEscapeAudit|TestLoopAliasAudit|TestEscapeShadowPlacement|TestInterfaceConversionsCallTheRuntimeHelpers)$'
+    ok  github.com/evanphx/cg12/goc  201.689s      exit 0
+
+**PASS.** So it is not that these tests are internally racy, and not that the
+audit's own 8-worker compile pool is at fault — that pool ran here exactly as it
+runs in the failing case. What changes the answer is *other tests compiling in
+the same process at the same time*.
+
+**E2 — the whole suite at `-parallel 32` with `CG12_NOCACHE=1`,** which turns off
+the shared source world, the hypothesis from §2:
+
+    CG12_NOCACHE=1 go test -count=1 -parallel 32 ./goc/
+    --- FAIL: TestFrameEscapeAudit   (207.98s)
+    --- FAIL: TestAllocationCensus   (216.81s)
+    FAIL  github.com/evanphx/cg12/goc  297.986s   exit 1
+
+**The hypothesis is refuted.** Disabling world sharing does not fix the audits.
+It does fix `TestInterfaceConversionsCallTheRuntimeHelpers`, which passed here —
+so the shared world is implicated in *that* one and is not the whole story.
+
+I looked for the remaining mechanism and did not find it. Ruled out by reading:
+no time-based or step-budget cutoff anywhere in `opt/escape*.go` (which would
+have explained the uniformly conservative direction neatly); no `sync.Pool`
+anywhere in `goc`, `opt`, `ir`, `lower`, `arm64`; no goroutines in the escape
+analysis itself; no package-level mutable state in the compile path beyond the
+source world and read-only tables built in `init`. **The root cause is not
+isolated, and this report does not claim it is.**
+
+What can be said with the evidence in hand:
+
+* It reproduces. Three tests at `-parallel 32` with world sharing on, two with it
+  off, in the same direction both times.
+* Every difference is conservative — an allocation the serial run keeps in a
+  frame is on the heap. Nothing moved the unsafe way.
+* **Nothing in production compiles concurrently inside one process.** `goc`
+  compiles one program per process, and `goc compile-batch` — the thing the
+  determinism sweep and the capability matrix drive — reads its request stream in
+  a plain `for requests.Scan()` loop and compiles them **strictly in sequence**
+  within each worker; concurrency there is across worker *processes*
+  (`cmd/goc/batch.go`, and the file says so: "a worker outlives its programs").
+  The shared world is designed for exactly that serial reuse.
+
+So this is a constraint on how the suite may be parallelised, not a shipped
+defect — but it is a real and unexplained property of the compiler, and it is
+worth someone's time: an analysis whose answer depends on what else the process
+is doing is one whose answer is not a function of its input.
+
+## 4. The disposition: a listed sequential set, enforced
+
+`goc/sequential_tests.txt` names every test that must not run concurrently with
+another compile, with a reason tag (`placement`, `setenv`, `timing`). 83 tests:
+77 placement, 4 `t.Setenv`, 2 timing. The other 267 call `t.Parallel` as their
+first statement.
+
+Go runs every sequential top-level test to completion **before** it resumes any
+parallel one, so a listed test is guaranteed a quiet process — precisely the
+conditions it runs in today. **No listed test's execution environment changes at
+all**, which is why this does not weaken the verification.
+
+The set is deliberately over-broad. It is not the three tests that were observed
+to fail; it is every test that reaches a placement assertion by any call path,
+computed with a `go/ast` pass that seeds on the placement markers (`newobject`,
+`escapes to heap`, `does not escape`, the four audit baselines, …) and then
+closes over the call graph, unioned with a coarser per-file grep. 61 from the AST
+closure, 69 from the file scan, **81 in the union** — the union, because the cost
+of an unnecessary sequential test is seconds and the cost of a missing one is a
+flaky gate.
+
+`goc/parallelpolicy_test.go` enforces both directions against that file and runs
+in every corpus run: a new test with no `t.Parallel` and no listing fails, and so
+does a listed test that acquires a `t.Parallel`. The file is the single source of
+truth — `scripts/verify.sh` reads the same two columns to shard the suite.
+
+One more laptop-era constant fixed while here: `compileCorpusForAudits` capped
+its compile pool at a flat **8**, which made `TestAllocationCensus` the single
+longest test in the tree (183 s of 1121 s) with 56 cores idle. It is now bounded
+by `MemAvailable / 4.23 GiB` (the corpus's worst observed compile peak), the same
+way the capability matrix bounds its fan-out — right on both machines, passed by
+neither caller. `GOC_AUDIT_WORKERS` overrides it.

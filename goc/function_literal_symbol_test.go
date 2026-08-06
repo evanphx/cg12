@@ -20,6 +20,7 @@ import (
 // called p521B's initializer. Compiling this program is the regression test:
 // compile refuses a module whose functions do not have distinct linker symbols.
 func TestGeneratedPackageLiteralsGetDistinctSymbols(t *testing.T) {
+	t.Parallel()
 	source := `package main
 
 import "crypto/internal/fips140/nistec"
@@ -51,6 +52,7 @@ func main() {
 // TestCheckUniqueFunctionSymbolsNamesBothFunctions asserts the collision is
 // reported rather than silently resolved, and names what collided with what.
 func TestCheckUniqueFunctionSymbolsNamesBothFunctions(t *testing.T) {
+	t.Parallel()
 	module := &ir.Module{}
 	module.NewFuncVoid("pkg.one.func.3.4")
 	module.NewFuncVoid("pkg/one.func.3.4")

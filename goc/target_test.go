@@ -9,6 +9,7 @@ import (
 )
 
 func TestParseTarget(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"arm64", "amd64"} {
 		target, err := ParseTarget(name)
 		if err != nil {
@@ -29,6 +30,7 @@ func TestParseTarget(t *testing.T) {
 // leaving the target unset must reproduce what goc did when it read
 // runtime.GOARCH directly, so no existing caller changes behavior.
 func TestUnsetTargetIsTheHost(t *testing.T) {
+	t.Parallel()
 	if got := HostTarget(); got.GOARCH() != runtime.GOARCH {
 		t.Errorf("HostTarget() = %q, want %q", got, runtime.GOARCH)
 	}
@@ -41,6 +43,7 @@ func TestUnsetTargetIsTheHost(t *testing.T) {
 }
 
 func TestTargetTypeGeometryIsShared(t *testing.T) {
+	t.Parallel()
 	for _, target := range []Target{TargetARM64, TargetAMD64} {
 		if err := checkTargetTypeSizes(target); err != nil {
 			t.Errorf("checkTargetTypeSizes(%s) = %v, want nil", target, err)
@@ -59,6 +62,7 @@ func TestTargetTypeGeometryIsShared(t *testing.T) {
 // chosen by build tag and filename suffix, so the constant the type checker ends
 // up with names whichever architecture the loader selected files for.
 func TestSourceLoaderSelectsTargetArchitectureFiles(t *testing.T) {
+	t.Parallel()
 	for _, target := range []Target{TargetARM64, TargetAMD64} {
 		loader := newSourceLoader(token.NewFileSet(), target)
 		pkg, err := loader.Import("internal/goarch")

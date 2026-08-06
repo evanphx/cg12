@@ -8,6 +8,7 @@ import (
 )
 
 func TestApplyNativeStdlibOverlay(t *testing.T) {
+	t.Parallel()
 	managed := false
 	units := map[string]*sourceUnit{
 		"runtime": {

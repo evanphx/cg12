@@ -1,0 +1,119 @@
+# Tests in the goc suite that must NOT run concurrently with other tests.
+#
+# Every other top-level test in this package calls t.Parallel as its first
+# statement; goc/parallelpolicy_test.go enforces both directions against this
+# file, and scripts/verify.sh reads it to shard the suite. It is the single
+# source of truth, so a name added here needs no other edit.
+#
+# Go runs every sequential top-level test to completion BEFORE it resumes any
+# parallel one, so a test listed here is guaranteed a quiet process: no other
+# test in this package is compiling while it runs. That guarantee is the whole
+# point of the list.
+#
+# Format: <test name> <tab> <reason tag>
+#
+# placement  Asserts WHERE the compiler put an allocation -- a frame or the
+#            heap -- directly, or through a helper, or through the corpus-wide
+#            audit baselines. Measured on this box: running the suite at
+#            -parallel 32 with these tests parallel makes TestAllocationCensus,
+#            TestFrameEscapeAudit and TestInterfaceConversionsCallTheRuntimeHelpers
+#            fail, every difference in the conservative direction (an allocation
+#            the serial run keeps in a frame is on the heap). The same tests pass
+#            at -parallel 32 when nothing else in the process is compiling, and
+#            they still fail with CG12_NOCACHE=1, so the shared source world is
+#            not the mechanism. Concurrent compiles inside ONE process perturb
+#            escape placement; nothing in production does that (goc compiles one
+#            program per process, and `goc compile-batch` compiles its stream
+#            strictly in sequence within each worker), so this is a constraint on
+#            how the suite may be parallelised rather than a shipped defect. The
+#            root cause is NOT isolated -- see CCWORK_REPORT.md.
+#            The set is deliberately over-broad: it is every test that reaches a
+#            placement assertion by any call path, not only the three that were
+#            observed to fail.
+# setenv     Calls t.Setenv, which mutates process-global state and panics if the
+#            test is parallel.
+# timing     Measures elapsed time on a pinned core and has a pre-flight that
+#            refuses a busy box. Flag-gated, so it skips in a normal run.
+TestAddressNestedInReturnedCompositeEscapes	placement
+TestAllocationCensus	placement
+TestAllocationCounts	placement
+TestAllocationCountsAgainstTheHostToolchain	placement
+TestAssigningRangeClauseKeepsOneInstance	placement
+TestCapturedLoopVariableIsAllocatedInsideTheLoop	placement
+TestCapturedVariableStorageHoldsTheValue	placement
+TestClosureStoredInAFrameStructDoesNotEscape	placement
+TestClosureWritesIntoACapturedVariablesStorage	placement
+TestCompareAllocationCensusNamesTheDirection	placement
+TestCompareAllocationCensusReportsASplitSite	placement
+TestCompileExecutableDynamicallyInitializesNestedByteSlice	placement
+TestCompileExecutableKeepsRuntimePanicRecordOnStack	placement
+TestCompileExecutableKeepsRuntimeSelectgoStackSliceHeadersOnStack	placement
+TestCompileExecutablePromotesFinalizedPointerGraph	placement
+TestCompileExecutableStackAllocatesNoSplitVariadicBacking	placement
+TestCompileUTF8TestsKeepsFunctionSizeBounded	placement
+TestCompositeLiteralAddressCarriesItsElementsToTheHeap	placement
+TestConditionallyDeferredFunctionLiteralDoesNotAllocateBeforeItsBranch	placement
+TestDeferredClosureCapturedNamedResultStaysOnTheFrame	placement
+TestDeferredFunctionLiteralAboveAForwardGotoStaysOnTheFrame	placement
+TestEscapeDiagnosticDoesNotChangeTheEmittedModule	placement
+TestEscapeDiagnosticLevelOneCarriesNoChain	placement
+TestEscapeDiagnosticLevelTwoNamesTheChain	placement
+TestEscapeDiagnosticNamesWhereEachAllocationWent	placement
+TestEscapeDiagnosticParsesAsGCFlagM	placement
+TestEscapeReasonDifferentialAgainstGC	placement
+TestEscapeShadowPlacement	placement
+TestEscapeSummaryCost	placement
+TestEscapeSummaryFacts	placement
+TestEscapeSummaryPointerPassedInsideAStructEscapes	placement
+TestEscapeSummaryPromotionRate	placement
+TestEscapeSummarySliceBackingBarrieredIntoItsHeaderIsStillTracked	placement
+TestFieldAddressThatEscapesPromotesItsObject	placement
+TestFrameEscapeAudit	placement
+TestFunctionAssignedGlobalSliceLiteralUsesEscapingBacking	placement
+TestFunctionLiteralForwardedToGoroutineEscapes	placement
+TestFunctionLiteralPassedToEscapingParameterEscapes	placement
+TestGCExplanationsParseTheFlowChain	placement
+TestGocFlagMParsesIntoSites	placement
+TestGocFlagMStillParsesAsGCFlagM	placement
+TestHiddenResultPointersAreManagedStackReferences	placement
+TestInterfaceConversionsCallTheRuntimeHelpers	placement
+TestKeepAliveStoresIntoAFrameSlotRatherThanAGlobal	placement
+TestLoadStandardRuntimeOverlay	placement
+TestLocalArraySlicedIntoNonRetainingCalleeStaysOnStack	placement
+TestLocalArraySlicedIntoReturnedSliceEscapes	placement
+TestLoopAliasAudit	placement
+TestLoopAliasExpectationsMatchTheHostToolchain	placement
+TestLoopBodyAllocationsAreDistinctPerIteration	placement
+TestMapLookupKeyStaysInTheFrameAndAMapWriteKeyDoesNot	placement
+TestNonEscapingCaptureStaysOffTheHeap	placement
+TestNotInHeapPointerStoreSkipsWriteBarrier	placement
+TestObjectsTooLargeForAFrameGoToTheHeap	placement
+TestOneCapturedScalarCostsOneAllocationPerIteration	placement
+TestParameterAssignedToACalleeNamedResultEscapes	placement
+TestParameterLeakingOnlyToResultDoesNotEscapeItsCaller	placement
+TestParameterLeakingToAnInterfaceResultEscapes	placement
+TestPerIterationCellSurvivesHeapAllocationLowering	placement
+TestPointerConversionPassedToNoEscapeFunctionStaysLocal	placement
+TestPointerReadBackOutOfAFrameLocalContainerEscapes	placement
+TestRangeOverFunctionBodyWritesIntoACapturedVariablesStorage	placement
+TestReasonPositionsAreRepositoryRelative	placement
+TestReasonTaxonomyCoversBothVocabularies	placement
+TestRepeatedDeferredFunctionLiteralEscapes	placement
+TestRuntimeAggregateStorePublishesEveryPointerWord	placement
+TestRuntimeAllocationEscapeLowering	placement
+TestRuntimeSelectShapedSynchronousCaptureDoesNotPromoteStackSliceHeaders	placement
+TestRuntimeSliceBulkOperationsUseWriteBarriers	placement
+TestSingleDirectDeferredFunctionLiteralStaysOnTheFrame	placement
+TestSlogAllocationsAgainstGC	placement
+TestSynchronousFunctionLiteralCaptureDoesNotPromoteStackSliceHeader	placement
+TestUncapturedLoopVariableAllocatesNothing	placement
+TestUnsafePointerConvertedToUintptrDoesNotEscapeLocalArray	placement
+TestUnsafePointerStoreKeepsWriteBarrier	placement
+TestValueBoxedIntoAnInterfaceEscapes	placement
+TestZeroCaptureFunctionLiteralUsesStaticDescriptor	placement
+TestLoadExactStandardRuntimeSource	setenv
+TestStdlibOverlayRejectsAssemblyReplacement	setenv
+TestStdlibOverlayRejectsReplacementWithoutUpstreamHash	setenv
+TestNoSplitBudgetErrorNamesTheAllocatorChainWhenItIsForced	setenv
+TestCryptoSigningBench	timing
+TestPerformanceSuite	timing

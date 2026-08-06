@@ -63,6 +63,7 @@ var slogAttrFramePrograms = []struct {
 // pointer words are contributed from more than one place and an optimization
 // pass can add or drop a contribution.
 func TestSlogAttrInFrameIsNotScannedAsAPointer(t *testing.T) {
+	t.Parallel()
 	for _, program := range slogAttrFramePrograms {
 		for _, optimized := range []bool{false, true} {
 			name := program.source
@@ -87,6 +88,7 @@ func TestSlogAttrInFrameIsNotScannedAsAPointer(t *testing.T) {
 // value in it happens to be a plausible pointer; this one catches it whatever
 // the value, and it is the diagnostic the bug reproduces through.
 func TestSlogAttrInFrameSurvivesTheStackCopyChecker(t *testing.T) {
+	t.Parallel()
 	for _, program := range slogAttrFramePrograms {
 		t.Run(program.source, func(t *testing.T) {
 			got := runCorpusProgramOutputWithEnv(t, filepath.Join("testdata", program.source), false,
@@ -100,6 +102,7 @@ func TestSlogAttrInFrameSurvivesTheStackCopyChecker(t *testing.T) {
 // above against `go run`, so a wrong entry cannot make the corpus test enforce
 // the wrong answer forever.
 func TestSlogAttrFrameExpectationsMatchTheHostToolchain(t *testing.T) {
+	t.Parallel()
 	toolchain, err := exec.LookPath("go")
 	if err != nil {
 		t.Skip("host Go toolchain unavailable")

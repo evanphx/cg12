@@ -21,6 +21,7 @@ import (
 // slot, so every iteration's assignment landed somewhere no other function
 // could see.
 func TestRangeClauseWritesAPackageLevelTarget(t *testing.T) {
+	t.Parallel()
 	loops := map[string]string{
 		"slice":    "for target = range values {\n\t_ = target\n}",
 		"array":    "for target = range [3]int{1, 2, 3} {\n\t_ = target\n}",
@@ -47,6 +48,7 @@ func TestRangeClauseWritesAPackageLevelTarget(t *testing.T) {
 // The operands a target's address depends on are evaluated once per iteration,
 // so a call in an index expression runs as many times as the loop body does.
 func TestRangeTargetOperandsAreEvaluatedEveryIteration(t *testing.T) {
+	t.Parallel()
 	module, err := goc.Compile("rangetarget.go", []byte(rangeTargetProgram(`
 	destination := make([]int, 1)
 	for destination[position()] = range values {
@@ -70,6 +72,7 @@ func TestRangeTargetOperandsAreEvaluatedEveryIteration(t *testing.T) {
 // runtime configuration goc itself uses, where the map operations are runtime
 // calls rather than open-coded probing.
 func TestMapElementDestinationsUseTheMapRuntime(t *testing.T) {
+	t.Parallel()
 	module, err := goc.CompileExecutable("maptarget.go", []byte(`
 package main
 

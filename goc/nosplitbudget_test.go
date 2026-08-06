@@ -101,6 +101,7 @@ func compileWithBudget(t *testing.T, name, source string) error {
 
 // The budget fires, and the error is the one a person could act on.
 func TestNoSplitBudgetRejectsAnOverflowingChain(t *testing.T) {
+	t.Parallel()
 	requireARM64(t)
 	err := compileWithBudget(t, "nosplit_overflow.go", noSplitOverflowProgram)
 	require.Error(t, err, "a nosplit chain over the reserve produced an object")
@@ -123,12 +124,14 @@ func TestNoSplitBudgetRejectsAnOverflowingChain(t *testing.T) {
 }
 
 func TestNoSplitBudgetAcceptsAChainThatFits(t *testing.T) {
+	t.Parallel()
 	requireARM64(t)
 	require.NoError(t, compileWithBudget(t, "nosplit_fits.go", noSplitFittingProgram))
 }
 
 // The budget is a build failure, not a diagnostic: no object comes back.
 func TestNoSplitBudgetProducesNoObject(t *testing.T) {
+	t.Parallel()
 	requireARM64(t)
 	module, err := goc.CompileExecutable("nosplit_overflow.go", []byte(noSplitOverflowProgram))
 	require.NoError(t, err)
@@ -142,6 +145,7 @@ func TestNoSplitBudgetProducesNoObject(t *testing.T) {
 // arm64/nosplit_debt.go covers what was already over the reserve, and nothing
 // this branch does adds to it.
 func TestNoSplitBudgetAcceptsACorpusProgram(t *testing.T) {
+	t.Parallel()
 	requireARM64(t)
 	const program = "testdata/runtime_lock_osthread.go"
 	source, err := os.ReadFile(program)
