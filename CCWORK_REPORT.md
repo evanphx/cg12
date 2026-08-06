@@ -3652,3 +3652,31 @@ each doing a full corpus compile and comparing against
 of them. (A `-count=2` repeat inside one process is not a second census — the
 corpus compile is memoized, and the second iteration takes 0.06 s. Three
 processes is the honest reading of "twice".)
+
+## 3. Crash loops and GC reducers — **1310 runs, 0 failures**
+
+Eight at a time. Both `placement_bench` programs `panic` on a wrong answer, so
+these are correctness loops as well as crash loops. Everything compiled `goc -O`
+by each compiler's own default — the branch's default is now the split build,
+which is the point.
+
+| loop | compiler | runs | `GOGC` | failures |
+|---|---|---:|---|---:|
+| `placement_bench/flate` | branch | 250 | 100 | **0** |
+| `placement_bench/flate` | branch | 250 | 10 | **0** |
+| `placement_bench/p256` | branch | 100 | 10 | **0** |
+| `runtime_lock_osthread` | branch | 400 | 100 | **0** |
+| GC reducer `runtime_gc_promoted_local_root` | branch | 20 | 100 | **0** |
+| GC reducer `runtime_gc_promoted_local_root` | branch | 20 | 10 | **0** |
+| GC reducer `runtime_gc_type_mask_padding` | branch | 20 | 100 | **0** |
+| GC reducer `runtime_gc_type_mask_padding` | branch | 20 | 10 | **0** |
+| GC reducer `runtime_gc_promoted_local_root` | **`main` control** | 20 | 100 | **0** |
+| GC reducer `runtime_gc_promoted_local_root` | **`main` control** | 20 | 10 | **0** |
+| GC reducer `runtime_gc_type_mask_padding` | **`main` control** | 20 | 100 | **0** |
+| GC reducer `runtime_gc_type_mask_padding` | **`main` control** | 20 | 10 | **0** |
+
+Branch and control agree at zero, so the reducers say nothing has moved rather
+than that the instrument is asleep — but note that a reducer at 0/20 on both
+sides is a weak instrument by construction; it is the flate and p256 loops, 600
+runs of real decompression and real signature verification, that carry the
+weight here.
