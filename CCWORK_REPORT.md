@@ -5769,3 +5769,30 @@ byte-identical across the drop-5 fix), because the measure path stops before it
 emits labels and no rejected caller here grew a block afterwards. So on the
 non-cache path this fix closes a live hazard rather than a live defect. On the
 cache path it was the difference between an object and an error.
+
+## Guards
+
+Scaled to the change, as briefed. Everything below was run on this branch; the
+corpus suite, the capability matrix, `make test-unit`, the four audits, the census,
+the determinism sweeps and the crash loops were left to the gate that owns them.
+
+| guard | result |
+|---|---|
+| `go build ./...` | pass |
+| `go vet` | pass |
+| `TestBinaryRoundTrip` | pass |
+| `TestBinaryDeterministic` | pass |
+| `TestModuleRoundTripsThroughTheBinaryFormat` | pass (23.6 s) |
+| `TestIRVerifyAudit` | pass -- **1 559 314 function verifications across 406 programs, all clean** |
+| `make verify-fast` | **PASS in 4m58s**, 11/11 items (build, vet, gofmt, unit, corpus-parallel, corpus-sequential ×3, matrix-default, matrix-opt, reducers) |
+
+Two packages `verify-fast`'s `unit` item excludes were run separately, because
+`cc/` is the front end that produces most of the fields on this report and
+`cmd/cg12` is the other reader of the format: `go test ./cc/ ./cmd/cg12/ ./link/`
+-- all pass.
+
+Nothing on disk anywhere in the tree is affected by the `binVersion` bump: no
+committed file starts with the `cg12` magic, and the prebuilt runtime packs do
+not embed IR units (no `MarshalBinary` outside `ir/`, `memo/`, `cmd/cg12`,
+`cmd/viz` and `cmd/stagetime`, none of which persist a unit across compiler
+versions).
