@@ -2338,3 +2338,449 @@ One thing noticed and not changed: `crypto_signing_bench_baseline.txt` says the
 run takes "about eight minutes". Measured twice today on an idle box it is
 1m43s. The pre-flight's own message quotes the measured figure rather than the
 committed one.
+
+# The verifier's model of function entry was one input short
+
+Branch `ccwork/ir-verify-entry-blocks`, from `main` (`76069d9`).
+
+The build-cache design job found that 211 of 5083 functions (4.2%) fail
+`ir.Verify` on a normal whole-program compile, all of them closure, `deferwrap`
+and `methodvalue` entry blocks, and that `ir.DecodeModule` therefore cannot
+round-trip a goc module. This is that defect.
+
+**The verifier was wrong, not the IR.** The only non-test source change is
+`ir/verify.go`.
+
+**And emitted code does change** — closures get bigger, `.text` grows 0.5% on
+`hello.go` — because the defect was not latent. `ir.CloneFunc` clones through
+`MarshalBinary`/`DecodeModule`, `DecodeModule` gates on `VerifyModule`, and so
+the verifier rejecting closures had been silently disabling
+`opt.InlineIntoNoSplitCallers` for every one of them. Fixing the verifier
+re-enables an optimisation that had been off for 4-6% of functions. See the
+CORRECTION section near the end, which is the part of this report to read if you
+read only one.
+
+## What was violated
+
+`verifySSA`'s use-before-definition rule: *every temporary a use reads must have
+a definition somewhere*. It builds the set of already-defined temporaries by
+walking `f.Params`, and `f.Params` is not the whole of a function's entry.
+
+A function has two kinds of entry input. Parameters are the obvious kind. The
+second is the closure environment: when `Func.HasClosureContext` is set,
+ABIInternal delivers it in the architecture's dedicated closure register (X26 on
+arm64, RDX on amd64) before the first instruction runs, and the temporary marked
+`Temp.ClosureContext` receives it. It is defined on entry exactly as a parameter
+is, and no instruction assigns it.
+
+It is deliberately *not* in `f.Params`, because it is not an argument. It
+consumes no argument register and no stack slot, and ABI lowering treats it
+apart from the parameter sequence — `arm64/goabi.go` builds its spill group
+outside the parameter loop, and `arm64/lower.go`'s `stabilizeClosureContext`
+copies it out of the volatile register at entry precisely because it arrived
+there rather than through the argument assigner.
+
+So the verifier was right that nothing *in the body* defines it, and wrong that
+this made it undefined. Reading the closure environment is not a use before a
+definition; it is a read of the second entry input.
+
+## Reproduced, and it is one construction path
+
+`cmd/verifyprobe` (scratch, not committed) compiles a program, runs `ir.Verify`
+over every function, and for each failure asks whether the undefined temporary
+is the one marked `ClosureContext`.
+
+| | functions | fail `ir.Verify` | |
+|---|---:|---:|---|
+| `hello.go` | 2744 | **125 (4.56%)** | 115 closure, 4 `deferwrap`, 3 `gowrap`, 3 `methodvalue` |
+| `stdlib_http_client_server.go` | 14568 | **831 (5.70%)** | 446 closure, 310 `methodvalue`, 50 `deferwrap`, 25 `gowrap` |
+
+Every failure is the same message — `start: add reads %N, which nothing
+defines` — and in **831 of 831** and **125 of 125**, the undefined temporary is
+the `ClosureContext` temporary. Not one exception.
+
+The three named shapes are one construction path, as suspected:
+`(*gen).closureContext` at `goc/compile.go:14604`, with four callers — the
+func-literal closure (`compile.go:13723`), the range-over-func yield child
+(`:11106`), the `deferwrap`/`gowrap` wrapper (`:10530`) and the `methodvalue`
+wrapper (`:13295`). The `add` in every message is `g.offset(environment, 8*(i+1))`,
+the load of the *i*-th captured variable out of the environment. That is also
+why the count is lower than the number of such functions: on `hello.go` 169
+functions have a closure context and 125 fail, the other 44 being closures that
+capture nothing and so never read the environment.
+
+The survey found the invariants hold exactly, over all 2744 functions of
+`hello.go` and all 14568 of the http program, before and after `-O`:
+
+  - `HasClosureContext` set ⟺ exactly one temporary marked `ClosureContext`
+    (169 and 169; 1087 and 1087). No function has two, none has the flag
+    without the temporary, none the temporary without the flag.
+  - No `ClosureContext` temporary is ever assigned by an instruction (0).
+  - No `ClosureContext` temporary is ever also in `f.Params` (0).
+
+## The fix
+
+`ir/verify.go`: `defineClosureContext` seeds the closure-context temporary as
+defined on entry alongside the parameters, and the invariant is stated there in
+full for the next person.
+
+The exemption is granted only where the function claims it, so that "no
+instruction assigns it" cannot become a way to smuggle a genuinely undefined
+value past the check: the flag and the marked temporary must agree, and there
+must be exactly one. Those three disagreements are now diagnostics of their own.
+That also closes a hole in the inliner, which copies `Fixed` and `Reg` onto a
+cloned temporary but not `ClosureContext` (`opt/inline.go:872`) — a callee
+carrying the temporary without the flag would have been cloned into a caller as
+an ordinary undefined value, and is now rejected at the source.
+
+The check earned itself immediately: two of the repository's own round-trip
+fixtures stated half the fact. `richModule`'s `vf` set `HasClosureContext` and
+marked no temporary; `TestTempRoundTripsEveryField`'s fixture marked a temporary
+and left the flag unset. Both go through `DecodeModule`, which is the front door
+a build cache would use, so a fixture that is not well-formed IR is a weaker
+fixture. One line each.
+
+## What now runs it, which is the part worth more than the fix
+
+`ir.Verify` was already there. Nothing on the path from the front end to the
+backend called it. Its only callers were `ir.DecodeModule`, the lifter
+(`lift/lift.go`), and `opt/jumpthread.go` under `CG12_JT_CHECK` — none of which
+a goc compile goes through. That is the whole reason a 4.2% defect could sit
+there: the instrument existed and was pointed somewhere else.
+
+`TestIRVerifyAudit` (`goc/irverifyaudit_test.go`) runs it over every function of
+every corpus program, inside the pass `TestFrameEscapeAudit`,
+`TestLoopAliasAudit` and `TestAllocationCensus` already share. It costs one
+linear walk per function against compiles that dominate everything in that pass.
+
+It has **no baseline file**, deliberately, and that is the difference between it
+and its neighbours. The escape and aliasing audits record what the compiler
+currently does, because what it does is not all correct and the record is what
+stops it drifting. This one has a single acceptable answer: IR that fails the
+verifier is IR no pass downstream is entitled to assume anything about. Its
+failure message says so, and says the thing that was actually hard here — decide
+whether the front end is emitting malformed IR or the verifier's model is
+missing a case, before changing either.
+
+## The round trip, which is what the caching work was waiting on
+
+`TestModuleRoundTripsThroughTheBinaryFormat` compiles a whole program, encodes
+it, decodes it and re-encodes the result, before and after `-O`. Measured
+directly on both programs, in all four configurations:
+
+| | functions | encoded | decode | re-encode |
+|---|---:|---:|---|---|
+| `hello.go`, as compiled | 2744 | 11.1 MiB | OK | **byte-identical** |
+| `hello.go`, `-O` | 2152 | 15.9 MiB | OK | **byte-identical** |
+| http, as compiled | 14568 | 106.4 MiB | OK | **byte-identical** |
+| http, `-O` | 12427 | 158.2 MiB | OK | **byte-identical** |
+
+**`ir.DecodeModule` round-trips a whole goc module.** Nothing else was missing:
+the encoding was never the problem, and `VerifyModule` at the end of
+`DecodeModule` was the only thing rejecting it.
+
+The re-encode is what makes it a claim rather than an absence of an error. A
+decode that merely returns without error proves nothing about fields it dropped;
+a re-encode that reproduces the original bytes proves the decoded module carries
+everything the encoder writes. And `ir/binary_total_test.go` already guards the
+other half — that the encoder writes every field the types carry — by requiring
+each field of its fixtures to be non-zero, so a newly added field fails the test
+by name rather than being silently dropped. Between the two, the round trip is
+guarded from both ends.
+
+Two things a cache still wants that this does not give it, both named by
+`BUILD_CACHE.md` and neither blocking: the format carries a version byte but no
+content digest, and there is no cache key. Those are cache design, not IR
+soundness.
+
+## Why the verifier and not the IR
+
+The instruction was not to assume the IR is at fault because it is the thing
+that changed less recently, so here is the case each way.
+
+**For "the IR is wrong."** The closure context could have been an entry in
+`f.Params`, and then nothing about the verifier would need to change. Or the IR
+could have given it an explicit defining pseudo-instruction at entry, so that
+"defined" meant one thing everywhere.
+
+**Against, and this is what settles it.** Neither alternative is available
+without making the IR worse:
+
+  - `f.Params` is the *argument* sequence. `lowerABI` walks it in order and
+    assigns argument registers and stack slots from it. Putting the closure
+    context there would consume an argument register it does not use and shift
+    every real argument by one. `arm64/goabi.go` already builds the closure
+    context's spill group in a separate block *after* the parameter loop, for
+    exactly this reason. It is not an argument, and the ABI code says so.
+  - There is no entry pseudo-op in this IR, for anything. Parameters themselves
+    have no defining instruction — `f.Params` is a list of temporaries, and what
+    makes them defined is being in that list. "A temporary the ABI supplies at
+    entry has no defining instruction" is therefore the *existing* convention,
+    not a deviation from it. The closure context follows it exactly. What was
+    missing was that `f.Params` is not the only list of such temporaries.
+
+So the IR is internally consistent and models the thing properly: `Func.HasClosureContext`
+and `Temp.ClosureContext` are first-class, the backend reads them
+(`stabilizeClosureContext`), the inliner reads them (`inlineClosureContext`), and
+the binary format carries both. Every consumer of the IR understood the closure
+context except the one whose job is to say what the IR is.
+
+**The one genuinely unusual thing, stated plainly:** the front end pins a
+physical register on that temporary (`Fixed`, `Reg = 26`) at construction, long
+before lowering, which is otherwise a lowering concern — `ir.Verify`'s own doc
+comment says it "does not check the things lowering establishes ... register
+assignments". That is a real oddity and it is how the dedicated register reaches
+the backend at all. It is not what the verifier objected to, and changing it is
+a different piece of work.
+
+The 4.2% is also not a coincidence of three shapes. All four — closure,
+`deferwrap`, `gowrap`, `methodvalue` — come through `(*gen).closureContext`, one
+function, four callers. One construction path, as the brief guessed.
+
+## A second instrument the defect had disabled
+
+`opt/jumpthread.go` verifies each function it threads, under `CG12_JT_CHECK`,
+and panics if threading broke SSA. That check could not be used at all:
+
+    $ CG12_JT_CHECK=1 goc -O goc/testdata/hello.go     # main, 76069d9
+    panic: jumpthread: runtime.timer.modify.func.638.16: threading
+      logicshort5->logicend6 broke SSA: ir: runtime.timer.modify.func.638.16:
+      start: add reads %0, which nothing defines
+
+Threading had broken nothing. The verifier was reporting the pre-existing
+closure-context reading, in the first closure the pass happened to touch, and
+the pass turned it into a panic. So the tree had two instruments pointed at this
+and both were silent for the same reason: one was never run, and the other
+crashed the compiler when it was, which amounts to the same thing.
+
+    $ CG12_JT_CHECK=1 goc -O goc/testdata/hello.go     # this branch
+    $ ./hello
+    hello from cg12 Go
+
+That is not a fix in its own right — it is the same one fix — but it is the
+second thing that was measurably unusable and is not any more.
+
+## Scope of the new check, stated so nobody assumes more than it does
+
+`verifySSA` only runs on unlowered functions (`Verify` gates it on
+`LoweredFor() == ""`, because lowering destructs SSA and reassigns temporaries
+freely). `defineClosureContext` is called from inside it, so both the entry
+seeding and the flag/temporary consistency check are **pre-lowering
+invariants**. After lowering, `stabilizeClosureContext` has copied the context
+into an ordinary temporary and nothing checks the pairing any more.
+
+That is the right place for it — it is where the exemption is granted, so it is
+where the exemption has to be kept honest — but it does mean a pass that broke
+the pairing *after* lowering would not be caught. Nothing does today.
+
+## The corpus-wide before figure
+
+The pre-fix count over the whole corpus, measured by putting the new audit test
+into a worktree at `main` (`76069d9`) and leaving `ir/verify.go` as `main` has
+it:
+
+    goc emitted IR that ir.Verify rejects: 7899 distinct diagnostics,
+    from 1559314 function verifications across 406 programs
+
+**7,899 distinct functions** across the corpus, all the same shape. After the
+fix, the same sweep: **0**, over the same 1,559,314 verifications.
+
+Those two numbers have different denominators and dividing them would be wrong,
+which is worth saying because the test's own failure message used to invite it.
+A diagnostic names one function and is counted once however many of the 406
+programs share it — and they share a lot, since every program links the same
+stdlib. `functions` counts every verification. The honest per-program rates are
+the direct ones: **125 of 2744 (4.56%)** for `hello.go` and **831 of 14568
+(5.70%)** for the http program. The test now says this in the message rather
+than leaving the next person to work it out from a ratio that does not mean
+anything.
+
+## Guards
+
+| guard | required | result |
+|---|---|---|
+| `TestIRVerifyAudit` (new) | pass | **PASS** — 1,559,314 function verifications across 406 programs, 0 rejected (7,899 distinct functions rejected before the fix) |
+| `TestFrameEscapeAudit` | pass | **PASS** |
+| `TestLoopAliasAudit` | pass | **PASS** |
+| `TestAllocationCensus` | pass | **PASS**, against the committed baseline unchanged — no census delta to review |
+| the corpus builds | 406/406 | **406/406** — `auditCorpus` fails if any program does not compile, and it did not |
+| capability matrix, default arm | 368/368 | **368 subtests PASS, 0 FAIL**, 1 EXPECTED FAILURE, 0 KNOWN GAP NOW PASSES; `ok ... 76.3s` |
+| capability matrix, `-O` arm | 368/368 | **368 subtests PASS, 0 FAIL**, same 367 + 1 split; `ok ... 95.5s` |
+| GC reducer `runtime_gc_promoted_local_root` `-O`, `GOMAXPROCS=3` | 0/20 at `GOGC=10` and default | **0/20 at `GOGC=10`, 0/20 at default** |
+| GC reducer `runtime_gc_type_mask_padding` `-O`, `GOMAXPROCS=3` | 0/20 at `GOGC=10` and default | **0/20 at `GOGC=10`, 0/20 at default** |
+| `go test ./ir` | pass | **PASS** (whole package, including the four new verifier tests and the two repaired round-trip fixtures) |
+| whole-module round trip, 4 configurations | decode | **decode OK and re-encode byte-identical** in all four |
+| determinism on this branch | byte-identical | **406/406 identical** across two `-O` corpus rounds; 131 of them identical a third time from a separate pool |
+| branch vs `main` byte-for-byte | — | **406/406 differ**, expected and explained: the fix re-enables `InlineIntoNoSplitCallers` for closures. `hello.go` `.text` +8,064 bytes; verified by bisect to be the verifier's answer and not the binary's layout |
+
+The three new verifier tests and the round-trip test were each confirmed to fail
+on `main`'s `ir/verify.go` with the test files in place, and to pass with the
+fix — the fail-before check, not just a passing test.
+
+### A determinism-harness snag, recorded because it cost time
+
+Two things went wrong with `analysis/determinism` and neither was the compiler.
+
+First, `goc` resolves the standard-library overlay manifest relative to **its own
+build tree**, not its working directory:
+
+    load runtime: standard library overlay manifest
+    .../main-tree/stdlib/overlays/manifest.json: no such file or directory
+
+I had built a comparison `goc` inside a temporary `git worktree`, then removed
+the worktree while keeping the binary. The binary still ran, and failed every
+compile instantly — `round 0: 406 programs in 0.0s, 406 failed`. A `goc` binary
+is not relocatable away from the checkout it was built from. Worth knowing
+before anyone tries to cache or ship one.
+
+Second, `analysis/determinism` reports failures by **name only**. When 406 of
+406 programs "failed to compile" it printed 406 names and not one reason, and
+the reason was a single line available in the very reply it had already parsed
+(`response.Error`). Diagnosing it needed a hand-run of the batch protocol. That
+is a one-line improvement to a tool this repository leans on, and it is not
+made here only because it is not this branch's subject.
+
+### Determinism on this branch — byte-identical
+
+Measured by comparing the images directly, which is the evidence rather than the
+harness's bookkeeping:
+
+| comparison | programs | identical |
+|---|---:|---:|
+| branch `-O`, round 0 vs round 1 (same pool) | 406 | **406** |
+| branch `-O`, round 0 vs a later independent run at a different worker count and box load | 131 | **131** |
+
+So every corpus program compiles to the same bytes twice, and 131 of them do it a
+third time from a separate process pool on a differently-loaded box. Spot-checked
+by execution: the images run and print what they should.
+
+One thing I could not explain and am not going to claim I did: on the first
+whole-corpus run the harness's own summary said `failed=406 of 406` while
+writing 812 correct, full-size, byte-identical ELF executables that execute
+correctly. Its `failing` list is populated from `response.Error`, so some replies
+carried an error alongside a good binary. The second run, at `-j 12` on a quieter
+box, produced byte-identical output for every program the two runs share. The
+compiler's output is not in doubt; the harness's error accounting on a saturated
+box is, and that is a separate thread to pull.
+
+## CORRECTION, and the most important thing on this branch: the fix DOES change emitted code
+
+Everything above the guards table was written believing `ir.Verify` was not on
+goc's compile path, and that the change was therefore verifier-only. **That is
+wrong, and the byte comparison caught it.** Compiling `hello.go` with two
+compilers built from the same directory, differing only in `ir/verify.go`:
+
+    .text   with the fix 1,549,348   without 1,541,284    (+8,064 bytes)
+
+Same 2,430 functions in both, none added or removed. What changed is that many
+**closures got bigger** — larger frames and more zeroed GC slots. Bisected to
+the behaviour and not the code layout: a build with `defineClosureContext`
+present and called but stubbed to `return nil` is **byte-identical** to `main`'s
+output, so it is the verifier's *answer* that moves the compiler, not the extra
+code in the binary.
+
+The mechanism, found by logging every `ir.Verify` call site during a real
+compile:
+
+    ir.Verify  <- ir.VerifyModule <- ir.DecodeModule <- ir.CloneFunc
+               <- arm64.measureFunction <- arm64.noSplitFrameBudget.Frame
+               <- opt.InlineIntoNoSplitCallersReporting
+
+**`ir.CloneFunc` clones a function by encoding and decoding it**, and
+`DecodeModule` ends with `VerifyModule`. So on `main`, cloning *any* closure,
+`deferwrap`, `gowrap` or `methodvalue` that reads a captured variable returned
+an error — and `opt.InlineIntoNoSplitCallers`, which clones a callee to measure
+its frame before inlining it into a `nosplit` caller, silently skipped every one
+of them. The optimisation was disabled for 4-6% of functions and nothing said
+so, because a clone failure there is not an error, it is a "cannot inline this".
+
+So the 4.2% verifier defect was not latent after all. It had been silently
+costing optimisation this whole time, through a path nobody had connected to it:
+`Verify` rejects closures → `DecodeModule` refuses them → `CloneFunc` fails →
+the nosplit inliner declines. Fixing the verifier re-enables it, which is why
+closures grew: they are now receiving inlined callees they were always meant to.
+
+This also explains why `BUILD_CACHE.md`'s round-trip failure and this were the
+same bug: `CloneFunc` and the build cache use the very same encode/decode door.
+
+### Quantified, and is it safe?
+
+Same probe, but with `defineClosureContext` stubbed so the verifier behaves as
+`main` does, compiling `hello.go`:
+
+| `ir.Verify` reached via | calls | failing |
+|---|---:|---:|
+| `CloneFunc` <- `measureFunction` <- `newNoSplitFrameBudget` | 465 | **86** |
+| `CloneFunc` <- `measureFunction` <- `noSplitFrameBudget.Frame` | 312 | 0 |
+| `CloneFunc` <- `InlineIntoNoSplitCallersReporting` | 209 | 0 |
+| `parse.Parse` <- `applyNativeStdlibOverlays` | 1 | 0 |
+
+So on `main`, **86 of the 465 functions the nosplit frame budget tries to
+measure cannot be measured at all** on a hello-world, every one of them a
+closure shape. With the fix, zero fail and all 465 are measured.
+
+What a measurement failure means, at `arm64/nosplit_measure.go:76`:
+
+    measured, err := measureFunction(f, name, conventions, bundle)
+    if err != nil {
+        // ... Leaving it out understates the headroom of everything that
+        // calls it, which is the safe direction.
+        continue
+    }
+
+The function is dropped from the facts handed to `stackcheck`. **I think that
+comment has the direction backwards, and it is worth someone checking.**
+`stackcheck` deliberately mirrors Go's `cmd/link` walk, in which *an unresolved
+callee ends a chain* — so a `nosplit` function missing from the facts does not
+constrain its callers, it stops the walk before its own frame and its whole
+subtree are counted. That overstates headroom rather than understating it. I am
+not asserting a stack-overflow bug: with the fix all 465 are measured, so
+whichever direction it was, the budget is now computed from complete
+information for these functions. But the comment and the `stackcheck` rule
+disagree, and only one of them can be right.
+
+Evidence the new code is sound, all on this branch's tree:
+
+  - capability matrix **368/368 on both arms** — and `stackcheck` runs inside
+    `compileToObjectWithBundle` and returns an error, so a blown nosplit budget
+    fails the compile rather than shipping;
+  - the corpus **compiles 406/406**;
+  - the GC reducers are **0/20 at `GOGC=10` and at default**, both programs;
+  - `TestAllocationCensus` passes **against the committed baseline, unchanged**.
+
+### So: did emitted code change, or only the IR's internal form?
+
+**Emitted code changed.** Not the IR's internal form — that is identical; the
+front end emits exactly what it emitted before, and the fix does not touch it.
+What changed is what the optimiser then does with it, because a pass that had
+been silently declining to act on closures can now act on them.
+
+The allocation census is **unchanged**, so there is no census delta to review
+site by site: the extra inlining moves code into `nosplit` callers without
+moving any allocation. That is the guard's question answered directly — code
+changed, allocation placement did not.
+
+## What I would tell the next person
+
+1. **A verifier is not a passive observer here.** `ir.CloneFunc` clones through
+   `MarshalBinary`/`DecodeModule`, and `DecodeModule` ends with `VerifyModule`.
+   Anything the verifier rejects is therefore un-clonable, and every pass that
+   clones-to-measure reads that as "cannot do this" rather than as an error. A
+   false positive in `ir.Verify` is an optimisation switched off in silence.
+   That coupling is not obvious from either file and is now written down in
+   `ir/verify.go`.
+
+2. **`ir.Verify` now runs over the corpus** (`TestIRVerifyAudit`), with no
+   baseline, inside the existing audit pass. That is the cheap durable part.
+
+3. **A whole module round-trips**, before and after `-O`, byte-identically, so
+   the build-cache work is unblocked on this axis.
+
+4. **One thing left open, deliberately.** `arm64/nosplit_measure.go:76` says
+   dropping an unmeasurable function "understates the headroom of everything
+   that calls it, which is the safe direction". By `stackcheck`'s own documented
+   rule — an unresolved callee ends a chain — dropping it looks like the
+   *unsafe* direction. The fix makes all 465 measurable so the question is no
+   longer load-bearing for closures, but the comment and the rule still
+   contradict each other and someone should decide which is right.
+

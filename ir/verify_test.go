@@ -98,6 +98,66 @@ func TestVerifyCatchesAPhiFromANonPredecessor(t *testing.T) {
 	require.ErrorContains(t, Verify(f), "does not branch here")
 }
 
+// A closure's environment arrives in the dedicated closure register, so no
+// instruction assigns it and it is not a parameter -- and reading it is not a
+// use before definition. Every closure, deferwrap, gowrap and methodvalue goc
+// emits that touches a captured variable has this shape, and the verifier used
+// to reject all of them: 4-6% of the functions in a whole-program compile.
+func TestVerifyAcceptsTheIncomingClosureContext(t *testing.T) {
+	f := newFuncWith(func(f *Func, b *Block) {
+		f.HasClosureContext = true
+		context := f.NewTemp("closure", ClsP)
+		f.Temp(context).ClosureContext = true
+		// What a capture read looks like: environment + offset, then a load.
+		address := f.NewTemp("capture.addr", ClsL)
+		b.Instrs = append(b.Instrs, Instr{Op: OAdd, Cls: ClsL, To: address, Args: []Ref{context, f.Long(8)}})
+	})
+	require.NoError(t, Verify(f))
+}
+
+// The exemption is only for the temporary the function says receives the
+// context. An ordinary temporary nothing assigns is still a use before
+// definition, even in a function that does have a closure context -- otherwise
+// the fix for the closure case would have switched the check off for them.
+func TestVerifyStillCatchesAnUndefinedTempAlongsideAClosureContext(t *testing.T) {
+	f := newFuncWith(func(f *Func, b *Block) {
+		f.HasClosureContext = true
+		context := f.NewTemp("closure", ClsP)
+		f.Temp(context).ClosureContext = true
+		stray := f.NewTemp("stray", ClsL) // in Temps, assigned by nothing
+		b.Instrs = append(b.Instrs, Instr{Op: OAdd, Cls: ClsL, To: f.NewTemp("r", ClsL), Args: []Ref{context, stray}})
+	})
+	require.ErrorContains(t, Verify(f), "%1, which nothing defines")
+}
+
+// The flag and the marked temporary are two halves of one fact. If they can
+// disagree, "the ABI defines this one on entry" stops being checkable: a
+// temporary could claim the exemption in a function that receives no context,
+// or a function could claim a context that no temporary receives.
+func TestVerifyCatchesAnInconsistentClosureContext(t *testing.T) {
+	unflagged := newFuncWith(func(f *Func, b *Block) {
+		context := f.NewTemp("closure", ClsP)
+		f.Temp(context).ClosureContext = true // but HasClosureContext is not set
+		b.Instrs = append(b.Instrs, Instr{Op: OCopy, Cls: ClsP, To: f.NewTemp("r", ClsP), Args: []Ref{context}})
+	})
+	require.ErrorContains(t, Verify(unflagged), "HasClosureContext is not set")
+
+	missing := newFuncWith(func(f *Func, b *Block) {
+		f.HasClosureContext = true // but no temporary is marked
+	})
+	require.ErrorContains(t, Verify(missing), "no temporary is marked")
+
+	two := newFuncWith(func(f *Func, b *Block) {
+		f.HasClosureContext = true
+		first := f.NewTemp("closure", ClsP)
+		f.Temp(first).ClosureContext = true
+		second := f.NewTemp("closure.also", ClsP)
+		f.Temp(second).ClosureContext = true
+		b.Instrs = append(b.Instrs, Instr{Op: OAdd, Cls: ClsL, To: f.NewTemp("r", ClsL), Args: []Ref{first, second}})
+	})
+	require.ErrorContains(t, Verify(two), "at most one")
+}
+
 // What the builder makes is well-formed, so verifying costs nothing real.
 func TestVerifyAcceptsAWellFormedFunction(t *testing.T) {
 	m := NewModule()
