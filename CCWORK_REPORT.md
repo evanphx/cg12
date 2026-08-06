@@ -3721,3 +3721,49 @@ across several `Run` calls, and `opt.PerFunctionPrefixLen` names where to cut on
 `DefaultPipeline()` in two. A memoised compile builds the pipeline once and hands
 the halves to one session; the split is then free, and the byte-identity guard
 can be switched on.
+
+## Blocker 1: `-trimpath`, and the two places the path was hiding
+
+Stage 1 found that two git worktrees of one commit produced **3744 of 5083**
+differing per-function digests before any edit. `ir.SrcPos` names a file through
+`ir.Module.Files`, and `goc.StdlibRoot` comes from `runtime.Caller(0)`, so every
+position in every module carried the build directory.
+
+`goc.TrimPath` (new, `goc/trimpath.go`) rewrites a source path into the
+repository-relative, slash-separated form before it is interned, at the three
+places a name enters the file table, and the two consumers that compare against
+that table move with it (`escapediag.srcPos` looks a name up in the table;
+`canonicalCoveragePath` has to open the file, so it goes back through
+`goc.UntrimPath`).
+
+That took 3744 to **381**, which is the interesting part: **the file table was
+not the only place the build directory was.** Three families of *symbol name* are
+built from a source position, because a name alone does not identify them —
+
+| symbol | why the position is in the name |
+|---|---|
+| `.goc.global.init.*` | a package may declare several blank globals with initializers, and every one is called `_` |
+| `.goc.global.literal.*` | nistec's p224/p384/p521 are one generated file three times over, so their literals share a line and a column |
+| `.goc.runtime.type.*` | a local type is identified by where it is declared (`appendLocalTypeIdentities`) |
+
+Each of those keys is hashed into the emitted symbol, so an absolute path in it
+put the build directory into the *object* even though no position ever reached
+`ir.SrcPos`. `goc.positionKey` trims the file for all three.
+
+| control | before | after |
+|---|---:|---:|
+| two worktrees, post-prefix (input) digests | 3744 of 5083 differ | **0 of 5083** |
+| two worktrees, post-optimisation digests | — | **0 of 4131** |
+| two worktrees, the whole `goc -O` image | — | **byte-identical** (`697c21a9…`) |
+
+It is unconditional rather than a flag: goc emits no line table, so every reader
+of the file table is inside this repository, and a switch that changes compiler
+output without changing the compiler binary is exactly the pack-cache hazard
+`opt.PipelineIdentity` exists to close.
+
+**One path-keyed thing is left, and it is not in the IR.** `cmd/goc/prebuilt.go`
+folds `goc.StdlibRoot()` — an absolute path — into the pack cache key, as a proxy
+for "which standard library tree is this". Two checkouts therefore still miss
+each other's *packs*. That is a key using a path where it means content; it does
+not affect what the compiler emits, and it is left alone here because the brief
+says not to touch packs.

@@ -1347,7 +1347,7 @@ func appendLocalTypeIdentity(fset *token.FileSet, builder *strings.Builder, path
 	// from it -- differ between a compile that shared a preparsed standard
 	// library and one that did not.
 	fmt.Fprintf(builder, "|%s=%s.%s@%s", path, object.Pkg().Path(), object.Name(),
-		fset.Position(object.Pos()))
+		positionKey(fset, object.Pos()))
 }
 
 func addRuntimeInitTask(mod *ir.Module, declarations []functionDecl, initSymbols map[*types.Func]string) error {
@@ -5651,7 +5651,7 @@ func (g *gen) staticFunctionLiteral(literal *ast.FuncLit) string {
 	// miscompiles elsewhere in the tree for exactly that reason. The enclosing
 	// function is included too, since a generic body is compiled once per
 	// instantiation from the same source position.
-	literalKey := g.fset.Position(literal.Pos()).String()
+	literalKey := positionKey(g.fset, literal.Pos())
 	if g.functionName != "" {
 		literalKey = g.functionName + "@" + literalKey
 	}
@@ -8194,7 +8194,7 @@ func (g *gen) emitDynamicGlobalInitializer(initializer *globalInitializer) {
 		// Position, not just the name: a package may declare several blank
 		// globals with initializers, and every one of them is called "_".
 		guardName = contentSymbolName(".goc.global.init",
-			objectPackagePath(object)+"."+object.Name()+"@"+g.fset.Position(object.Pos()).String())
+			objectPackagePath(object)+"."+object.Name()+"@"+positionKey(g.fset, object.Pos()))
 		for _, groupObject := range initializer.objects {
 			g.dynamicInitializerGuards[groupObject] = guardName
 		}

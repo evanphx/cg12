@@ -1,6 +1,7 @@
 package goc
 
 import (
+	"go/token"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -67,3 +68,19 @@ func UntrimPath(name string) string {
 var repositoryRoot = sync.OnceValue(func() string {
 	return filepath.Dir(repositoryStdlibRoot())
 })
+
+// positionKey renders a source position for use inside a *symbol name*, with the
+// file trimmed by [TrimPath].
+//
+// Three symbol families are named from a position, because a name alone does not
+// identify them -- a package may declare several blank globals with initializers
+// and every one is called "_", nistec's p224/p384/p521 are one generated file
+// three times over so their literals share a line and column, and a local type
+// is identified by where it is declared. Each of those keys is hashed into the
+// symbol, so an absolute path in it puts the build directory into the emitted
+// object even though no position ever reaches ir.SrcPos there.
+func positionKey(fset *token.FileSet, pos token.Pos) string {
+	position := fset.Position(pos)
+	position.Filename = TrimPath(position.Filename)
+	return position.String()
+}
