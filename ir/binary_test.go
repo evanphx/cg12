@@ -1,6 +1,7 @@
 package ir
 
 import (
+	"crypto/sha256"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -290,4 +291,26 @@ func TestBinaryDigestIsDeterministic(t *testing.T) {
 	assert.Equal(t, a[len(binMagic)+1:binHeaderSize], b[len(binMagic)+1:binHeaderSize])
 	assert.NotEqual(t, make([]byte, binDigestSize), a[len(binMagic)+1:binHeaderSize],
 		"the reserved digest bytes must have been filled in")
+}
+
+// The digest now rejects a truncated unit before the payload decoder ever runs,
+// which would leave the decoder's own truncation handling -- the d.fail paths --
+// untested by TestBinaryRejectsTruncated. So truncate and re-digest: the header
+// then agrees with the bytes, and the payload decoder has to notice on its own
+// that it ran off the end.
+//
+// Defence in depth is the point. The digest catches the corruption a cache
+// actually suffers; this catches a decoder that would read past its buffer if it
+// ever saw a payload the digest could not vouch for.
+func TestBinaryRejectsTruncatedPayloadBehindAValidDigest(t *testing.T) {
+	data, err := richModule().MarshalBinary()
+	require.NoError(t, err)
+
+	cut := data[:len(data)-64]
+	sum := sha256.Sum256(cut[binHeaderSize:])
+	copy(cut[len(binMagic)+1:], sum[:])
+
+	_, err = DecodeModule(cut)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "digest", "the digest agrees; the decoder must catch this itself")
 }
