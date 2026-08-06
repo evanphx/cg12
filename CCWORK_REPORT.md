@@ -5956,3 +5956,144 @@ halt shape *and* the absence of any source position, because
 `runtime.goroutineReady` is an ordinary lowered function that also ends in that
 shape — a failed type assertion lowers to it — and excluding it would have
 hidden exactly the kind of difference the test looks for.
+
+## Item 3 — the dispatcher set is now derived, not accumulated
+
+`g.interfaceMethods` drove `addInterfaceMethodWrappers` and was filled by seven
+writes inside `funcDecl`. **A collector pass**, `collectInterfaceMethods`, now
+fills it beside `collectDynamicTypes`, and the seven writes became one check,
+`requireInterfaceMethod`, which makes a call site that dispatches through an
+uncollected method a *compile error*.
+
+**Why a collector and not names carried in the unit.** Resolving a symbol back
+to a `*types.Func` means searching the interface types of the loaded units for a
+method with that name — this pass, run backwards, and able to fail — and it
+would make the completeness of a program's dispatcher set depend on units
+written by an older compiler. The collector reads what every compile already has
+in hand and cannot skip: the ASTs and `types.Info` of every loaded unit, which
+the front end's other whole-program analyses consume anyway (BUILD_CACHE.md
+§2.2). A collector is also a superset by construction — it sees every selector
+in a package, not only those in functions the reachability walk kept — and a
+superset fails in the safe direction.
+
+It finds two shapes, matching the two ways lowering reached one:
+
+- a selector whose selection is a method value, call or expression on an
+  interface value (the six writes in the call and method-value paths);
+- a method promoted into a concrete type from an interface it embeds — the
+  seventh, in `ensureInterfaceCallWrapperFor`. An itab slot for such a method
+  points at a wrapper that calls the dispatcher, and the conversion that builds
+  the itab need not mention the method, so this shape needs the type graph
+  rather than the syntax.
+
+**What over-approximating costs.** It records the method the selector names
+without resolving a type parameter's method to the concrete one the way lowering
+does. Measured, front-end function counts:
+
+| program | before | after | extra |
+|---|---:|---:|---:|
+| `hello.go` | 2728 | 2728 | **0** |
+| `fmt_sprintf.go` | 4991 | 5016 | +25 (+0.50%) |
+| `stdlib_http_tls_client_server.go` | 14182 | 14257 | +75 (+0.53%) |
+
+Every extra one is an unreachable dispatcher, which `DeadFuncElim` removes.
+
+## Item 4 — how much of the closure generics exclude
+
+`goc/cacheability.go` (new) classifies a program's loaded closure.
+`ClassifyPackageCacheEligibility` returns the closure and the subset that
+declares a generic function or a generic type. That subset is not cacheable at
+this stage: an instantiation is discovered by the whole-program walk with type
+arguments supplied by the *importer* (`goc/reach.go:537`, `:805`, `:822`), so
+`slices.Sort[[]int,int]` is a function *of package `slices`* that exists only
+because another package asked for it. A cached unit for `slices` would have to
+hold either every instantiation any program might ask for, or the set one
+program asked for — which puts a whole-program fact in the key.
+
+| program | closure | declare generics | share of packages | **share of lowered functions** |
+|---|---:|---:|---:|---:|
+| `programSmall` (strconv only) | 34 | 8 | 24% | **89%** |
+| `programWide` (fmt, sort, errors, strings, strconv) | 62 | 19 | 31% | **82%** |
+| `fmt_sprintf.go` | 60 | 19 | 32% | **83%** |
+| `stdlib_http_tls_client_server.go` | 185 | 40 | 22% | **54%** |
+
+**Counting packages understates the exclusion by a factor of two to four**,
+because `runtime` is one package and a third of the module, and `runtime`
+declares generics. On the small programs a per-package cache would be allowed
+to hold packages accounting for barely a tenth of the lowered functions.
+
+This is the number that should shape whatever is built next: BUILD_CACHE.md
+§3.4's Option B is worth 18–21% of a compile *if the whole closure is
+cacheable*. Excluding generic packages, the reachable prize on a small program
+is nearer 2%, and on the http program nearer 9%. **Generic instantiation is not
+a detail to defer; it is the larger half of the problem.**
+
+The excluded set for `programWide`, for the record: `cmp`, `errors`,
+`internal/abi`, `internal/bytealg`, `internal/poll`, `internal/runtime/atomic`,
+`internal/runtime/gc/scan`, `internal/sync`, `internal/synctest`, `iter`, `os`,
+`reflect`, `runtime`, `slices`, `strconv`, `sync`, `sync/atomic`, `time`,
+`unicode/utf8`.
+
+## The allocation-census delta — what conservative lowering costs
+
+The census is the evidence for item 1, so it was measured against the change
+rather than against `main`: two full corpus runs of `TestAllocationCensus` on
+this tree, one with `GOC_LOWERING_WHOLE_PROGRAM=1` (the old placement, the new
+symbol names) and one with it off (the committed default). The difference
+between those two is the placement change and nothing else.
+
+```
+placement rows, whole-program lowering ON : heap 8321, frame 4257   (12 086 sites)
+placement rows, conservative (default)    : heap 8325, frame 4237   (12 077 sites)
+
+frame -> heap   11
+heap -> frame    0
+disappeared      9
+appeared         0
+```
+
+**Eleven allocation sites out of 12 086 moved from the frame to the heap, and
+none moved the other way.** That is the whole cost of item 1 in placement terms.
+The census's own review questions, answered:
+
+*Sites that moved HEAP → FRAME* (the correctness-critical direction): none. The
+change can only be conservative — it replaces a devirtualised "this method does
+not retain its receiver" with "assume it does" — so this direction is closed by
+construction, and the census confirms it.
+
+*Sites that moved FRAME → HEAP*, all eleven:
+
+| site | function | type |
+|---|---|---|
+| `crypto/tls/handshake_client.go:785:17` | `clientHandshakeState.doFullHandshake` | `certificateVerifyMsg` |
+| `crypto/tls/handshake_client_tls13.go:811:14` | `clientHandshakeStateTLS13.sendClientFinished` | `finishedMsg` |
+| `crypto/tls/handshake_server_tls13.go:893:14` | `serverHandshakeStateTLS13.sendServerFinished` | `finishedMsg` |
+| `testdata/allocation_counts.go:379:18` | `main.interfaceLocalMethodCall` | `scoreBox` |
+| `testdata/runtime_interface_method_gc.go:23:18`, `:25:10` | `main.main` | `scoreBox` |
+| `testdata/runtime_interface_stack_gc.go:31:11` | `main.main` | `node` |
+| `testdata/runtime_type_param_method_shapes.go:243:12`, `:248:10` | `main.main` | `narrowWrapper`, `wideWrapper` |
+| `testdata/stdlib_container_heap.go:31:12`, `:31:27` | `main.main` | `[3]int`, `intHeap` |
+
+Every one is the same shape: a value built with a composite literal and then
+used through an interface, where the escape walk used to answer the question by
+enumerating the program's implementations of that interface. Three of them are
+on the TLS handshake path, once per handshake. The rest are in corpus test
+programs written to exercise exactly this.
+
+*Sites that DISAPPEARED*, all nine: none of them is an allocation that stopped
+happening. Each is the *inlined copy* of a site inside a generated
+`.interfacecall.` wrapper or an interface dispatcher — `field/fe.go:224:2`
+inside `field.Element.Bytes.interfacecall.…`, `p256.go:57:2` inside
+`crypto/hpke.interface{Bytes() []byte}.Bytes`, and so on. Every one of those
+sites is still in the census under its own declared function
+(`field.Element.Bytes`, `Scalar.MultiplyAdd`, `fiat.P256Element.Bytes`). What
+went away is the inlining into the wrapper, which conservative lowering no
+longer enables. The code is gone from the wrapper; the allocation is not gone.
+
+The committed baseline moved by 2468 removed and 541 added lines, and almost all
+of that churn is the symbol renaming of items 2 and 3, not placement: `main`'s
+baseline had the same site listed once per whole-program counter value (six
+copies of one `crypto/internal/fips140/ecdh.fipsSelfTest` line under six
+different `.goc.global.initfunc.<n>.` names, three copies of each
+`net/http.methodvalue.…onSettingsTimer` line). Those collapse to one line each,
+which is the same defect this stage removed, visible in a baseline file.
