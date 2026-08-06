@@ -72,6 +72,10 @@ func richModule() *Module {
 	v.NoSplit = true
 	v.SystemStack = true
 	v.HasClosureContext = true
+	// A function that receives a closure context has the temporary that receives
+	// it: the flag and the mark are two halves of one fact, and ir.Verify -- which
+	// DecodeModule runs -- rejects a function that states only one of them.
+	v.Temp(v.NewTemp("closure", ClsP)).ClosureContext = true
 	v.Param("k", ClsW)
 	v.Entry().Ret(v.Double(1.5))
 
