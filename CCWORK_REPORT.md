@@ -2653,3 +2653,43 @@ box, produced byte-identical output for every program the two runs share. The
 compiler's output is not in doubt; the harness's error accounting on a saturated
 box is, and that is a separate thread to pull.
 
+## CORRECTION, and the most important thing on this branch: the fix DOES change emitted code
+
+Everything above the guards table was written believing `ir.Verify` was not on
+goc's compile path, and that the change was therefore verifier-only. **That is
+wrong, and the byte comparison caught it.** Compiling `hello.go` with two
+compilers built from the same directory, differing only in `ir/verify.go`:
+
+    .text   with the fix 1,549,348   without 1,541,284    (+8,064 bytes)
+
+Same 2,430 functions in both, none added or removed. What changed is that many
+**closures got bigger** — larger frames and more zeroed GC slots. Bisected to
+the behaviour and not the code layout: a build with `defineClosureContext`
+present and called but stubbed to `return nil` is **byte-identical** to `main`'s
+output, so it is the verifier's *answer* that moves the compiler, not the extra
+code in the binary.
+
+The mechanism, found by logging every `ir.Verify` call site during a real
+compile:
+
+    ir.Verify  <- ir.VerifyModule <- ir.DecodeModule <- ir.CloneFunc
+               <- arm64.measureFunction <- arm64.noSplitFrameBudget.Frame
+               <- opt.InlineIntoNoSplitCallersReporting
+
+**`ir.CloneFunc` clones a function by encoding and decoding it**, and
+`DecodeModule` ends with `VerifyModule`. So on `main`, cloning *any* closure,
+`deferwrap`, `gowrap` or `methodvalue` that reads a captured variable returned
+an error — and `opt.InlineIntoNoSplitCallers`, which clones a callee to measure
+its frame before inlining it into a `nosplit` caller, silently skipped every one
+of them. The optimisation was disabled for 4-6% of functions and nothing said
+so, because a clone failure there is not an error, it is a "cannot inline this".
+
+So the 4.2% verifier defect was not latent after all. It had been silently
+costing optimisation this whole time, through a path nobody had connected to it:
+`Verify` rejects closures → `DecodeModule` refuses them → `CloneFunc` fails →
+the nosplit inliner declines. Fixing the verifier re-enables it, which is why
+closures grew: they are now receiving inlined callees they were always meant to.
+
+This also explains why `BUILD_CACHE.md`'s round-trip failure and this were the
+same bug: `CloneFunc` and the build cache use the very same encode/decode door.
+
