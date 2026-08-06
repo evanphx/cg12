@@ -2783,4 +2783,413 @@ changed, allocation placement did not.
    *unsafe* direction. The fix makes all 465 measurable so the question is no
    longer load-bearing for closures, but the comment and the rule still
    contradict each other and someone should decide which is right.
+# Caching by default for every goc compile
+
+Branch `ccwork/default-compile-cache`, off `main` (`76069d9`). Host: aarch64
+Linux, 64 cores, 250 GiB, go1.26.1, `cc` = gcc 13.3.0.
+
+_(run in progress — sections appended as each result lands)_
+
+## The situation, confirmed
+
+Read against the tree at `76069d9`:
+
+ 1. `goc/source_world.go:29` caches parsed/type-checked stdlib packages in a
+    process-level `map[sourceWorldKey]*sourceWorld`. A fresh `goc` process gets
+    nothing from it.
+ 2. `cmd/goc/packcache.go` is the on-disk content-addressed cache under
+    `~/.cache/cg12/runtime-pack`. Its only non-test caller is
+    `buildRuntimeCommand` (`cmd/goc/prebuilt.go:47`) — `goc build-runtime`.
+ 3. `-runtime a.gocrt,b.gocrt` (`cmd/goc/main.go:46`) links against packs you
+    already built; `runtimeSplit.chooseManifest` (`goc/runtime_split.go:149`)
+    picks the richest usable one.
+
+So the benefit is real and costs two manual steps. The shared cache on this box
+already holds **985 packs / 45 GB**, all written in the last week, entirely from
+opt-in `build-runtime` calls — which settles the eviction question before it is
+asked.
+
+## The numbers
+
+Wall clock, aarch64/64 cores/250 GiB, median of three, private pack cache
+(`CG12_PACK_CACHE` under the job's scratch, so the shared 45 GB cache was never
+touched or trimmed by this run). "monolithic" is `GOC_AUTOPACK=0` — today's
+default, the whole-program compile, with the in-memory source world still on.
+"cold" is an empty pack cache: it includes building and caching the pack. "warm"
+is a cache hit.
+
+Three programs: `small.go` is `println("hi")`; `hello.go` imports fmt, os,
+strings; `httpsrv.go` imports net/http, net/http/httptest, fmt, io, strings and
+runs a request against its own test server.
+
+### Default (no -O)
+
+| program | monolithic | cold | warm | warm vs monolithic |
+|---|---|---|---|---|
+| small   | 3.05 s  | 2.90 s + 2.9 s pack | 2.62 s  | 1.16× |
+| hello   | 6.45 s  | 10.35 s             | 4.90 s  | 1.32× |
+| httpsrv | 31.5 s  | 49.7 s              | 22.2 s  | 1.42× |
+
+### With -O
+
+| program | monolithic | cold | warm | warm vs monolithic |
+|---|---|---|---|---|
+| small   | 7.39 s  | 9.54 s  | 2.65 s | **2.79×** |
+| hello   | 16.22 s | 20.16 s | 5.24 s | **3.10×** |
+
+The two tables say different things and the difference is the finding.
+
+**A pack saves the back end and the optimiser, not the front end.** The split is
+subtractive and it happens at the very end: both halves run the same parse, the
+same type check, the same reachability walk and produce the same IR, and only
+then does the program module drop what the pack already defines
+(`goc/runtime_split.go:15`). So a warm compile still parses and type-checks the
+whole closure. Without `-O` that front end is most of the compile, and the win is
+16–42%. With `-O` the optimiser runs *after* the split, over a module the
+subtraction has emptied out, and the win is 2.8–3.1×.
+
+Cold is slower than monolithic, by the pack build. That is the deal: one compile
+pays, every later compile of any program with that import list collects.
+
+## The headline: warm goc against warm gc
+
+Every compile-time comparison in this project so far has been goc against
+itself. This is goc against the host toolchain, both fully warm, on identical
+source. One line is appended to the file before each compile, alternating
+between the two, so neither is answering from a whole-program result cache: gc
+has its stdlib package archives and goc has its pack, and both have to compile
+the program.
+
+| program | goc warm | gc warm | ratio |
+|---|---|---|---|
+| small (`println`)      | 2.62 s  | 0.16 s | **16×** |
+| hello (fmt/os/strings) | 4.90 s  | 0.24 s | **20×** |
+| httpsrv (net/http)     | 22.1 s  | 0.55 s | **40×** |
+
+With the source *unchanged*, so that gc's action cache answers the whole build
+and it does no compiling at all, gc is 0.05 / 0.07 / 0.10 s — 52× / 70× / 222×.
+That is the literal "already in each one's cache" reading of the question; the
+table above is the one that describes an edit-compile loop, and it is the fairer
+number of the two.
+
+The ratio is what it is because the two caches cache different things. gc caches
+*per package*: a warm gc compiles one package, the program's own, and links
+against archives. goc's pack caches the runtime module's **object**, but the
+program compile still runs the whole-program front end over the entire closure
+and only subtracts at the end. So goc's warm compile is still parsing and
+type-checking ~150 packages that gc does not look at.
+
+That is the shape of the remaining gap, and it is not something a cache of packs
+can close. Closing it means caching the front end — the parsed and type-checked
+`sourceWorld` that `goc/source_world.go` already builds and then throws away when
+the process exits. That is a different piece of work and this measurement is the
+argument for it.
+
+## The decisions asked for
+
+**Pack selection — build the pack the program needs, don't fall back to a
+narrower one.** The pack carries exactly the standard library packages the file's
+own import declarations name. When the program imports something no cached pack
+carries, a wider pack is built and cached.
+
+The alternative — a fixed ladder of package sets, compile the remainder normally
+— cannot work, because usability runs the wrong way. A pack is usable only by a
+program whose closure *contains* the pack's, so a ladder can only be rounded
+*down*: a net/http program that finds no net/http tier falls back to the
+runtime-only tier and recompiles net/http from source. And net/http programs are
+the entire prize. This tree's own matrix measured it: eleven of 368 capability
+programs cost 125–167 s each and are 54% of all compile CPU; the other 327
+average 4.2 s. A rounded-down ladder helps precisely the 327 that did not need
+help.
+
+Near-duplicates are the cost of that, and they are handled by an equality rather
+than a heuristic. If a cached pack C satisfies `C.Packages ⊆ P ⊆ C.Closure` for
+the requested list P, then C's closure and the closure of the pack that would be
+built from P are *the same set* — monotonicity gives one containment, idempotence
+the other (the proof is in `substitutePack`). So a program importing
+{fmt, io, net/http, strings} takes the existing {net/http} pack instead of
+building a second 98 MB copy. Verified end to end: the second compile logs
+`substituted 1a07d580925a (carries [net/http])` and the cache stays at two packs.
+
+It is order-dependent and deliberately not more than that: {fmt, net/http}
+compiled first leaves a pack a later {net/http} program cannot match. Fixing that
+means knowing every package's closure before compiling anything — a second import
+resolver to write, keep correct against build tags, and be wrong in. The
+duplicate is cheaper than the resolver, and eviction bounds it.
+
+**Concurrency — a per-key advisory file lock, layered over a sequence that is
+already safe without it.** `writeFileAtomically` (temp file + rename, already in
+the tree) is what guarantees a half-written pack is never readable and that two
+racing writers both end with a whole file; that property does not depend on the
+lock. The lock exists so that a suite starting dozens of compiles at once pays
+for one 98 MB pack build rather than dozens. It is `flock` on `<key>.lock`, held
+across the build, with the cache re-checked after acquiring; plus an in-process
+mutex per key for `compile-batch`, which compiles many programs in one process.
+
+Every way of failing to take the lock ends in building anyway, never in failing:
+no flock on the platform, an unwritable directory, or a wait that gives up after
+15 minutes because a peer is wedged rather than merely slow. The kernel drops a
+flock when the holder dies however it dies, so a killed builder cannot wedge the
+cache.
+
+Measured: four concurrent cold compiles of one program, `1 of 4 concurrent
+compiles reached the build step`, four byte-identical images, one whole pack in
+the cache.
+
+**Cache growth — bounded now, not a follow-up.** The question answers itself: the
+shared cache on this box already held **985 packs and 45 GB**, written in a week,
+from opt-in `build-runtime` calls alone. Making the cache the default multiplies
+that. So `trimPackCache` evicts least-recently-used packs to a 20 GiB budget
+(`CG12_PACK_CACHE_MAX_BYTES` overrides; 0 is unbounded), sweeping after each
+cached write. Least recently *used*, not oldest: a hit touches the pack's mtime,
+so a pack every build links against never becomes the oldest thing in the cache.
+Unlinking a pack a reader has open is safe on POSIX, and a reader that has not
+opened it yet gets a miss, not a fault.
+
+Two consequences worth stating plainly. The first run of a `goc` carrying this
+change will trim the existing shared cache from 45 GB down to 20 GiB — that is
+the feature working, but it is a deletion, and the packs it deletes are the
+least recently used ones. The second is that this change alters the key (see
+below), so those 45 GB are already garbage under the new key and eviction is the
+only thing that will ever reclaim them.
+
+**`CG12_NOCACHE=1` bypasses everything.** It is checked in `autoPackEnabled`
+before anything else, so a compile under it never computes a key, never reads the
+cache, never builds a pack, and takes the whole-program path. Verified: `goc:
+autopack: disabled`, zero files written to the cache directory, and the image is
+byte-identical to the `GOC_AUTOPACK=0` monolithic build. `GOC_AUTOPACK=0` is a
+separate switch that turns off only this, leaving the in-memory source world
+alone — which is what the monolithic column of the tables above was measured
+with, since `CG12_NOCACHE=1` would have disabled that too and measured something
+else.
+
+## Auditing the key, which now decides every compile
+
+The key already covered the pack version, target, `-O`, the package list, the
+placement policy, the optimisation pipeline, the goc binary's bytes and the
+vendored stdlib tree's bytes. Auditing it against what a default-on cache now
+depends on found three gaps, two of them real.
+
+**Gap 1 — the environment beyond the two variables that were named.** The key
+named `GOC_OPT_PIPELINE`/`GOC_OPT_SKIP` (via `opt.PipelineIdentity`) and the text
+layout (via `arm64.TextLayoutIdentity`). It named nothing else. A sweep of every
+`os.Getenv` in the non-test tree found these, all of which change what goc emits
+and none of which changed the key:
+
+| variable | what it changes |
+|---|---|
+| `GOC_ESCAPE_SUMMARIES=0` | turns off escape summaries — allocation placement |
+| `GOC_PAYLOAD_FOLD=0` | turns off payload folding — allocation placement |
+| `CG12_NO_IFCONVERT` | turns off if-conversion |
+| `CG12_FORCE_INLINE`, `CG12_NO_COSTINLINE`, `CG12_NO_AGGINLINE` | the inliner |
+| `GOC_NO_NOSPLIT_INLINE`, `GOC_NOSPLIT_LIMIT`, `GOC_NOSPLIT_INDIRECT` | the nosplit frame budget, which decides nosplit inlining |
+| `GOC_STDLIB_OVERLAY` | **which files a standard library package is built from** |
+
+The last is the sharpest: the key hashes the *contents* of the vendored tree, and
+`GOC_STDLIB_OVERLAY=off` changes nothing in the tree — only which of its files
+are selected. A hashed tree cannot see it.
+
+The fix is deliberately blunt: **every `GOC_` and `CG12_` variable, name and
+value, sorted, goes into the key**, except the four that name where the cache is
+rather than what is in it. The alternative is a maintained list of the variables
+that matter, and a switch added to the optimiser and not added to that list is a
+silent miscompile. A sweep of the namespace cannot miss one. What it costs is a
+miss when a diagnostic-only variable is set — and a miss is a slow build, which
+is the direction this cache is allowed to be wrong in.
+
+It also closes a subtlety: `arm64.TextLayoutIdentity()` reads its environment at
+package init (`var layout = layoutFromEnvironment()`), so a process that changes
+`GOC_FUNC_ALIGN` after start gets a stale identity. The sweep covers those
+variables directly and does not care when they were read.
+
+**Gap 2 — the C toolchain, which the old comment named as its own weakest link.**
+It was the `cc --version` banner: a release, not a binary. That was tolerable
+while a pack came only from an explicit command. It is not tolerable now. The
+identity is three things:
+
+  - the banner, cheap, names the release;
+  - the **bytes of the `cc` driver and of the `as` it reports it will exec**
+    (`cc -print-prog-name=as`), exact for those two binaries;
+  - the **bytes of the object `cc` actually produces for a fixed probe** — the
+    only one that measures behaviour rather than provenance, and so the only one
+    that catches a changed shared library under an unchanged `as`.
+
+The probe is a frame, an `adrp`/`:lo12:` pair, a `bl` to an undefined symbol, an
+FP instruction and an aligned datum — the constructs the Plan 9 sidecar is made
+of. What is still outside the key is the assembler's behaviour on instructions
+the probe does not contain. That is a sample, not a proof, and it is stated as
+one; it is strictly stronger than a version string. Cost: 26 ms, once per
+process. The probe object was checked byte-identical across directories before
+being made part of the key.
+
+**Gap 3 (not real) — the `-m` escape diagnostics.** These are printed by a pass
+that runs *after* the split, over a module the subtraction has taken definitions
+out of, so a pack would change what `-m` prints. Rather than key on it, `-m`
+declines auto-packing: a compile asked for its escape decisions gets the
+whole-program compile whose decisions those are.
+
+### Verified by construction
+
+`TestEveryChangeThatWouldMakeAPackWrongProducesAMiss` drives the real compiler,
+warms the cache, checks it is warm, then changes one thing per arm and requires a
+miss. All pass:
+
+| changed | result |
+|---|---|
+| the compiler binary (rebuilt `-ldflags=-s -w`: different bytes, identical behaviour) | miss |
+| `-O` | miss |
+| the placement policy (`GOC_FUNC_ALIGN=64`) | miss |
+| the optimisation pipeline (`GOC_OPT_PIPELINE=bounded`) | miss |
+| the standard library tree (a file added, then a byte changed) | miss |
+
+and `TestTheKeyMovesWhenTheEnvironmentChangesWhatTheCompilerEmits` does the same
+for fourteen environment switches including `GOC_STDLIB_OVERLAY` and a variable
+that does not exist yet, while requiring that `CG12_PACK_CACHE`,
+`CG12_PACK_CACHE_MAX_BYTES` and `GOC_AUTOPACK_DEBUG` do *not* move it.
+
+### One thing the key cannot save you from, stated plainly
+
+Every existing pack in the shared cache is unreachable under the new key. That is
+correct — the old key did not cover the environment or the assembler, so an old
+pack is a pack whose provenance is not fully known — but it means the first run
+after this change is cold for everything, and the 45 GB already there is garbage
+that only eviction reclaims.
+
+## Guards
+
+| guard | result |
+|---|---|
+| capability matrix, default arm | **368/368**, 0 fail, 0 skip |
+| capability matrix, `-O` arm | **368/368**, 0 fail, 0 skip |
+| capability matrix **through the new auto-pack path** | **368/368**, 0 fail |
+| `TestAllocationCensus`, `TestFrameEscapeAudit`, `TestLoopAliasAudit` | pass (208 s) |
+| determinism: cold vs warm, byte-identical | yes, six ways — see below |
+
+The third row is the guard that matters most and it did not exist before. The
+matrix normally builds six packs by hand and passes them with `-runtime`, which
+exercises the *explicit* pack path. Run with `-runtime-status-prebuilt-runtime=false`
+the harness passes no `-runtime` at all, so every one of the 368 programs goes
+through `autoPackFor` — including through `goc compile-batch` workers, which is
+the batch arm of the new code. All 368 pass.
+
+That run is also the honest answer to the cache-growth question, measured rather
+than guessed: **368 capability programs produced 138 packs and 2.4 GB**, well
+inside the 20 GiB budget. And the wall clock is the point of the whole change:
+
+| the matrix, 368 programs | wall clock |
+|---|---|
+| hand-built packs passed with `-runtime` (today) | 71 s |
+| auto-packed, cold cache (builds all 138 packs) | 108 s |
+| auto-packed, warm cache | **67 s** |
+
+Automatic per-program packs on a warm cache beat the tree's hand-chosen six pack
+roots, with nobody having chosen anything.
+
+### Determinism, including its new failure mode
+
+Determinism used to mean "two runs of the same compile agree". A cached pack adds
+a second meaning: a compile that read a pack written by another process, possibly
+in another week, has to produce the same bytes as the compile that built it.
+Checked explicitly by compiling cold, compiling warm, and comparing:
+
+| program | default | `-O` |
+|---|---|---|
+| small   | identical | identical |
+| hello   | identical | identical |
+| httpsrv | identical | identical |
+
+plus warm-vs-warm identical, and `TestACachedCompileIsTheSameImageAsAColdOne` in
+the committed suite, which does the same for a fmt/sort/strings program and then
+runs it.
+
+`CG12_NOCACHE=1` produces an image byte-identical to `GOC_AUTOPACK=0`, which is
+the whole-program compile — so the gates' cold arm is the same compile it always
+was.
+
+### Eviction, end to end
+
+A cache holding two packs (139 MB) with a 150 MB budget, asked to build a third:
+the least recently used pack was evicted, its index entry with it, the cache came
+back to 83 MB, and the program built and ran. The sweep runs after a cached
+write, so a cache that is over budget and gains nothing new is left alone —
+eviction is a consequence of adding, not a background process.
+
+## One consequence to be explicit about
+
+**The default output binary changes.** A plain `goc file.go` used to produce a
+monolithic image and now produces a split one: the prebuilt runtime object, its
+sidecar, and the program module, linked in that order. Same program, different
+layout and different addresses.
+
+This is not a new configuration — it is the one the capability matrix has been
+running in both arms, and it is now 368/368 through the automatic path as well —
+but it is newly the *default*. Anything cut against the monolithic image
+describes something goc no longer emits by default. The two runtime benchmarks
+(`make bench-crypto`, `make bench-perf`) are unaffected: both are library tests
+in `./goc` that call the compiler in-process and never run `cmd/goc`. Their
+baselines were not touched, nor were any timing baselines re-cut.
+
+`GOC_AUTOPACK=0` gets the monolithic image back.
+
+## What it cost, and what is left
+
+The key is now computed on every compile rather than once per `build-runtime`.
+That is **206 ms**: 30 ms to walk the vendored tree, 131 ms to hash its 5423
+files and 73 MB (concurrently — it was 256 ms single-threaded, and that mattered
+much less when only an explicit command paid it), 3 ms for the goc binary, 26 ms
+for the C toolchain and its probe. It is 7.9% of a warm trivial compile and 0.9%
+of a warm net/http one.
+
+It is deliberately not memoised behind cheaper metadata. Recording the expensive
+digest against the tree's sizes and mtimes would take it to near zero, and would
+reintroduce exactly the hazard the tree-hash exists to avoid: a file whose
+content changed without its mtime changing is then a stale hit, and a stale hit
+is a wrong image. 206 ms of honest hashing is the right side of that trade.
+
+What is left is the front end. A warm goc still parses and type-checks the whole
+closure — the pack saves the back end and, under `-O`, the optimiser. That is why
+the win is 1.16–1.42× by default and 2.8–3.1× under `-O`, and why warm goc is
+still 16–40× warm gc. The next thing worth caching is the `sourceWorld` that
+`goc/source_world.go` builds and discards at process exit.
+
+## Measurement conditions, and why the ratios are the number to quote
+
+This is a shared build host and it was not idle: another ccwork job was
+compiling throughout, and the shared pack cache grew from 985 to 999 entries
+while this job ran. Load average over the measurement window ranged from the
+high teens to 72.
+
+The absolute times therefore move — a warm net/http compile is 22.1 s at low
+load and 29.9 s at load 65 — but every comparison here was taken by
+**alternating the two arms on the same file**, so both see the same machine.
+Three independent sets, taken hours apart at different loads:
+
+| | set 1 (light) | set 2 | set 3 (load 52–66) |
+|---|---|---|---|
+| small, goc ÷ gc      | 2.62 / 0.16 = 16× | 3.28 / 0.20 = 16× | 3.28 / 0.19 = **17×** |
+| hello, goc ÷ gc      | 4.90 / 0.24 = 20× | 6.25 / 0.28 = 22× | 5.95 / 0.27 = **22×** |
+| httpsrv, goc ÷ gc    | 22.1 / 0.55 = 40× | 29.0 / 0.61 = 47× | 29.9 / 0.66 = **45×** |
+
+Ratios stable within ~12% across a 4× swing in load; absolutes vary by up to
+35%. The same holds for the speedup this change buys — re-measured at load 72,
+`hello` is 8.2 s monolithic → 6.3 s warm (1.30×, was 1.32×) and 20.6 s → 6.5 s
+under `-O` (3.17×, was 3.10×).
+
+So: **warm goc is 16–22× warm gc on small programs and 40–47× on a net/http
+program**, and the absolute figures in the tables above are the low-load set.
+
+## Also run
+
+`make test-goc-cmd` — the whole goc driver end-to-end suite, with auto-packing on
+by default, since this change touches the driver more than anything else. One
+failure, `TestCheckedRuntimeCoverageBaselineDenominator`, which **pre-exists on
+`main` (76069d9)**: verified by running that test in a clean worktree at
+76069d9, where it fails the same way. It is a bookkeeping check that every
+capability appears in the coverage baseline or the pending list, and it names
+whichever unlisted capability map iteration reaches first. Nothing else in the
+suite fails.
+
+Not run, as instructed: `go test ./goc/...` and `make test-unit` — a gate job
+does those. The three named guard tests were run individually with `-run`. No
+timing baseline was re-cut.
 

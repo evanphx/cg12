@@ -3,6 +3,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -126,6 +127,43 @@ func main() {
 		}
 		return
 	}
+	// The default path: find or build the cached pack this program can use and
+	// link against it, which is `goc build-runtime` plus `-runtime` without
+	// either being typed. See cmd/goc/autopack.go for what the pack carries and
+	// why, and for every reason this can decline -- all of which land on the
+	// whole-program compile below, exactly as before.
+	//
+	// -m is excluded along with the non-executable builds: escape diagnostics are
+	// printed after the split, over a module the split has removed definitions
+	// from, so a compile asked for its escape decisions gets the whole-program
+	// compile whose decisions those are.
+	if buildExecutable && !*emitIR && *runtimeCoverMeta == "" && *escapeDiag == 0 {
+		if packs := autoPackFor(target, *optimize, src, os.Stderr); packs != nil {
+			exe := *out
+			if exe == "" {
+				exe = goc.OutputName(input)
+			}
+			err := linkAgainstPrebuiltRuntime(target, packs, input, src, exe, *optimize, os.Stderr)
+			switch {
+			case err == nil:
+				finishMemProfile()
+				if *run {
+					stopCPUProfile()
+					os.Exit(runProgram(exe))
+				}
+				return
+			case errors.Is(err, goc.ErrNoUsablePrebuiltRuntime):
+				// The pack was built from this program's own import list, so it
+				// should be usable by construction. If it is not, that is a fit
+				// bug and not the program's fault: compile it the old way rather
+				// than failing a build that would otherwise have succeeded.
+				autoPackDebugf(os.Stderr, "chosen pack did not fit; compiling whole-program")
+			default:
+				check(err)
+			}
+		}
+	}
+
 	var m *ir.Module
 	var runtimeCoverage *goc.RuntimeCoverage
 	if *runtimeCoverMeta != "" {
