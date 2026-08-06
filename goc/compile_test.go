@@ -861,21 +861,34 @@ func Test() int {
 	t.Fatal("interface method expression wrapper main.reader.Value was not generated")
 }
 
+// TestMethodValueWrapperNamesDoNotCollideAtSameSourcePosition checks the two
+// axes that make a method-value wrapper's name unique within its package: the
+// method being bound, and the function the expression is written in.
+//
+// The second axis replaced a sequence number -- how many functions the module
+// had emitted when the wrapper was reached. That number made the name unique,
+// and it made it a function of the whole program: the same expression in the
+// same line of the same package was called `...4961.61.5000` in one program and
+// `...4961.61.4753` in another. The enclosing function's symbol identifies the
+// expression without counting anything, exactly as it does for a function
+// literal (see enclosingFunctionName), because a package cannot declare two
+// functions with the same symbol and a function cannot hold two method values
+// at one position. checkUniqueFunctionSymbols is the backstop if it ever can.
 func TestMethodValueWrapperNamesDoNotCollideAtSameSourcePosition(t *testing.T) {
 	t.Parallel()
 	position := token.Position{Line: 1056, Column: 8}
-	readLock := methodValueWrapperName("crypto/tls", "sync.RWMutex.RLock", position, 100)
-	unlock := methodValueWrapperName("crypto/tls", "sync.Mutex.Unlock", position, 100)
-	secondReadLock := methodValueWrapperName("crypto/tls", "sync.RWMutex.RLock", position, 101)
+	readLock := methodValueWrapperName("crypto/tls.Conn.handshakeContext", "sync.RWMutex.RLock", position)
+	unlock := methodValueWrapperName("crypto/tls.Conn.handshakeContext", "sync.Mutex.Unlock", position)
+	otherFunction := methodValueWrapperName("crypto/tls.Conn.Handshake", "sync.RWMutex.RLock", position)
 
 	readLockObject := testARM64SanitizeSymbol(readLock)
 	unlockObject := testARM64SanitizeSymbol(unlock)
 	if readLockObject == unlockObject {
-		t.Fatalf("method-value wrappers collide as object symbol %q", readLockObject)
+		t.Fatalf("method-value wrappers for two methods collide as object symbol %q", readLockObject)
 	}
-	secondReadLockObject := testARM64SanitizeSymbol(secondReadLock)
-	if readLockObject == secondReadLockObject {
-		t.Fatalf("repeated method-value wrappers collide as object symbol %q", readLockObject)
+	otherFunctionObject := testARM64SanitizeSymbol(otherFunction)
+	if readLockObject == otherFunctionObject {
+		t.Fatalf("method-value wrappers in two functions collide as object symbol %q", readLockObject)
 	}
 }
 

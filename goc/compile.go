@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
@@ -402,7 +403,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			return nil, generator.err
 		}
 	}
-	dynamicInitializers := collectDynamicInitializers([]*ast.File{file}, info, pkg, loader.units, packageGlobals)
+	dynamicInitializers := collectDynamicInitializers(fset, []*ast.File{file}, info, pkg, loader.units, packageGlobals)
 	dynamicInitializerGuards := make(map[types.Object]string)
 	dynamicInitializerFunctions := dynamicInitializerFunctionSymbols(dynamicInitializers)
 	allGlobals := make(map[types.Object]string)
@@ -2097,11 +2098,53 @@ func (g *gen) lowerMathCall(symbol string, arguments []ir.Ref) (ir.Ref, bool) {
 }
 
 type globalInitializer struct {
-	expression    ast.Expr
-	info          *types.Info
-	pkg           *types.Package
+	expression ast.Expr
+	info       *types.Info
+	pkg        *types.Package
+	// key names this initializer using only the package that declares it and the
+	// source it is declared in. See dynamicInitializerKey.
+	key           string
 	objects       []types.Object
 	resultIndices []int
+}
+
+// dynamicInitializerKey names one initialized global -- or one group of globals
+// sharing a single initializing expression -- by the package that declares it
+// and the names that declaration binds.
+//
+// It exists because the symbol built from it must be a function of the package
+// that owns it and nothing else. The previous name was
+// `.goc.global.initfunc.<index>.<package>.<name>`, where index was the
+// initializer's rank in a list gathered over every unit the program loaded, so
+// adding one initialized global to a package that sorts earlier renumbered
+// every later package's initializer -- and the call to it that appears in the
+// initializing code of every other global in the same package. That is the same
+// defect `.goc.module.inittask` was fixed for, and the reasoning at
+// addModuleInitTasks applies unchanged.
+//
+// The declared names identify the declaration within its package because
+// package scope admits no duplicates -- except the blank identifier, which a
+// package may write as often as it likes. Those fall back to the position,
+// which is still a property of the package's own source.
+func dynamicInitializerKey(fset *token.FileSet, pkg *types.Package, names []*ast.Ident) string {
+	path := "builtin"
+	if pkg != nil {
+		path = pkg.Path()
+	}
+	declared := make([]string, 0, len(names))
+	named := false
+	for _, name := range names {
+		declared = append(declared, name.Name)
+		if name.Name != "_" {
+			named = true
+		}
+	}
+	key := path + "." + strings.Join(declared, ",")
+	if named || len(names) == 0 {
+		return key
+	}
+	position := fset.Position(names[0].Pos())
+	return fmt.Sprintf("%s@%s:%d:%d", key, filepath.Base(position.Filename), position.Line, position.Column)
 }
 
 func collectLinkNames(files []*ast.File, info *types.Info, names map[*types.Func]string) {
@@ -2176,6 +2219,7 @@ func collectFunctionDeclarations(rootInfo *types.Info, rootPkg *types.Package, r
 }
 
 func collectDynamicInitializers(
+	fset *token.FileSet,
 	rootFiles []*ast.File,
 	rootInfo *types.Info,
 	rootPackage *types.Package,
@@ -2198,6 +2242,7 @@ func collectDynamicInitializers(
 							expression: values.Values[0],
 							info:       info,
 							pkg:        pkg,
+							key:        dynamicInitializerKey(fset, pkg, values.Names),
 						}
 						for index, name := range values.Names {
 							object := info.Defs[name]
@@ -2225,6 +2270,7 @@ func collectDynamicInitializers(
 							expression:    expression,
 							info:          info,
 							pkg:           pkg,
+							key:           dynamicInitializerKey(fset, pkg, []*ast.Ident{name}),
 							objects:       []types.Object{object},
 							resultIndices: []int{0},
 						}
@@ -2240,48 +2286,16 @@ func collectDynamicInitializers(
 	return initializers
 }
 
+// dynamicInitializerFunctionSymbols names each initializer function from the
+// package and declaration it belongs to.
+//
+// There is no ordering here any more, and that is the point: the name no longer
+// depends on the order the initializers were walked in, so it no longer depends
+// on which other packages the program loaded. See dynamicInitializerKey.
 func dynamicInitializerFunctionSymbols(initializers map[types.Object]*globalInitializer) map[types.Object]string {
-	groups := make([]*globalInitializer, 0, len(initializers))
-	seen := make(map[*globalInitializer]bool)
-	// Ordered by the objects being initialized, because these groups are
-	// numbered in the order they are walked and that number becomes a symbol
-	// name. Ranging the map directly numbered them differently on every build.
-	for _, object := range sortedGlobalValues(initializers) {
-		initializer := initializers[object]
-		if seen[initializer] {
-			continue
-		}
-		seen[initializer] = true
-		groups = append(groups, initializer)
-	}
-	sort.Slice(groups, func(left, right int) bool {
-		leftObject := groups[left].objects[0]
-		rightObject := groups[right].objects[0]
-		leftPackage := ""
-		if leftObject.Pkg() != nil {
-			leftPackage = leftObject.Pkg().Path()
-		}
-		rightPackage := ""
-		if rightObject.Pkg() != nil {
-			rightPackage = rightObject.Pkg().Path()
-		}
-		if leftPackage != rightPackage {
-			return leftPackage < rightPackage
-		}
-		return leftObject.Name() < rightObject.Name()
-	})
-
 	symbols := make(map[types.Object]string, len(initializers))
-	for index, initializer := range groups {
-		object := initializer.objects[0]
-		packagePath := "builtin"
-		if object.Pkg() != nil {
-			packagePath = object.Pkg().Path()
-		}
-		symbol := fmt.Sprintf(".goc.global.initfunc.%d.%s.%s", index, packagePath, object.Name())
-		for _, groupObject := range initializer.objects {
-			symbols[groupObject] = symbol
-		}
+	for object, initializer := range initializers {
+		symbols[object] = contentSymbolName(".goc.global.initfunc", initializer.key)
 	}
 	return symbols
 }
@@ -2289,19 +2303,19 @@ func dynamicInitializerFunctionSymbols(initializers map[types.Object]*globalInit
 func generateDynamicInitializerFunctions(base *gen, initializers map[types.Object]*globalInitializer) error {
 	groups := make([]*globalInitializer, 0, len(initializers))
 	seen := make(map[*globalInitializer]bool)
-	// Ordered by the objects being initialized, because these groups are
-	// numbered in the order they are walked and that number becomes a symbol
-	// name. Ranging the map directly numbered them differently on every build.
-	for _, object := range sortedGlobalValues(initializers) {
-		initializer := initializers[object]
+	for _, initializer := range initializers {
 		if seen[initializer] {
 			continue
 		}
 		seen[initializer] = true
 		groups = append(groups, initializer)
 	}
+	// Emitted in a fixed order, because the order functions are appended to the
+	// module in is the order they reach the object. The key is unique per group
+	// and is a property of the declaration, so this is a total order and it does
+	// not move when an unrelated package gains an initializer.
 	sort.Slice(groups, func(left, right int) bool {
-		return base.dynamicInitializerFunctions[groups[left].objects[0]] < base.dynamicInitializerFunctions[groups[right].objects[0]]
+		return groups[left].key < groups[right].key
 	})
 
 	for _, initializer := range groups {
@@ -2694,11 +2708,30 @@ func methodsInterface(method *types.Func) (*types.Interface, bool) {
 // interface the walk could find no implementation of is a question this has no
 // information about, and the conservative answer is the one that keeps the
 // object on the heap.
+//
+// # Why this is off by default
+//
+// The candidate set is a whole-program fact: it is drawn from g.dynamicTypes and
+// g.reachableFunctions, which are computed over every unit the program loaded.
+// Consulting it here makes the IR a function of the program rather than of the
+// package -- the same source function lowers to a frame slot in one program and
+// a runtime.newobject in another, because the second program has one more type
+// implementing the interface. That is not merely a different answer; reusing the
+// first program's lowered IR in the second would bind a devirtualised direct
+// call to the wrong method.
+//
+// So per-package caching and this optimisation cannot both be had, and the
+// choice made for the cache is the cache. gocLoweringUsesWholeProgramFacts
+// restores the old answer for measurement; see its comment for the cost.
 func (g *gen) interfaceMethodDoesNotRetainReceiver(
 	method *types.Func,
 	interfaceType *types.Interface,
 	checking map[parameterKey]bool,
 ) bool {
+	if !gocLoweringUsesWholeProgramFacts() {
+		return false
+	}
+
 	// An interface method has no body, so receiverDoesNotEscape's cycle-breaking
 	// entry is never reached for one and a chain of embedded interfaces would
 	// recurse without end. This is that entry, taken on the interface method
@@ -2737,6 +2770,42 @@ type interfaceCandidateKey struct {
 	method        *types.Func
 	interfaceType string
 }
+
+// gocLoweringUsesWholeProgramFacts reports whether lowering a function may
+// consult facts about the whole program rather than about the package it is
+// lowering and that package's imports.
+//
+// It is off, and a package's compiled form cannot be cached until it is,
+// because a fact about the whole program is a different fact in a different
+// program. Three optimisations read one:
+//
+//   - interfaceMethodDoesNotRetainReceiver devirtualises an interface method
+//     call to decide whether the receiver escapes, from the set of dynamic
+//     types the program contains. It decides whether `&T{...}` becomes frame
+//     storage or a runtime.newobject. This is the one whose answer can be
+//     *wrong* rather than merely worse when it is reused: a program with one
+//     more implementation of the interface needs the conservative placement the
+//     first program's IR does not have.
+//   - interfaceTypeWord and interfaceTypeMatch open `x.(I)` with a chain of
+//     comparisons against every type in the program that implements I, ahead of
+//     the runtime.getitab call that is the real answer. The chain is a fast
+//     path; getitab alone is correct, which is why the chain can simply be
+//     dropped. Its own comment already records a split build that the chain
+//     miscompiled for exactly this reason.
+//
+// The freestanding subset (no Go runtime, so no getitab) keeps its chain: see
+// interfaceTypeMatch.
+//
+// GOC_LOWERING_WHOLE_PROGRAM=1 turns all of it back on, which is how the
+// code-quality cost of turning it off is measured rather than asserted; the
+// measurement is in CCWORK_REPORT.md.
+//
+// Read once. The escape walk asks its question thousands of times per compile,
+// and a compiler that re-reads its environment inside its inner loop is a
+// compiler whose behaviour can change halfway through a build.
+var gocLoweringUsesWholeProgramFacts = sync.OnceValue(func() bool {
+	return os.Getenv("GOC_LOWERING_WHOLE_PROGRAM") != ""
+})
 
 // receiverIsAPointerFreeCopy reports that this method's receiver is passed by
 // value and carries no pointer, so the callee cannot reach the caller's storage
@@ -7735,7 +7804,10 @@ func (g *gen) interfaceTypeWord(dynamicType ir.Ref, targetType types.Type) ir.Re
 		return dynamicType
 	}
 	targetInterface := targetType.Underlying().(*types.Interface)
-	implementations := g.interfaceImplementations(targetInterface)
+	var implementations []types.Type
+	if gocLoweringUsesWholeProgramFacts() {
+		implementations = g.interfaceImplementations(targetInterface)
+	}
 	if len(implementations) == 0 {
 		return g.cur.Call(
 			ir.ClsP,
@@ -9778,16 +9850,33 @@ func (g *gen) interfaceTypeMatch(dynamicTag ir.Ref, targetType types.Type) ir.Re
 	if !isInterface || target.NumMethods() == 0 {
 		return g.fn.Word(1)
 	}
-	implementations := g.interfaceImplementations(target)
 	if !g.runtimeAllocation {
 		// The freestanding subset has no Go runtime to ask, so the chain is all
-		// there is. It is also not split, so the chain is complete.
+		// there is. It is also not split, so the chain is complete. This is the
+		// one place the chain is load-bearing rather than a fast path, and the
+		// one place gocLoweringUsesWholeProgramFacts therefore cannot switch it
+		// off: a freestanding program is compiled whole or not at all.
 		match := g.fn.Word(0)
-		for _, implementation := range implementations {
+		for _, implementation := range g.interfaceImplementations(target) {
 			matchesImplementation := g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(implementation))
 			match = g.cur.Or(ir.ClsW, match, matchesImplementation)
 		}
 		return match
+	}
+
+	var implementations []types.Type
+	if gocLoweringUsesWholeProgramFacts() {
+		implementations = g.interfaceImplementations(target)
+	}
+	if len(implementations) == 0 {
+		itab := g.cur.Call(
+			ir.ClsP,
+			g.fn.Sym("runtime.getitab", 0),
+			g.typeTag(targetType),
+			dynamicTag,
+			g.fn.Word(1),
+		)
+		return g.cur.Cmp(ir.CmpNe, ir.ClsP, itab, g.fn.ConstInt(ir.ClsP, 0))
 	}
 
 	done := g.block("ifacematchdone")
@@ -13276,7 +13365,7 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 		methodSymbol = instantiatedSymbol
 	}
 	position := g.fset.Position(expression.Pos())
-	wrapperName := methodValueWrapperName(g.pkg.Path(), methodSymbol, position, len(g.mod.Funcs))
+	wrapperName := methodValueWrapperName(g.enclosingFunctionName(), methodSymbol, position)
 	resultClass := ir.ClsW
 	if signature.Results().Len() > 0 {
 		resultClass, _ = scalar(signature.Results().At(0).Type())
@@ -13352,14 +13441,27 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 	return descriptor
 }
 
-func methodValueWrapperName(packagePath, methodSymbol string, position token.Position, sequence int) string {
+// methodValueWrapperName names the wrapper a method value's descriptor points
+// at: the function that calls the method with the bound receiver.
+//
+// The prefix is the enclosing function's symbol rather than the package path,
+// and there is no sequence number, for the reason enclosingFunctionName's
+// comment gives about function literals. The sequence used to be len(mod.Funcs)
+// -- how many functions the module had emitted when this one was reached, which
+// is a count over the whole program, so the same method value in the same source
+// line was called `...4961.61.5000` in one program and `...4961.61.4753` in
+// another, and the caller's IR carried the difference. Prefixing with the
+// enclosing function is what actually makes the name unique: a package cannot
+// declare two functions with the same symbol, a generic instantiation carries
+// its type arguments in that symbol, and one function cannot hold two method
+// values at one position.
+func methodValueWrapperName(enclosing, methodSymbol string, position token.Position) string {
 	return fmt.Sprintf(
-		"%s.methodvalue.%s.%d.%d.%d",
-		packagePath,
+		"%s.methodvalue.%s.%d.%d",
+		enclosing,
 		methodSymbol,
 		position.Line,
 		position.Column,
-		sequence,
 	)
 }
 

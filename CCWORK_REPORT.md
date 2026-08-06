@@ -5822,3 +5822,55 @@ The measurement harness is scratch and lives outside the tree. If the movement
 numbers here need reproducing, it is 90 lines: compile `goc/testdata/hello.go`,
 optionally round-trip before or after `opt.OptimizeModule`, `arm64.CompileObject`,
 and report `debug/elf` section sizes and the object's sha256.
+
+---
+
+# Stage 1 of per-package caching: making goc's lowering a function of the package
+
+Branch `ccwork/lowering-package-pure`, cut from `main` (`8920449`). Plan:
+`BUILD_CACHE.md`. Stage 0 (the lossless IR format and the self-extending
+totality guard) is already merged.
+
+Host: aarch64 Linux, 64 cores, 250 GiB RAM, go1.26.1. All compiles are `goc`
+arm64.
+
+**The decision this stage was given: compile time wins over generated-code
+quality.** goc may emit worse code if that is what makes package caching
+possible. Incorrect code is not licensed.
+
+## The deliverable, and what it said before any change
+
+`goc/packagelowering_test.go` (new) compiles two different programs that import
+the same packages and compares, function by function, the IR those shared
+packages lowered to.
+
+- `programSmall` imports `strconv` and nothing else.
+- `programWide` imports `strconv`, `fmt`, `sort`, `errors` and `strings`, and
+  declares three concrete error implementations, a `fmt.Stringer`, and a
+  `sort.Interface` — so `collectDynamicTypes` and `reachableFunctions` answer
+  very differently for it.
+
+The digest is the **encoded unit**, not the printed IL: the printed form omits
+fields that reach the image. Source-file indices are renumbered per function
+into first-use order before encoding, because `SrcPos.File` indexes the
+module's file table and that table is interned in lowering order — a property
+of the program, not of the package. File *names* still take part in the digest,
+so a genuine position change is still caught. Functions present in only one
+module are counted, not compared: goc lowers the reachable set, so a package
+contributes different functions to different programs by construction.
+
+**On `main` (`8920449`), before any change on this branch:**
+
+```
+53 packages shared by both programs, 2813 functions lowered by both, 2668 identical
+  145 of 2813 shared functions differ (5.2%)
+
+  error                        1 of    1
+  internal/abi                10 of   88
+  internal/runtime/atomic      4 of   67
+  internal/runtime/exithook    1 of    5
+  runtime                    127 of 2306
+  strconv                      2 of   19
+```
+
+That is the defect Stage 1 exists to remove, measured rather than argued.
