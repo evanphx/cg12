@@ -5280,3 +5280,101 @@ gate stands between this merge and `main`:
 `TestCheckedRuntimeCoverageBaselineDenominator` fails identically on `main` and
 is not this merge's to answer for.
 
+
+---
+
+# Stage 0 of per-package caching: making goc's IR binary format lossless
+
+Branch `ccwork/ir-format-lossless`, off `integration/optionc-fix` (`3f4a6b8`).
+
+The cache in BUILD_CACHE.md's Option C writes a package's compiled form,
+including its IR, to disk and reads it back on a later compile. That is sound
+only if the format carries everything. It did not. This is the list of what it
+dropped, the fix for each, the test that fails without it, and what each one
+moved in the emitted object.
+
+None of these are hypothetical-until-the-cache-lands defects. `ir.CloneFunc`
+clones a function by encoding and decoding it through this exact encoder, and two
+production callers use it: `opt.InlineIntoNoSplitCallers` snapshots a caller it
+may have to restore, and `arm64.measureFunction` clones every function whose
+frame the nosplit budget measures. A field the encoder drops is a field those two
+lose today.
+
+## How the movement is measured
+
+One harness, two modes, one program (`goc/testdata/hello.go`, the whole Go
+runtime behind it -- 5083 functions):
+
+- **plain** -- `CompileExecutable` + `opt.OptimizeModule` + `arm64.CompileObject`.
+  No explicit round trip. This is what `goc -O -c` emits, and it moves when a
+  format fix changes what `ir.CloneFunc` gives back to the nosplit passes.
+- **roundtrip** -- the same, with `MarshalBinary` + `DecodeModuleUnverified`
+  between the optimizer and the backend. This is the cache path. The gap between
+  it and **plain** is what the format loses over a whole module.
+
+Both report every ELF section size and the object's sha256. The harness is
+scratch (it lives outside the tree); it is 90 lines and reproduced in this report
+where it matters.
+
+## Baseline, before any fix
+
+| section | plain | roundtrip | gap |
+|---|---:|---:|---:|
+| `.text` | 1527964 | 1527964 | 0 |
+| `.data` | 3624240 | 3624240 | 0 |
+| **`.rela.data`** | **265392** | **304728** | **+39336** |
+| `.rela.text` | 905184 | 905184 | 0 |
+| `.debug_info` | 1321198 | 1321198 | 0 |
+| object | 9991688 | 10031024 | +39336 |
+
+`39336 / 24` is exactly **1639 extra `Elf64_Rela` entries**. That is
+`DataItem.RelativeTo` (drop 1) and it is the only whole-module loss visible in
+the object today: every other section is byte-identical across the round trip.
+A relative item that decodes as an absolute symbol reference takes a different
+relocation path in the backend, and 1639 data words on this program take it.
+
+## Drop 1 — `DataItem.RelativeTo`. Real in goc, and it was the whole gap.
+
+`encData` wrote `Sym`, `Off`, `Str` and not `RelativeTo` (`ir/binary.go`). An item
+with both `Sym` and `RelativeTo` is `Sym - RelativeTo`: a 32-bit displacement from
+the module's data base. Dropping `RelativeTo` turns it into a full symbol address,
+and `arm64/mc.go:386` / `:692-703` take a **different relocation path** for each.
+
+goc emits these everywhere: every `abi.Type`'s name offset and type offset, and
+each method's two offset words (`goc/compile.go:8322`, `:8418-8419`, `:8459`,
+`:8477-8478`, `:8515`), plus `internal/permodule`'s probe descriptors.
+
+Nothing detected it. `ir.Verify` does not look at `Data` at all, and
+`memo.DataDigest` digests `(&ir.Module{Data: m.Data}).MarshalBinary()` -- through
+the same lossy encoder -- so the digest was equal on both sides of a difference it
+had itself erased.
+
+**Test that fails without it:** `TestDataRoundTripsEveryField` (`ir/binary_total_test.go`).
+Before the fix it names the field:
+
+```
+    Diff:
+    --- Expected
+    +++ Actual
+        Sym: (string) (len=5) "other",
+    -   RelativeTo: (string) (len=4) "base",
+    +   RelativeTo: (string) "",
+```
+
+**Emitted-code movement.**
+
+| | before fix 1 | after fix 1 | moved |
+|---|---:|---:|---:|
+| roundtrip `.rela.data` | 304728 | 265392 | **−39336 (−1639 relocations)** |
+| roundtrip object | 10031024 | 9991688 | −39336 |
+| roundtrip sha256 | `f451f7db…` | `fc378a0a…` | — |
+| plain sha256 | `fc378a0a…` | `fc378a0a…` | unchanged |
+
+The round-tripped object is now **byte-identical to the object compiled without a
+round trip** (`fc378a0a…` on both sides). This one fix closed the entire
+whole-module gap on this program: encode, decode, emit is now a fixed point over
+the emitted object, not merely over the encoding.
+
+`plain` does not move, and that is the correct answer rather than a null result:
+`Data` is module-level, and `ir.CloneFunc` puts one function into a scratch module
+that has no `Data` at all. The two `CloneFunc` callers cannot reach this field.

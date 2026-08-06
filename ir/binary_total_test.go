@@ -44,6 +44,47 @@ func allFieldsSet(t *testing.T, v any, skip ...string) {
 	}
 }
 
+// TestDataRoundTripsEveryField covers a data definition and its items.
+//
+// DataItem.RelativeTo was the drop this found. Every abi.Type goc emits carries
+// three of them -- the name offset, the type offset, and each method's two
+// offset words are 32-bit displacements from the module's data base, not
+// addresses -- and arm64/mc.go takes a different relocation path for a relative
+// item than for an absolute one. A round trip demoted 1639 of them on a
+// hello-world, and nothing noticed: ir.Verify does not look at Data at all, and
+// memo.DataDigest digests through this same encoder, so it could not see a
+// difference the encoder had already erased.
+func TestDataRoundTripsEveryField(t *testing.T) {
+	d := &Data{
+		Name:    "tbl",
+		Linkage: Linkage{Export: true, Thread: true, Section: ".mydata", SecArgs: "aw"},
+		Align:   16,
+		Items: []DataItem{{
+			Sub:        SubW,
+			Zero:       4,
+			Ints:       []int64{1, 2},
+			Flts:       []float64{1.5},
+			Sym:        "other",
+			RelativeTo: "base",
+			Off:        8,
+			Str:        "hi",
+		}},
+		PointerWords: []int{2, 5},
+		GoTypeLink:   true,
+	}
+	allFieldsSet(t, *d)
+	allFieldsSet(t, d.Items[0])
+	allFieldsSet(t, d.Linkage)
+
+	m := NewModule()
+	m.Data = append(m.Data, d)
+	data, err := m.MarshalBinary()
+	require.NoError(t, err)
+	back, err := DecodeModule(data)
+	require.NoError(t, err)
+	require.Equal(t, d, back.Data[0])
+}
+
 func TestInstrRoundTripsEveryField(t *testing.T) {
 	agg := &AggType{Name: "pair", Fields: []Field{{Sub: SubW}, {Sub: SubW}}}
 	in := Instr{

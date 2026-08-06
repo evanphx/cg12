@@ -19,7 +19,7 @@ import (
 // references. Value references (ir.Ref) already index Temps/Consts by ID.
 const (
 	binMagic   = "cg12"
-	binVersion = 20
+	binVersion = 21
 )
 
 // MarshalBinary encodes the module to cg12's binary unit format.
@@ -354,6 +354,12 @@ func (e *enc) encData(d *Data) {
 			e.f64(v)
 		}
 		e.str(it.Sym)
+		// RelativeTo is the difference between a 32-bit module-relative offset and
+		// a full symbol address, and the backend takes a different relocation path
+		// for each (arm64/mc.go). Every abi.Type goc emits carries several -- the
+		// name offset, the type offset, each method's two offset words -- so a
+		// format that dropped it demoted 1639 data words on a hello-world.
+		e.str(it.RelativeTo)
 		e.iv(it.Off)
 		e.str(it.Str)
 	}
@@ -776,6 +782,7 @@ func (d *dec) decData() *Data {
 			it.Flts[j] = d.f64()
 		}
 		it.Sym = d.str()
+		it.RelativeTo = d.str()
 		it.Off = d.iv()
 		it.Str = d.str()
 		dt.Items[i] = it
