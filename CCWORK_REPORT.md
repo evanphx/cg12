@@ -3141,3 +3141,64 @@ the earlier disposition assumed are not true:
    `bool` that one test writes. That is a narrower and more fixable problem than
    "concurrent compiles perturb the analysis", which is what the list's header
    comment currently says.
+
+## The fix, and why it was not made
+
+The trivial-looking fix is not available. `TestEscapeSummaryCost` measures the
+wall time of a *whole compile* with the table off, so the setting has to be in
+force inside `goc.CompileExecutable`. Removing the global write means either
+plumbing the knob through as a compile option -- a new field on
+`compileOptions` and a new exported entry point, threaded to `opt/escape.go` --
+or re-execing the test in a subprocess with `GOC_ESCAPE_SUMMARIES=0`, which is
+maybe thirty lines but rewrites a timing test whose validation is six
+whole-program compiles of crypto/ecdsa. Neither is a small change, and neither is
+verifiable inside this job's guards. So the compiler is unchanged and the
+sequential list keeps its entries.
+
+What was done instead, all of it either measurement or documentation:
+
+- `analysis/escapedrift`, the reduction, with the `knob`, `diag`, `pair` and
+  `race` modes shown above.
+- `opt.EscapeSummaries` now says in its doc comment that writing it under a
+  running compile perturbs that compile, which is the one thing its previous
+  comment -- five paragraphs on what the knob is for -- did not say.
+- `goc/sequential_tests.txt`'s header said "the root cause is NOT isolated". It
+  now names the cause, and says exactly which entries the finding licenses
+  removing and what has to be run first.
+- `goc/parallelpolicy_test.go` gains
+  `TestOnlyKnownTestsWriteProcessGlobalCompilerState`: the set of test functions
+  that write `opt` package state is frozen at five, and a sixth fails the test
+  with an explanation. It matched the hand-found set exactly on its first run,
+  which is the independent check that `opt.EscapeSummaries` and the two
+  diagnostic setters really are the whole of it.
+
+## What the list could become
+
+83 entries today: 77 `placement`, 4 `setenv`, 2 `timing`.
+
+Of the 77, exactly two need to be sequential for the reason found here --
+`TestEscapeSummaryCost` and `TestEscapeSummaryPromotionRate`, the two that write
+the knob. Another seven move the diagnostic level or writer instead
+(`TestEscapeDiagnostic*`, `TestEscapeReasonDifferentialAgainstGC`,
+`TestGCExplanationsParseTheFlowChain`, `TestGocFlagM*`); that is placement-neutral
+but they perturb each other -- `diagnoseEscapes` sets the level, compiles, and
+then reads reasons the compile only recorded because the level was up -- so they
+need a `globals` tag rather than removal. The remaining ~68 have no reason left.
+
+Narrowing it is worth roughly the difference between 68 tests running first and
+alone and 68 running in the parallel pool, on the suite that already went 18:57
+-> 8:15. It was not done here because showing it means running
+`TestAllocationCensus`, `TestFrameEscapeAudit` and
+`TestInterfaceConversionsCallTheRuntimeHelpers` at `-parallel 32` against the
+whole suite -- the census, the audits and the corpus, all three explicitly out of
+this job's scope. That run is the only evidence that matters, and it is cheap
+next to the hunt that produced the list.
+
+## Guards run
+
+`go build ./...`, `go vet ./opt/ ./goc/ ./analysis/escapedrift/`, and
+`go test ./goc/ -run 'TestOnlyKnownTestsWriteProcessGlobalCompilerState|TestEveryTestIsParallelOrListedAsSequential'`
+(0.07s, ok). No compiler behaviour was changed, so there is no at-risk check to
+add: the only edit to compiler source is a doc comment on `opt.EscapeSummaries`.
+The corpus suite, capability matrix, `make test-unit`, audits, census,
+determinism sweeps and crash loops were not run.

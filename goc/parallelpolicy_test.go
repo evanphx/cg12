@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -89,6 +90,105 @@ func TestEveryTestIsParallelOrListedAsSequential(t *testing.T) {
 			t.Errorf("%s names %s, which is not a test in this package", sequentialTestList, name)
 		}
 	}
+}
+
+// compilerGlobalWriters is every place in this package's tests that writes state
+// the `opt` package holds for the whole process. It is frozen here because a
+// write like that is not local to the test that makes it: every compile running
+// anywhere in the process reads the same variable.
+//
+// That is not hypothetical. `TestEscapeSummaryCost` sets opt.EscapeSummaries to
+// false across three whole-program compiles to price the fact table, and at
+// -parallel 32 every other test compiling inside that window got the escape
+// analysis with no callee summaries -- the assume-every-call-escapes arm. It
+// showed up as TestAllocationCensus, TestFrameEscapeAudit and
+// TestInterfaceConversionsCallTheRuntimeHelpers reporting allocations on the
+// heap that a serial run keeps in a frame, and it cost a long hunt through the
+// analysis, the caches and the budgets before anyone looked at the tests. See
+// `analysis/escapedrift`, which reduces it to two goroutines and a handshake.
+//
+// So: adding a writer here is allowed, and it means the test that does it has to
+// be sequential. Failing this test is the moment to decide that on purpose.
+var compilerGlobalWriters = []string{
+	"escapediag_test.go:TestEscapeDiagnosticDoesNotChangeTheEmittedModule",
+	"escapediag_test.go:diagnoseEscapes",
+	"escapesummary_test.go:TestEscapeSummaryCost",
+	"escapesummary_test.go:compileCorpusForLoweringStats",
+	"gcdiffreason_test.go:addGocReports",
+}
+
+func TestOnlyKnownTestsWriteProcessGlobalCompilerState(t *testing.T) {
+	t.Parallel()
+
+	files, err := filepath.Glob("*_test.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var found []string
+	fset := token.NewFileSet()
+	for _, file := range files {
+		parsed, err := parser.ParseFile(fset, file, nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", file, err)
+		}
+		for _, decl := range parsed.Decls {
+			function, ok := decl.(*ast.FuncDecl)
+			if !ok || function.Body == nil {
+				continue
+			}
+			if writesOptPackageState(function.Body) {
+				found = append(found, filepath.Base(file)+":"+function.Name.Name)
+			}
+		}
+	}
+	sort.Strings(found)
+
+	want := append([]string(nil), compilerGlobalWriters...)
+	sort.Strings(want)
+	if strings.Join(found, "\n") == strings.Join(want, "\n") {
+		return
+	}
+	t.Errorf("the set of tests writing process-global opt state changed.\n"+
+		"found:\n  %s\nexpected:\n  %s\n"+
+		"A write to an opt package variable is seen by every compile in the process, "+
+		"not only by the test that makes it. If this is a new one, the test making it "+
+		"belongs in %s, and the name belongs in compilerGlobalWriters.",
+		strings.Join(found, "\n  "), strings.Join(want, "\n  "), sequentialTestList)
+}
+
+// writesOptPackageState reports whether the body assigns to an `opt.X` or calls
+// an `opt.SetX`. Both forms reach the same process-global variables; the setters
+// only wrap theirs in an atomic.
+func writesOptPackageState(body *ast.BlockStmt) bool {
+	writes := false
+	ast.Inspect(body, func(node ast.Node) bool {
+		switch statement := node.(type) {
+		case *ast.AssignStmt:
+			for _, target := range statement.Lhs {
+				if isPackageSelector(target, "opt") {
+					writes = true
+				}
+			}
+		case *ast.CallExpr:
+			selector, ok := statement.Fun.(*ast.SelectorExpr)
+			if ok && isPackageSelector(selector, "opt") && strings.HasPrefix(selector.Sel.Name, "Set") {
+				writes = true
+			}
+		}
+		return !writes
+	})
+	return writes
+}
+
+// isPackageSelector reports whether the expression is `pkg.Something`.
+func isPackageSelector(expression ast.Expr, pkg string) bool {
+	selector, ok := expression.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	name, ok := selector.X.(*ast.Ident)
+	return ok && name.Name == pkg
 }
 
 // readSequentialTestList parses the shared list into name -> reason tag. The
