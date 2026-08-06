@@ -3400,3 +3400,76 @@ it — nothing in this measurement may be served out of a cache some other
 compiler filled. The `split` arm needs no change: it passes `-runtime`
 explicitly, and `cmd/goc/main.go` returns on that path before auto-packing is
 considered.
+
+## The register, regenerated from the merged tree — **it did not move**
+
+`scripts/nosplit-debt-regen.sh -j 32 -update` on `integration/cache-wave` with
+the fix in place. **1638 configurations** — `pack=14 whole=812 split=812`, the
+whole 406-program corpus in both module shapes at both optimization levels —
+in 18 minutes:
+
+    outcomes: 1638 measured, 0 rejected by the budget, 0 failed to compile
+    register: committed=51 original-recipe=50 widened-recipe=51
+    against the committed register:
+      no change: 51 entries, same names, same heights
+
+`git status` after `-update` is clean: the rewritten file is byte-identical to
+the committed one. **The register does not move.** Same 51 names, same 51
+heights.
+
+Two things that answers, and one it does not.
+
+**The committed register was generated correctly, and it still reproduces.**
+The one entry the original 22-configuration recipe could not reach —
+`syscall_runtime_AfterForkInChild` at 976 — is found again, and by the same
+configuration: `whole stdlib_os_exec_echo.go`. That is the fixed arm working
+end to end, since it is precisely the entry the unfixed arm loses.
+
+**`ccwork/ir-verify-entry-blocks` does not deepen any recorded chain.** This was
+the open question. Branch 1 re-enables `opt.InlineIntoNoSplitCallers` for every
+closure shape — 86 of the 465 functions the budget tries to measure on a
+hello-world were previously unmeasurable — and the branch's own report notes
+that a function missing from the facts stops `stackcheck`'s walk before its
+subtree is counted, which *overstates* headroom. So heights could have gone up
+and entries could have been added. Across all 1638 configurations, none did, and
+none of the 1638 was rejected by the budget.
+
+**What it does not answer** is what a naive regeneration would have done, and
+that is worth stating because it nearly happened. The register is a floor: an
+entry that disappears becomes a hard build failure for the program that contains
+that chain. The unfixed arm on `stdlib_os_exec_echo.go` reports 0 chains on a
+warm cache and 50 on a cold one against 51 whole-program, and the one it drops
+in the cold case is `syscall_runtime_AfterForkInChild` — the entry no other arm
+reaches. So a regeneration on the unfixed recipe would have deleted at least
+that entry from the register and broken `goc/testdata/stdlib_os_exec_echo.go`,
+which is the same program that motivated widening the recipe in the first place.
+I did not run the full unfixed sweep to enumerate the rest; the per-program
+measurement above is direct and the register-level consequence follows from the
+`source` attribution the sweep prints.
+
+## Other places that assume monolithic output
+
+Three more harnesses reach the `goc` **binary** with neither `-runtime` nor a
+cache switch, so all three now measure a split build where they used to measure
+a monolithic one. None of them is wrong the way `nosplitdebt` was wrong — none
+claims in its own words to be whole-program — but all three changed what they
+measure without anyone editing them:
+
+  - `goc/slogalloc_test.go:204` builds `cmd/goc` and runs `driver -o binary
+    program`. It generates `slog_allocations_baseline.txt`, one of the files
+    this gate regenerates. Split vs monolithic is a different module boundary
+    for escape analysis, so this one can move the numbers.
+  - `goc/cryptobench_test.go:484` and `goc/perfbench_test.go:581` do the same
+    with `-O`, for `crypto_signing_bench_baseline.txt` and
+    `perf_suite_baseline.txt` — the two baselines this gate is told not to
+    re-cut. They now time a program built the new default way.
+  - `scripts/determinism-check.sh` is the sharpest case. Its five-program arm
+    compares a `CG12_NOCACHE=1` build against a plain one and calls a difference
+    a determinism failure. `CG12_NOCACHE=1` is now "compile whole-program" and
+    the plain build is now "compile split", so the script compares two different
+    compiles and reports the difference as non-determinism. Measured below.
+
+Everything else that generates a baseline in `goc/` — the allocation census, the
+frame-escape, loop-alias and escape-shadow audits, and both GC differentials —
+compiles in-process through the `goc` package. Auto-packing lives in `cmd/goc`,
+so those are untouched by it.
