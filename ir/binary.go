@@ -47,6 +47,51 @@ func (m *Module) MarshalBinary() ([]byte, error) {
 	for _, f := range m.Files {
 		e.str(f)
 	}
+
+	// The three module-scope tables. None of them is recoverable from anything
+	// else in the unit, and each is read by something that changes the emitted
+	// code, so a format without them is a format that cannot describe a module.
+	//
+	// SymAttrs is the live one. The front end declares it once (goc's
+	// registerSymAttrs) and four optimizer passes read it: LoadElim and DeadAlloc
+	// through isAtomicPointerStore, the inliner through isFrameScopedRuntimeCall,
+	// and the escape summaries through SymNoEscape. Losing it does not merely cost
+	// an optimization -- an inliner that stops recognizing a frame-scoped call is
+	// an inliner that may relocate one into a different frame. It is precisely why
+	// memo.ModuleDigest had to hash it from outside the format.
+	//
+	// SymAlign lets the backend fold a symbol's low bits into a scaled load/store
+	// offset (arm64/select.go), a fold that is sound only when the symbol is
+	// aligned to the access width. Losing it is conservative -- the fold simply
+	// does not happen -- but "quietly emits worse code" is exactly what a cache
+	// must not do, and the map has no other source than the front end.
+	//
+	// Aliases are symbols the backend defines (addAliases in arm64/mc.go,
+	// amd64/mc.go). Losing one is not a degradation: it is a symbol that is not
+	// there.
+	//
+	// Module.AllocDecisions is deliberately absent, as is Func.PlacedAllocs. Both
+	// are documented diagnostic-only -- no pass reads either, and a module with
+	// them empty compiles to the same code -- so carrying them would cost every
+	// cached unit bytes that no compile ever looks at.
+	e.uv(uint64(len(m.SymAlign)))
+	for _, name := range sortedStringKeys(m.SymAlign) {
+		e.str(name)
+		e.iv(int64(m.SymAlign[name]))
+	}
+	e.uv(uint64(len(m.SymAttrs)))
+	for _, name := range sortedStringKeys(m.SymAttrs) {
+		e.str(name)
+		e.uv(uint64(m.SymAttrs[name]))
+	}
+	e.uv(uint64(len(m.Aliases)))
+	for _, a := range m.Aliases {
+		e.str(a.Name)
+		e.str(a.Target)
+		e.boolean(a.Export)
+		e.boolean(a.Func)
+	}
+
 	// Frontend attachments: opaque payloads keyed by name. Assembly rides here
 	// under its reserved key so the core format stays frontend-agnostic. Sorted
 	// keys keep the encoding deterministic (cache correctness).
@@ -130,6 +175,31 @@ func decodeModule(data []byte, verify bool) (*Module, error) {
 	m.Files = make([]string, int(d.uv()))
 	for i := range m.Files {
 		m.Files[i] = d.str()
+	}
+	if n := int(d.uv()); n > 0 {
+		m.SymAlign = make(map[string]int, n)
+		for range n {
+			name := d.str()
+			m.SymAlign[name] = int(d.iv())
+		}
+	}
+	if n := int(d.uv()); n > 0 {
+		m.SymAttrs = make(map[string]SymAttr, n)
+		for range n {
+			name := d.str()
+			m.SymAttrs[name] = SymAttr(d.uv())
+		}
+	}
+	if n := int(d.uv()); n > 0 {
+		m.Aliases = make([]*Alias, n)
+		for i := range m.Aliases {
+			m.Aliases[i] = &Alias{
+				Name:   d.str(),
+				Target: d.str(),
+				Export: d.boolean(),
+				Func:   d.boolean(),
+			}
+		}
 	}
 	attachmentCount := int(d.uv())
 	for range attachmentCount {
@@ -236,6 +306,17 @@ func sortedKeys(m map[uint32]map[int]bool) []uint32 {
 		out = append(out, id)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// sortedStringKeys orders a module-scope table's symbol names, so the encoding
+// of a module is a function of the module and not of Go's map iteration.
+func sortedStringKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for name := range m {
+		out = append(out, name)
+	}
+	sort.Strings(out)
 	return out
 }
 

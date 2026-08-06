@@ -5453,3 +5453,51 @@ the round trip, which is the thing the flag is for.
 **Emitted-code movement: none, on either path.** Both objects byte-identical to
 their post-fix-2 state. Census: zero packed aggregates among the 63 aggregate
 types goc's `hello.go` module reaches.
+
+## Drop 4 — `Module.SymAttrs`, `Module.SymAlign`, `Module.Aliases`. `SymAttrs` is real in goc.
+
+These were not fields the encoder forgot; there was no place in the format to put
+them at all. What each one does, and why it is now in the format:
+
+**`SymAttrs` — in, and it is the live one.** The front end declares it once
+(`goc/compile.go:500`, `registerSymAttrs`; 84 symbols on `hello.go`) and four
+optimizer passes read it: `LoadElim` and `DeadAlloc` through
+`isAtomicPointerStore` (`opt/escape.go:1132`), the inliner through
+`isFrameScopedRuntimeCall` (`opt/inline.go:817`), and the escape summaries through
+`SymNoEscape` (`opt/escapesummary.go:170`, `opt/escapefacts.go:334`). Losing it
+does not merely cost an optimization. An inliner that stops recognizing a
+frame-scoped call is an inliner that may relocate a `defer` registration into a
+different frame, and `SymNoEscape` is the only escape fact that exists anywhere
+about the 619 bodiless `//go:noescape` declarations in `stdlib/src` -- without it
+the summary has to assume the worst about all of them. This absence is exactly why
+`memo.ModuleDigest` (`memo/memo.go:202-227`) had to hash `SymAttrs` from outside
+the format: the memo was keying on a fact the format could not carry.
+
+**`SymAlign` — in.** `arm64/select.go:331` folds a symbol's low bits into a
+scaled load/store offset, and that fold is sound only when the symbol is aligned
+to the access width. Losing the map is *conservative* -- the fold does not happen
+and the code is merely worse -- but "quietly emits worse code" is what a cache
+must not do, and the map has no source other than the front end.
+
+**`Aliases` — in.** An alias is a symbol the backend defines (`addAliases`,
+`arm64/mc.go:309`, `amd64/mc.go:196`). Losing one is not a degradation; it is a
+symbol that is not there.
+
+**`Module.AllocDecisions` and `Func.PlacedAllocs` — deliberately out.** Both are
+documented diagnostic-only: no pass reads either, and a module with them empty
+compiles to the same code. They exist so the two escape analyses can be compared
+at the same allocation. Carrying them would cost every cached unit bytes no
+compile looks at. The guard names them as explicit skips rather than passing over
+them in silence, so the next reader learns it was a decision.
+
+Both maps are written in sorted key order, so the encoding stays a function of the
+module and not of Go's map iteration.
+
+**Test that fails without it:** `TestModuleRoundTripsEveryField`, which reports
+`[]*ir.Alias(nil)` where the fixture had one, and then the same for the two maps.
+
+**Emitted-code movement on `plain` and `roundtrip`: none.** Both byte-identical
+to their post-fix-3 state. That is expected rather than disappointing: those two
+modes round-trip *after* `opt.OptimizeModule`, and `SymAttrs` is read by the
+optimizer. The mode that shows it is the cache path -- decode, *then* optimize --
+and measuring that turned up a further defect first. See drop 5.

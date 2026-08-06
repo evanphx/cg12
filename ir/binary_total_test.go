@@ -153,6 +153,86 @@ func TestAggTypeRoundTripsEveryField(t *testing.T) {
 	require.Equal(t, wantAlign, gotAlign)
 }
 
+// TestModuleRoundTripsEveryField covers the module itself.
+//
+// SymAttrs, SymAlign and Aliases were absent from the format entirely, which is
+// a different failure from a field the encoder forgot: there was no place to put
+// them. What each one is for, and why it is now in the format, is written at the
+// call sites in ir/binary.go.
+//
+// AllocDecisions is deliberately not carried and is skipped here by name rather
+// than by silence, so that a reader of this test learns it was a decision.
+func TestModuleRoundTripsEveryField(t *testing.T) {
+	m := NewModule()
+	m.Runtime = true
+	m.GoModuleData = "runtime.firstmoduledata"
+	m.GoHasMain = true
+	m.File("prog.go")
+	m.AddType(&AggType{Name: "pair", Fields: []Field{{Sub: SubW}}})
+	// Fully populated: the decoder builds empty slices where the encoder was
+	// handed nil ones, so a fixture with nil slices compares unequal for a reason
+	// that is not a dropped field.
+	m.Data = append(m.Data, &Data{
+		Name:         "runtime.firstmoduledata",
+		Items:        []DataItem{{Sub: SubW, Ints: []int64{1}, Flts: []float64{1.5}, Str: "x"}},
+		PointerWords: []int{0},
+	})
+	m.Aliases = append(m.Aliases,
+		&Alias{Name: "memmove", Target: "runtime.memmove", Export: true, Func: true})
+	m.SymAlign = map[string]int{"g": 8, "h": 4}
+	m.SymAttrs = map[string]SymAttr{
+		"runtime.gcWriteBarrier": SymAtomicPointerStore,
+		"runtime.deferproc":      SymFrameScoped | SymNoEscape,
+	}
+	m.Attachments = map[string][]byte{"goc.custom": {0, 1, 2}}
+	m.Assembly = append(m.Assembly, AssemblyFile{
+		PackagePath:  "runtime",
+		Path:         "runtime/asm.s",
+		Source:       "TEXT ·f(SB),$0-0\n",
+		Defines:      map[string]int64{"NOSPLIT": 4},
+		Includes:     map[string]string{"textflag.h": "#define NOSPLIT 4\n"},
+		FloatInputs:  map[string][]int{"f": {0}},
+		FloatOutputs: map[string][]int{"f": {8}},
+		Signatures: map[string]AsmSignature{"f": {
+			Params:  []AsmSlot{{Name: "v", Offset: 8, Cls: ClsD, Width: 8, GCRef: true, Group: 1}},
+			Results: []AsmSlot{{Name: "r", Offset: 16, Cls: ClsL, Width: 8, GCRef: true, Group: 1}},
+		}},
+	})
+	m.NewFunc("f", ClsW).Entry().RetVoid()
+	m.AllocDecisions = nil
+
+	allFieldsSet(t, *m, "AllocDecisions") // diagnostic only; see ir/binary.go
+	allFieldsSet(t, *m.Aliases[0])
+	allFieldsSet(t, m.Assembly[0])
+	allFieldsSet(t, m.Assembly[0].Signatures["f"])
+	allFieldsSet(t, m.Assembly[0].Signatures["f"].Params[0])
+
+	data, err := m.MarshalBinary()
+	require.NoError(t, err)
+	back, err := DecodeModule(data)
+	require.NoError(t, err)
+
+	require.Equal(t, m.Runtime, back.Runtime)
+	require.Equal(t, m.GoModuleData, back.GoModuleData)
+	require.Equal(t, m.GoHasMain, back.GoHasMain)
+	require.Equal(t, m.Files, back.Files)
+	require.Equal(t, m.Data, back.Data)
+	require.Equal(t, m.Aliases, back.Aliases)
+	require.Equal(t, m.SymAlign, back.SymAlign)
+	require.Equal(t, m.SymAttrs, back.SymAttrs)
+	require.Equal(t, m.Attachments, back.Attachments)
+	require.Equal(t, m.Assembly, back.Assembly)
+	// Funcs and Types are rebuilt, so they are compared by their own round-trip
+	// tests; here only that they arrived.
+	require.Len(t, back.Funcs, len(m.Funcs))
+	require.Len(t, back.Types, len(m.Types))
+	require.Equal(t, m.Types[0].Name, back.Types[0].Name)
+
+	// A field that decodes to the zero value is a field the format still drops,
+	// whatever the comparisons above happen to cover.
+	allFieldsSet(t, *back, "AllocDecisions")
+}
+
 func TestInstrRoundTripsEveryField(t *testing.T) {
 	agg := &AggType{Name: "pair", Fields: []Field{{Sub: SubW}, {Sub: SubW}}}
 	in := Instr{
