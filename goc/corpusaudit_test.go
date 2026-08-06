@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/evanphx/cg12/goc"
+	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
 	"github.com/stretchr/testify/require"
 )
@@ -46,6 +47,12 @@ type corpusAudit struct {
 	// the corpus. A program compiled twice contributes twice, which is what makes
 	// it a total rather than a count of distinct sites.
 	shadowCounts opt.ShadowCounts
+	// verifyFailures is every ir.Verify diagnostic the corpus produces, keyed by
+	// the diagnostic itself. See TestIRVerifyAudit.
+	verifyFailures map[string]string
+	// functions is how many functions were verified, summed over the corpus, so
+	// a failure can say what fraction of them it is.
+	functions int
 	// failures is every program that did not compile; either audit is
 	// meaningless if this is not empty.
 	failures []string
@@ -94,12 +101,13 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 	}
 
 	audit := &corpusAudit{
-		programs:     len(programs),
-		frameEscapes: make(map[string]string),
-		loopAliases:  make(map[string]string),
-		allocations:  make(map[string]string),
-		shadow:       make(map[string]string),
-		placements:   make(map[string]string),
+		programs:       len(programs),
+		frameEscapes:   make(map[string]string),
+		loopAliases:    make(map[string]string),
+		allocations:    make(map[string]string),
+		shadow:         make(map[string]string),
+		placements:     make(map[string]string),
+		verifyFailures: make(map[string]string),
 	}
 
 	var mutex sync.Mutex
@@ -130,6 +138,20 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 					mutex.Unlock()
 					continue
 				}
+				// ir.Verify is an instrument the tree already had and did not
+				// run on its own output: nothing between the front end and the
+				// backend called it, so the only callers were the binary decoder
+				// and the lifter, neither of which sees a goc compile. 4.2% of
+				// the functions goc emitted failed it and nothing said so. It
+				// costs one linear walk per function against a compile that
+				// dominates everything here, so the corpus pass is where it
+				// belongs. See TestIRVerifyAudit.
+				var rejected []string
+				for _, function := range module.Funcs {
+					if err := ir.Verify(function); err != nil {
+						rejected = append(rejected, err.Error())
+					}
+				}
 				escapes := opt.FrameEscapes(module)
 				// The other half of the escape decision's correctness, and the
 				// half FrameEscapes is structurally blind to: an allocation left
@@ -154,6 +176,10 @@ func compileCorpusForAudits(programs []string) *corpusAudit {
 				disagreements, counts := opt.ShadowPlacement(module, opt.ComputeEscapeFacts(module))
 				name := filepath.Base(program)
 				mutex.Lock()
+				audit.functions += len(module.Funcs)
+				for _, failure := range rejected {
+					note(audit.verifyFailures, normalizeCorpusKey(failure), name)
+				}
 				for _, escape := range escapes {
 					note(audit.frameEscapes, normalizeCorpusKey(escape.Key()), name)
 				}

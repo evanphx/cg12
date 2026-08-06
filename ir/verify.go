@@ -63,6 +63,10 @@ func Verify(f *Func) error {
 // the entry agree with the control-flow graph. A temp that is in range but never
 // defined, or a phi naming a block that does not branch to it, passes structural
 // verification yet sends a dominance-frontier pass (mem2reg) into a loop.
+//
+// "Nothing defines" means nothing in the body and nothing on entry, and there
+// are two kinds of entry input: the parameters, and the closure environment the
+// ABI supplies. See defineClosureContext for the second one.
 func verifySSA(f *Func) error {
 	// One definition per temporary; collect them all first.
 	defined := make([]bool, len(f.Temps))
@@ -83,6 +87,9 @@ func verifySSA(f *Func) error {
 		if p.ID < len(defined) {
 			defined[p.ID] = true
 		}
+	}
+	if err := defineClosureContext(f, defined); err != nil {
+		return err
 	}
 	for _, b := range f.Blocks {
 		for _, p := range b.Phis {
@@ -135,6 +142,58 @@ func verifySSA(f *Func) error {
 		}
 	}
 	return verifyPhiEdges(f)
+}
+
+// defineClosureContext marks a function's incoming closure environment as
+// defined on entry, and checks that the function agrees with itself about
+// having one.
+//
+// THE INVARIANT: a function has two kinds of entry input, not one. Parameters
+// are the obvious kind and Func.Params lists them. The second is the closure
+// environment: when HasClosureContext is set, ABIInternal delivers it in the
+// architecture's dedicated closure register (X26 on arm64, RDX on amd64) before
+// the first instruction runs, and the temporary marked ClosureContext receives
+// it. It is defined on entry exactly as a parameter is, and no instruction
+// assigns it -- but it is deliberately not in Params, because it is not an
+// argument. It consumes no argument register and no stack slot, and ABI
+// lowering assigns it apart from the parameter sequence (arm64/goabi.go builds
+// its spill group outside the parameter loop, and arm64/lower.go's
+// stabilizeClosureContext copies it out of the volatile register at entry).
+//
+// Seeding defined from Params alone therefore missed it, and every closure,
+// deferwrap, gowrap and methodvalue that reads a captured variable -- 4.2% of
+// the functions goc emits on an ordinary whole-program compile -- looked like a
+// use before definition. The IR was well formed; the verifier's model of entry
+// was one input short.
+//
+// The exemption is granted only where the function claims it. The flag and the
+// marked temporary must agree, and there must be exactly one such temporary, so
+// "no instruction assigns it" cannot become a way to smuggle a genuinely
+// undefined value past the use-before-definition check.
+func defineClosureContext(f *Func, defined []bool) error {
+	context := -1
+	for _, t := range f.Temps {
+		if t == nil || !t.ClosureContext {
+			continue
+		}
+		if context >= 0 {
+			return fmt.Errorf("ir: %s: %%%d and %%%d are both marked as the incoming closure context, and a function receives at most one",
+				f.Name, context, t.ID)
+		}
+		context = t.ID
+	}
+	if f.HasClosureContext && context < 0 {
+		return fmt.Errorf("ir: %s: HasClosureContext is set, but no temporary is marked as the incoming closure context",
+			f.Name)
+	}
+	if !f.HasClosureContext && context >= 0 {
+		return fmt.Errorf("ir: %s: %%%d is marked as the incoming closure context, but HasClosureContext is not set",
+			f.Name, context)
+	}
+	if context >= 0 && context < len(defined) {
+		defined[context] = true
+	}
+	return nil
 }
 
 // verifyPhiEdges checks that every phi's incoming blocks are exactly the block's

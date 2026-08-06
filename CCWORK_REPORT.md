@@ -2338,3 +2338,89 @@ One thing noticed and not changed: `crypto_signing_bench_baseline.txt` says the
 run takes "about eight minutes". Measured twice today on an idle box it is
 1m43s. The pre-flight's own message quotes the measured figure rather than the
 committed one.
+
+# The verifier's model of function entry was one input short
+
+Branch `ccwork/ir-verify-entry-blocks`, from `main` (`76069d9`).
+
+The build-cache design job found that 211 of 5083 functions (4.2%) fail
+`ir.Verify` on a normal whole-program compile, all of them closure, `deferwrap`
+and `methodvalue` entry blocks, and that `ir.DecodeModule` therefore cannot
+round-trip a goc module. This is that defect.
+
+**The verifier was wrong, not the IR.** The emitted code is unchanged; only the
+verifier and the audits changed.
+
+## What was violated
+
+`verifySSA`'s use-before-definition rule: *every temporary a use reads must have
+a definition somewhere*. It builds the set of already-defined temporaries by
+walking `f.Params`, and `f.Params` is not the whole of a function's entry.
+
+A function has two kinds of entry input. Parameters are the obvious kind. The
+second is the closure environment: when `Func.HasClosureContext` is set,
+ABIInternal delivers it in the architecture's dedicated closure register (X26 on
+arm64, RDX on amd64) before the first instruction runs, and the temporary marked
+`Temp.ClosureContext` receives it. It is defined on entry exactly as a parameter
+is, and no instruction assigns it.
+
+It is deliberately *not* in `f.Params`, because it is not an argument. It
+consumes no argument register and no stack slot, and ABI lowering treats it
+apart from the parameter sequence — `arm64/goabi.go` builds its spill group
+outside the parameter loop, and `arm64/lower.go`'s `stabilizeClosureContext`
+copies it out of the volatile register at entry precisely because it arrived
+there rather than through the argument assigner.
+
+So the verifier was right that nothing *in the body* defines it, and wrong that
+this made it undefined. Reading the closure environment is not a use before a
+definition; it is a read of the second entry input.
+
+## Reproduced, and it is one construction path
+
+`cmd/verifyprobe` (scratch, not committed) compiles a program, runs `ir.Verify`
+over every function, and for each failure asks whether the undefined temporary
+is the one marked `ClosureContext`.
+
+| | functions | fail `ir.Verify` | |
+|---|---:|---:|---|
+| `hello.go` | 2744 | **125 (4.56%)** | 115 closure, 4 `deferwrap`, 3 `gowrap`, 3 `methodvalue` |
+| `stdlib_http_client_server.go` | 14568 | **831 (5.70%)** | 446 closure, 310 `methodvalue`, 50 `deferwrap`, 25 `gowrap` |
+
+Every failure is the same message — `start: add reads %N, which nothing
+defines` — and in **831 of 831** and **125 of 125**, the undefined temporary is
+the `ClosureContext` temporary. Not one exception.
+
+The three named shapes are one construction path, as suspected:
+`(*gen).closureContext` at `goc/compile.go:14604`, with four callers — the
+func-literal closure (`compile.go:13723`), the range-over-func yield child
+(`:11106`), the `deferwrap`/`gowrap` wrapper (`:10530`) and the `methodvalue`
+wrapper (`:13295`). The `add` in every message is `g.offset(environment, 8*(i+1))`,
+the load of the *i*-th captured variable out of the environment. That is also
+why the count is lower than the number of such functions: on `hello.go` 169
+functions have a closure context and 125 fail, the other 44 being closures that
+capture nothing and so never read the environment.
+
+The survey found the invariants hold exactly, over all 2744 functions of
+`hello.go` and all 14568 of the http program, before and after `-O`:
+
+  - `HasClosureContext` set ⟺ exactly one temporary marked `ClosureContext`
+    (169 and 169; 1087 and 1087). No function has two, none has the flag
+    without the temporary, none the temporary without the flag.
+  - No `ClosureContext` temporary is ever assigned by an instruction (0).
+  - No `ClosureContext` temporary is ever also in `f.Params` (0).
+
+## The fix
+
+`ir/verify.go`: `defineClosureContext` seeds the closure-context temporary as
+defined on entry alongside the parameters, and the invariant is stated there in
+full for the next person.
+
+The exemption is granted only where the function claims it, so that "no
+instruction assigns it" cannot become a way to smuggle a genuinely undefined
+value past the check: the flag and the marked temporary must agree, and there
+must be exactly one. Those three disagreements are now diagnostics of their own.
+That also closes a hole in the inliner, which copies `Fixed` and `Reg` onto a
+cloned temporary but not `ClosureContext` (`opt/inline.go:872`) — a callee
+carrying the temporary without the flag would have been cloned into a caller as
+an ordinary undefined value, and is now rejected at the source.
+
