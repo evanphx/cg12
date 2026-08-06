@@ -2936,3 +2936,27 @@ repetitions, against a recorded 3-in-53 fault); and anything timing, ever.
 4. **The 83-entry sequential list is over-broad on purpose.** Someone who
    isolates (1) can shrink it, and 350 s of the corpus's critical path is the
    prize.
+
+## 16. Final state
+
+`make verify-fast` re-run on the committed tree, after every edit:
+
+    [verify] verify-fast PASS in 236s (3m56s)     exit 0     cpu 2874%
+
+Reproducing the 3m58s of §8 to within two seconds. Three commits on
+`ccwork/verification-turnaround` off `main` (76069d9); working tree clean.
+
+**THE ANSWER, in one line each:**
+
+* **Safe parallelism: 32**, and it is now the Makefile's default
+  (`min(nproc, MemAvailable/4 GiB, 32)`), not something a caller passes. It stops
+  at 32 because the critical path became a single 144 s test and the sequential
+  set, not because memory ran out — peak RSS at 32 is 29.8 GiB of 243, **12%**.
+* **Corpus suite: 18:57 → 8:15** in one process, **→ 3:44** split across four.
+* **Full gate, the same four items the old recipe ran: 45:57 → ~5:44** with a
+  warm control (the control itself: 1484 s → 0.96 s). `make verify-full`, which
+  covers strictly more, is 56:05 cold / 31:21 warm.
+* **`make verify-fast`: 3:56–3:58.** It cannot see three of every four
+  capabilities on either arm, either determinism sweep, `test-ruby`,
+  `test-goc-cmd`, the coverage report, any comparison against `main`, a rare
+  intermittent fault, or anything timing.
