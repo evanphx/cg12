@@ -361,8 +361,10 @@ either.
 
 **Positions propagate, and they propagate further than the code does.** The
 control changed no semantics at all, yet 4 pre-optimisation functions differ —
-`alignUp`, `alignDown`, `bool2int`, `divRoundUp`, i.e. everything below the
-insertion point in that file, because `ir.SrcPos` line numbers shifted — and
+`alignUp`, `alignDown`, `bool2int`, `divRoundUp`. That is precisely every
+function with a Go body below the insertion point in `stubs.go`; the other 15
+declarations down there are assembly-implemented and have no body to shift.
+They differ because `ir.SrcPos` line numbers moved — and
 after inlining that reaches 47 functions. So a content-addressed key over goc
 IR is line-shift-sensitive by construction, since positions are in the IR and
 have to be. gc has the identical property, which is why the §1.4 probe used a
@@ -628,7 +630,7 @@ alone.
 
 **Keep packs as the primary mechanism. Do not replace them with gc's
 per-package model — it does not transfer. Build Option B specifically to attack
-the pack's floor, and fix the two defects packs already have.**
+the pack's floor, and give the pack cache the eviction it has never had.**
 
 The evidence for not transferring gc's model is arithmetic. In gc, a package's
 cacheable stage ends with codegen for that package, so a cache hit skips
@@ -678,10 +680,13 @@ package rather than the reachable ones, which makes filling the cache slower
 than the compile it accelerates; and a new class of failure — a wrongly-keyed
 unit is a miscompiled program, not a slow build. The recursive dependency
 content hash of §3.2 clause 4 and the fingerprint of §3.3 are what keep that
-class closed, and they are not optional. If only one thing is built from this
-document, build item 3; if only two, build items 1 and 2, because they are
-prerequisites for everything and the first is a real defect in the tree today
-regardless of caching.
+class closed, and they are not optional.
+
+If only one thing is built from this document, build item 3: it is fifty lines,
+it needs none of the rest, and unbounded pack-cache growth is costing disk on
+every machine that compiles goc today. Item 1 is worth doing on its own merits
+too — 4.2% of the functions goc emits fail its own IR verifier, and that is a
+defect in the tree whether or not anything is ever cached.
 
 ---
 
