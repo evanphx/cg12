@@ -4241,3 +4241,77 @@ output to a monolithic build of the same source** under the `compose` default:
 in every case. (The same set passed under the `ir` arm earlier, before it was
 demoted.) The executables themselves differ from the monolithic ones, for the
 reason set out under byte-identity above: a pack image is two Go modules.
+
+### Guards, and what was checked
+
+| guard | result |
+|---|---|
+| `make bench-perf` with auto-packing ON | **PASS**, 42/42 rows within tolerance, 653 s, noise gate silent |
+| representative programs compile and run | **14/14**, identical stdout and exit status to a monolithic build |
+| byte-identity against monolithic | **explained, not achieved** at image level; program-package code is exact (11/11 by disassembly, and a new test pins it on post-optimisation IR) |
+| `TestIRVerifyAudit` | **PASS** -- 1 559 314 function verifications across 406 programs, all clean, 186 s |
+| `TestModuleRoundTripsThroughTheBinaryFormat` | **PASS**, both subtests |
+| pack integration tests (`cmd/goc`) | **PASS** -- including `TestACachedCompileIsTheSameImageAsAColdOne` and `TestEveryChangeThatWouldMakeAPackWrongProducesAMiss` with the new `GOC_PACK_MODE` arm |
+| `internal/runtimepack` | **PASS**, including four new tests for the IR member |
+
+Not run, because a gate owns them: the corpus suite, the capability matrix,
+`make test-unit`, the four audits, the census, determinism sweeps, the crash
+loops.
+
+### One thing probed and found not to be a defect
+
+The pack's object defines
+`main_main_gointernal_funcvalue_main_main_func___func_<hash>` -- a pack root is
+itself `package main` with `func main() {}`, so it generates the same func-value
+wrapper name any program does -- and the program subtracts its own copy in favour
+of it. That looks like two different functions colliding on one symbol, and the
+obvious hazard is a program whose `g := main; g()` reaches the pack root's empty
+`main`.
+
+It does not. The wrapper's body is `bl main_main` against a symbol the pack
+deliberately leaves undefined, so the system linker resolves it to the program's
+own `main`; the thunk is genuinely shared and the subtraction is right. Checked
+both ways: the disassembly is identical in the two images, and a program that
+calls itself through a func value prints the same thing under monolithic,
+`object` and `compose`. Recorded because the name looks alarming and the next
+person will wonder.
+
+## What this adds up to
+
+**The framing in the brief does not survive contact with goc's front end, and the
+fix turns out to be smaller and cheaper than an IR pack.** Three findings, in the
+order they matter:
+
+1. **A pack carrying IR cannot save goc's front end.** goc lowers a whole program
+   at once, and `funcDecl` fills go/types-keyed state that four whole-program
+   steps consume afterwards. The program build re-derives every function the pack
+   holds whatever the pack carries. This is the load-bearing negative result and
+   it is in the code, not in a measurement.
+
+2. **Restoring code quality does not need pack IR at all.** It needs the
+   subtraction to happen after the optimiser instead of before, which is a
+   twenty-line change to where `finishProgramModule` is called plus one new step
+   (`markProgramSymbolExports`) to keep the pack's callees alive across a boundary
+   the optimiser can only see through in one direction. `bench-perf` passes,
+   `main_dotProduct` is back to 0x40 and 72 instructions, and every function in
+   the program's own package is byte-for-byte what a monolithic build emits.
+
+3. **Carrying IR does buy something, and it is not worth what it costs.** The
+   `ir` arm is implemented, keyed, digested and measured: 23% off the composed
+   compile (15.2 s → 11.7 s) for 35 MB of extra pack. It pays for that by making
+   the inliner splice post-pipeline bodies, which reads +6.1% on `text/parse` --
+   past its tolerance, and worse than the object pack it replaces. It stays as a
+   named arm with the measurement next to it, and it is not the default.
+
+**The decision this leaves to a person.** Under `compose` a pack is worth 7% off
+a monolithic build (16.4 s → 15.2 s), not 3.2x, and its first use costs 1.9x an
+uncached compile. That is a thin case for 20 MB per import list and an eviction
+policy to maintain. The three honest options are: keep packs at `compose` and
+accept that they are now a small win; keep `object` and accept an 8-39% runtime
+cost on six workloads; or attack the optimiser directly, since the whole of the
+gap is that `opt.OptimizeModule` costs ~10 s on a 5083-function module and 0.19 s
+on a 600-function one. BUILD_CACHE.md §3.4's Option C -- memoising the
+whole-module stage per function on its inline-dependency set -- is the only idea
+on the table that could give back both, and it was explicitly costed there as
+worth building *only if packs are given up*. Composing is what gives them up, in
+everything but name.
