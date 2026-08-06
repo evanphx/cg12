@@ -147,6 +147,9 @@ func InlineIntoNoSplitCallersReporting(m *ir.Module) (*NoSplitInlineReport, bool
 		if err != nil {
 			continue
 		}
+		if activeDeps != nil {
+			activeDeps.noSplitMeasured[caller] = true
+		}
 		if !inlineInto(caller, graph, components, sites, base) {
 			continue
 		}

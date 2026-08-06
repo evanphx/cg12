@@ -234,6 +234,9 @@ func selectCostInline(m *ir.Module, cg *callGraph, scc *sccInfo) {
 				continue
 			}
 			cd.callee.CostInline = true
+			if activeDeps != nil {
+				activeDeps.costInlineSelected[cd.callee] = true
+			}
 			budget -= grow
 			if dump {
 				fmt.Fprintf(os.Stderr, "COSTINLINE %-38s size=%-4d sites=%-3d into=%s\n",
@@ -254,6 +257,11 @@ func inlineModule(m *ir.Module, base map[*ir.Func]int, costDone *bool, moved fun
 		*costDone = true
 	}
 	sites := callSiteCounts(m, cg.byName)
+	if activeDeps != nil && len(activeDeps.siteCounts) == 0 {
+		for f, n := range sites {
+			activeDeps.siteCounts[f] = n
+		}
+	}
 	changed := false
 	for _, f := range scc.order {
 		if f.Start == nil || hasSecondaryEntry(f) {
@@ -682,12 +690,21 @@ func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.F
 
 // directCallee returns the module function a call names directly, or nil for an
 // indirect or external call.
+//
+// It is also the inliner's single choke point for reading another function, and
+// so the place [InlineDeps] records from: every decision the interprocedural
+// passes make about a call site starts by resolving it here, and nothing in the
+// module is read across the function boundary without going through it.
 func directCallee(caller *ir.Func, call *ir.Instr, byName map[string]*ir.Func) *ir.Func {
 	c := call.Arg(0)
 	if c.Kind != ir.RefConst || caller.Consts[c.ID].Kind != ir.ConstSym {
 		return nil
 	}
-	return byName[caller.Consts[c.ID].Sym]
+	callee := byName[caller.Consts[c.ID].Sym]
+	if activeDeps != nil {
+		activeDeps.noteConsulted(caller, callee)
+	}
+	return callee
 }
 
 func canInlineCall(caller *ir.Func, call *ir.Instr, callee *ir.Func) bool {
@@ -827,6 +844,9 @@ func worthInlining(callee *ir.Func, sites int) bool {
 // (UnrollRecursion) can tell how deep it has gone and stop. For a non-recursive
 // callee nothing is stamped and depth is ignored.
 func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *callGraph, scc *sccInfo, depth int) {
+	if activeDeps != nil {
+		activeDeps.noteSpliced(caller, callee)
+	}
 	call := b.Instrs[idx]
 	args := call.Args[1:]
 	results := []ir.Ref{call.To}
