@@ -3537,3 +3537,37 @@ between runs on `main` alone — three runs gave `slice-tail-pointer`,
 `promoted-local-root`, `slice-tail-pointer` — so the branch naming a different
 one than a given `main` run is map iteration order, not a different failure.
 Pre-existing, unrelated to all three branches.
+
+## 6. The nosplit budget under branch 1's re-enabled inlining
+
+**It still rejects a constructed overflow.** `goc/nosplitbudget_test.go`, all
+five, on the merged tree:
+
+    TestNoSplitBudgetRejectsAnOverflowingChain                PASS  7.38s
+    TestNoSplitBudgetAcceptsAChainThatFits                    PASS  7.05s
+    TestNoSplitBudgetProducesNoObject                         PASS  6.80s
+    TestNoSplitBudgetAcceptsACorpusProgram                    PASS  7.01s
+    TestNoSplitBudgetErrorNamesTheAllocatorChainWhenItIsForced PASS  6.62s
+
+**How much more inlining there now is.** `GOC_DEBUG_NOSPLIT=inline`, `goc -O`
+on `goc/testdata/hello.go`, both compilers driven `GOC_AUTOPACK=0
+CG12_NOCACHE=1` so both are the whole-program compile and the comparison is
+like for like:
+
+| | accepted | rejected after measuring | no headroom at all |
+|---|---:|---:|---:|
+| `main` | 99 | 4 | 203 |
+| `integration/cache-wave` | **160** | 5 | 124 |
+
+**99 → 160 nosplit callers receive inlining, +62%.** The "no headroom" column
+falls 203 → 124 in step: a caller whose callees could not be measured had no
+measured allowance to spend, and 86 of the 465 measurement attempts on this
+program were the ones failing.
+
+`.text` on the two executables is 1,541,284 → 1,549,348, **+8,064 bytes**, which
+is exactly the figure branch 1 reported. Independently reproduced here from two
+separately built compilers.
+
+And the 1638-configuration sweep above is the wider statement: with all of that
+extra inlining, **no configuration was rejected by the budget and no recorded
+chain grew by one byte**.
