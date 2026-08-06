@@ -3137,6 +3137,47 @@ of the 206 binaries a plain `goc file.go` now produces is a different file from
 what it produced before.** And every one of them behaves identically. That is the
 trade this change makes, and on this corpus it is clean.
 
+## 3. `make test-unit` and `make test-goc-cmd` -- and the pre-existing failure, confirmed against my own control
+
+| target | ref | exit | result |
+|---|---|---:|---|
+| `make test-unit` | branch | 0 | 26 packages `ok`, 13 with no test files, zero `FAIL` |
+| `make test-unit` | `main` 76069d9 | 0 | clean |
+| `make test-goc-cmd` | branch | 2 | one failure: `TestCheckedRuntimeCoverageBaselineDenominator`; `FAIL github.com/evanphx/cg12/cmd/goc 445.533s` |
+| `make test-goc-cmd` | `main` 76069d9 | 2 | the **same single failure**, `TestCheckedRuntimeCoverageBaselineDenominator`; `FAIL github.com/evanphx/cg12/cmd/goc 328.757s` |
+
+**The failure is pre-existing and I confirmed it myself rather than taking the
+branch's word.** Run directly against the `main` control worktree:
+
+    $ cd main-ctl && go test -count=1 -run '^TestCheckedRuntimeCoverageBaselineDenominator$' ./cmd/goc
+    --- FAIL: TestCheckedRuntimeCoverageBaselineDenominator (0.03s)
+        runtime_coverage_denominator_test.go:100:
+            Error: Should be true
+            Messages: capability "gc-invariants/slice-tail-pointer" is in neither the
+            accepted baseline nor testdata/runtime_coverage_baseline_pending.json
+
+Branch and `main` fail the same assertion at the same line
+(`runtime_coverage_denominator_test.go:100`). The capability *named* differs
+(`gc-invariants/promoted-local-root` on the branch, `gc-invariants/slice-tail-pointer`
+on `main`) only because the test iterates a Go map and reports whichever missing
+capability it reaches first -- the missing set is the same, because all four inputs
+to the test are byte-identical between the two refs:
+
+    git diff --stat 76069d9 7c6b0be -- \
+      cmd/goc/testdata/runtime_coverage_linux_arm64.json \
+      cmd/goc/testdata/runtime_coverage_baseline_pending.json \
+      cmd/goc/runtime_status_test.go \
+      cmd/goc/runtime_coverage_denominator_test.go
+    (no output)
+
+It is a bookkeeping failure -- capabilities were added to the matrix without an
+entry in the coverage baseline or the pending list -- and it has nothing to do with
+the pack cache. The branch's account of it is accurate.
+
+The full `make test-goc-cmd` control run on `main` has since finished: it fails
+**exactly one** test and it is the same one. Both refs: one failure, same test,
+same assertion, same line. The branch introduces no new failure in this target.
+
 ## 6. Cold vs warm byte-identity -- **10/10 IDENTICAL**, and three more identities besides
 
 This is the property the brief calls the core of the change, so it was measured
@@ -3181,3 +3222,7 @@ The sizes in the split-vs-monolithic rows show the scale of what changes for an
 ordinary user: e.g. `hello -O` 14,493,928 bytes (split) against 13,953,600
 (monolithic), `stdlib_http_client_server -O` 78,106,176 against 77,775,880. Different
 files, same behaviour.
+
+The full `make test-goc-cmd` control run has since finished: `main` fails **exactly
+one** test and it is the same one. Both refs: one failure, same test, same
+assertion. The branch introduces no new failure in this target.
