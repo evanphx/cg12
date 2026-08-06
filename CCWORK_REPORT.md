@@ -4747,3 +4747,382 @@ and the rest is the live-set closure, which is where stage 1's arithmetic was
 wrong — its 96.2% work-hit rate assumed recomputing the splice closure, and the
 splice closure **does not emit the same bytes**. The sound closure gives 67–71%,
 which is why an edit saves 19–27% and not 45%.
+
+---
+
+# Gate: `integration/optionc` (c114580) — independent verification
+
+Branch under test: `integration/optionc` = `c11458068c6b9946add72e6309a0b919e383589e`,
+three real changes merged onto `main` `21ca7b3841fdb087223abb06e9c91b66e0cd8c8d`.
+Gate branch: `ccwork/optionc-gate`.
+
+Host: aarch64 Linux, 64 cores, 250 GiB total / 243 GiB available, go1.26.1,
+cc 13.3.0 (Ubuntu), kernel 6.8.0-60-generic. Machine exclusive to this job.
+
+Diagnose-only brief: nothing in the compiler was fixed or refactored by this
+gate. The only tree changes are regenerated baselines and this report.
+
+**Status: IN PROGRESS — items are written here as they finish. Anything not
+recorded below did not finish and must be read as UNVERIFIED.**
+
+## Item 0 — build
+
+`go build ./...` clean (3.2 s).
+
+## FINDING 1 (integration defect, merge blocker) — `TestEveryTestIsParallelOrListedAsSequential` fails on the merge
+
+`make verify-full`'s `corpus-parallel` item fails, exit 1, 272 s:
+
+```
+--- FAIL: TestEveryTestIsParallelOrListedAsSequential (0.06s)
+    parallelpolicy_test.go:79: TestIRVerifyAudit (irverifyaudit_test.go): does not call t.Parallel
+        as its first statement, and sequential_tests.txt does not list it.
+    parallelpolicy_test.go:79: TestModuleRoundTripsThroughTheBinaryFormat (irverifyaudit_test.go):
+        does not call t.Parallel as its first statement, and sequential_tests.txt does not list it.
+FAIL	github.com/evanphx/cg12/goc	269.195s
+```
+
+**Diagnosis — a semantic merge conflict, not a defect in either side.**
+`ccwork/ir-verify-entry-blocks` was cut from `76069d9`, and
+`goc/parallelpolicy_test.go` / `goc/sequential_tests.txt` do not exist at that
+commit (`git cat-file -e 76069d9:goc/parallelpolicy_test.go` → absent). They
+landed on `main` later (`142e907`). So the branch added two new tests in
+`goc/irverifyaudit_test.go` under a policy that did not yet exist, the textual
+merge is clean, and the merged tree violates a rule neither parent violated.
+
+**Blast radius.** Every entry point that runs the `goc` package fails:
+`go test ./goc/...`, `make test-goc-corpus`, `make verify-fast`, `make verify-full`.
+It is a policy assertion, not a compiler-behaviour assertion — no emitted code
+is implicated — and the other three corpus shards, which carry the four audits,
+passed. But as merged, the tree is red.
+
+**Not repaired here** (diagnose-only brief). The fix is one of: add
+`t.Parallel()` as the first statement of both tests, or list both names in
+`goc/sequential_tests.txt` with a reason tag. `TestIRVerifyAudit` calls
+`auditCorpus`, the shared `sync.Once` corpus compile that the four audits use
+and that `sequential_tests.txt` already lists the other users of, so the
+sequential list is the likely correct side.
+
+## FINDING 2 (pre-existing, to be confirmed against a `main` control) — `TestCheckedRuntimeCoverageBaselineDenominator`
+
+`make verify-full`'s `goc-cmd` item fails, exit 1, 367 s, on exactly one test —
+the one the brief names as known-failing on `main`:
+
+```
+--- FAIL: TestCheckedRuntimeCoverageBaselineDenominator (0.03s)
+    capability "gc-invariants/slice-tail-pointer" is in neither the accepted baseline nor
+    testdata/runtime_coverage_baseline_pending.json; record why the baseline does not cover it,
+    or rerun and accept a new baseline
+FAIL	github.com/evanphx/cg12/cmd/goc	365.901s
+```
+
+One `--- FAIL` in the whole package (`grep -c '^--- FAIL'` = 1). A `main`
+control for this exact test is recorded below.
+
+## THE PROPERTY THAT MATTERS MOST — memoised output vs unmemoised, 16 programs, 5 arms each
+
+Harness: `$TMPDIR/gate/memoident.sh`, driving `cmd/memoc` (the branch's own
+control-arm driver: `-no-memo` runs the identical code path with the store
+ignored). Default `-closure read`, which is the sound closure and memoc's
+default. Five arms per program:
+
+| arm | what it is |
+|---|---|
+| `control` | `-no-memo`, no store — the reference |
+| `cold` | `-memo M` with `M` absent: every function a miss, store written |
+| `warm` | `-memo M` from the cold run: every function a hit |
+| `e-ctl` | `-no-memo` on an **edited** source — the reference for the edit |
+| `e-memo` | `-memo M'`, `M'` the **stale** store from the unedited source |
+
+The edit is a root edit applied mechanically to every program: a new
+package-level `var gateSink int`, a new `func gateNoise(n int)` that writes it,
+and a call to it inserted as the first statement of `main`. That is the case
+`memo/memo.go`'s doc comment names as the risky one — a *missed* function
+reading *frozen* ones, plus a function that is not in the memo at all — and the
+harness asserts the edited object actually differs from the unedited one, so a
+scenario cannot pass by being inert.
+
+**Result: 16 of 16 programs, object bytes identical across all five arms. No
+difference of any kind, in any arm, on any program.** 80 `memoc` compiles.
+
+| program | funcs | warm hits/misses | edit hits/misses | verdict |
+|---|---:|---|---|---|
+| `hello.go` | 2744 | 2744 / 0 | 1218 / 3 | identical |
+| `gc_struct.go` | 2748 | 2748 / 0 | 1215 / 3 | identical |
+| `runtime_closure_captures_roots_gc.go` | 2748 | 2748 / 0 | 1193 / 3 | identical |
+| `interface_slice_equality.go` | 2743 | 2743 / 0 | 1214 / 3 | identical |
+| `runtime_goroutine_channel.go` | 2745 | 2745 / 0 | 1218 / 4 | identical |
+| `nested_defer.go` | 2747 | 2747 / 0 | 1220 / 4 | identical |
+| `runtime_lock_osthread.go` | 2747 | 2747 / 0 | 1218 / 4 | identical |
+| `runtime_gc_type_mask_padding.go` | 2752 | 2752 / 0 | 1216 / 4 | identical |
+| `runtime_cleanup_frame_retention.go` | 3212 | 3212 / 0 | 1646 / 3 | identical |
+| `reflect_makefunc.go` | 3710 | 3710 / 0 | 2072 / 4 | identical |
+| `fmt_sprintf.go` (the branch's "small") | 5083 | 5083 / 0 | 3243 / 3 | identical |
+| `allocation_counts.go` | 5214 | 5214 / 0 | 3572 / 12 | identical |
+| `placement_bench/flate/main.go` | 5458 | 5458 / 0 | 3530 / 5 | identical |
+| `runtime_defer_capture_allocs.go` | 5951 | 5951 / 0 | 3762 / **52** | identical |
+| `stdlib_http_cookiejar.go` | 13944 | 13944 / 0 | 9547 / **36** | identical |
+| `stdlib_http_tls_client_server.go` (the branch's "http") | 14901 | 14901 / 0 | 10464 / **37** | identical |
+
+Fourteen programs the branch did not test, including two the tree has history
+with: `runtime_defer_capture_allocs.go` (RUNTIME_PLAN 5.10's 25-images-in-30-compiles
+program) and `stdlib_http_cookiejar.go` at 13 944 functions.
+
+### Caveat on the branch's wording: "translated assembly" is a much weaker half of that claim than it sounds
+
+The branch reports "object **and translated assembly** identical". The assembly
+`memoc` writes is `arm64.WriteObjectAndAssembly`'s second return, which is
+`bundle.source` — *the GNU assembly translated from the module's hand-written
+Plan 9 sources*, not the compiler's generated code. Measured here: it is the
+same 157 015-byte, 7283-line blob for `hello.go`, `gc_struct.go`,
+`runtime_closure_captures_roots_gc.go`, `interface_slice_equality.go`,
+`nested_defer.go`, `runtime_lock_osthread.go`, `runtime_goroutine_channel.go`
+and `runtime_gc_type_mask_padding.go` — eight different programs, one digest
+(`ae07e2c363f06b2a`) — and it is identical between the edited and unedited
+sources of every program. It varies only with which Plan 9 assembly files the
+module pulled in (five distinct digests over the 16 programs).
+
+So that half of the claim detects a change in the *set of runtime assembly files
+included* and nothing else. It is not wrong, it is nearly empty. **The object
+comparison is the load-bearing one**, and it passes on all 16 programs. Stated
+here so nobody reads "assembly identical" as "generated code compared twice".
+
+## SECOND PROPERTY — one commit, two checkout paths, byte-identical image
+
+Harness: `$TMPDIR/gate/twopath.sh`. Two `git worktree`s of `c114580` at paths of
+different length (53 and 104 characters), `cmd/goc` built *inside each* so
+`goc.StdlibRoot` (which comes from `runtime.Caller(0)`) points at that
+worktree's own `stdlib/`. The two compiler binaries do differ, as they must —
+`A=2dc77a9f94e3da48`, `B=ee51f9c2f74a3af4` — which is what makes the emitted
+images a real comparison rather than a tautology.
+
+**Six programs × two arms = 12 comparisons, 12 IDENTICAL, exit 0.**
+
+| program | no `-O` | `-O` |
+|---|---|---|
+| `hello.go` | `aa4fdf3335aa067c` | `1b62c3a50fb185b7` |
+| `fmt_sprintf.go` | `1789d833c509426f` | `a4bf61a51728a3c5` |
+| `gc_struct.go` | `74e0bddf6bf31ce5` | `d5e926456bac58e2` |
+| `runtime_defer_capture_allocs.go` | `bc789eae160ea117` | `ca3a0e49b7bb240a` |
+| `reflect_makefunc.go` | `87ef2cde3323ed77` | `8abbd3d97765658d` |
+| `stdlib_http_tls_client_server.go` | `a26650ad4c1f3677` | `42334b38212b7581` |
+
+Every digest above is the *same* value from both checkouts. The `main` control
+for the same experiment is below.
+
+### `main` control for the same experiment — 8 of 8 DIFFERENT
+
+Same harness, `REF=main` (`21ca7b3`), two worktrees at 58 and 109 characters:
+
+```
+goc/testdata/hello.go                          none DIFFERENT 567149451450e7c3 / 1aaddf7ad6269e69
+goc/testdata/hello.go                          -O   DIFFERENT 60bfbfb21916c32c / a7968d4e81141e2d
+goc/testdata/fmt_sprintf.go                    none DIFFERENT dd72ba928f2264d7 / 5b34540aeac2d451
+goc/testdata/fmt_sprintf.go                    -O   DIFFERENT 7a921cce9e3a2b9b / 7e0dc1030e32262e
+goc/testdata/gc_struct.go                      none DIFFERENT 36745d23cfe93709 / 374aade320f2f751
+goc/testdata/gc_struct.go                      -O   DIFFERENT 9fd65558ddd8ee7a / 1288874ef937bf56
+goc/testdata/stdlib_http_tls_client_server.go  none DIFFERENT e06547c3e9d722aa / 83018d3032365c25
+goc/testdata/stdlib_http_tls_client_server.go  -O   DIFFERENT 9159074b4629767c / bb355641548bb2f1
+```
+
+So the property is **newly true**, and by a wide margin: on `main` every one of
+the eight comparisons differs, on the merge every one of the twelve agrees. The
+`-trimpath` work (`goc/trimpath.go`, plus `positionKey` for the three symbol
+families named from a source position) is what moved it, and it is the first
+time in this tree that two checkouts of one commit produce the same image.
+
+## Item 1 — `make verify-full` (the whole tier, plus its `main` controls)
+
+Ran `make verify-full`. **Verdict: FAIL in 2934 s (48 m 54 s), 2 items of 24
+failed** — the two findings above, and nothing else.
+
+| item | seconds | result |
+|---|---:|---|
+| build | 0 | PASS |
+| vet | 3 | PASS |
+| gofmt | 0 | PASS |
+| unit | 13 | PASS |
+| corpus-parallel | 272 | **FAIL** (Finding 1) |
+| corpus-sequential-0 (carries the four audits) | 240 | PASS |
+| corpus-sequential-1 | 109 | PASS |
+| corpus-sequential-2 | 114 | PASS |
+| goc-cmd | 367 | **FAIL** (Finding 2) |
+| ruby | 47 | PASS |
+| matrix-default-0..3 | 84 / 78 / 42 / 49 | PASS |
+| matrix-opt-0..3 | 144 / 137 / 129 / 45 | PASS |
+| determinism (406 programs × 4 rounds) | 427 | PASS |
+| determinism-opt (406 × 4, the arm the branch changes) | 902 | PASS |
+| reducers (full counts) | 109 | PASS |
+| control-corpus (`go test ./goc/...` on `main`) | 533 | **PASS** |
+| control-matrix-default (`main`) | 162 | PASS |
+| control-matrix-opt (`main`) | 203 | PASS |
+
+The controls were measured cold — the cached entry on this box was under a
+different key (a different `main`), so nothing was reused.
+
+**`control-corpus` passing is the attribution for Finding 1.** `go test ./goc/...`
+is green on `main` (`21ca7b3`) and red on the merge, on the same box, in the
+same run. The corpus failure is introduced by the merge and is not a
+pre-existing condition.
+
+### Capability matrix — 368/368 on each arm, pass sets identical to `main`
+
+Counted from the `-v` logs, four shards per arm:
+
+| arm | subtests PASS | subtests FAIL |
+|---|---:|---:|
+| default (shards 0–3: 92+92+92+92) | **368** | **0** |
+| `-O` (shards 0–3: 92+92+92+92) | **368** | **0** |
+| `main` control, default | 368 | 0 |
+| `main` control, `-O` | 368 | 0 |
+
+The branch's 368-name pass set was diffed against the `main` control's, on both
+arms: **`diff` empty on both**. One `EXPECTED FAILURE` marker on the default arm
+in both trees (shard 3 on the branch; the unsharded control), so that population
+is unmoved too.
+
+### Determinism (item 4, first half)
+
+`scripts/determinism-check.sh -corpus` (406 programs × 4 rounds) and the same
+with `-O` both PASS inside `verify-full`, 427 s and 902 s. That is the tree's
+only measurement that drives every corpus program to a written object and
+compares bytes, and it is green on both arms.
+
+### Reducers at full counts (item 5, branch arm)
+
+`scripts/reducers.sh full` PASS in 109 s — the gate counts, which are
+`runtime_gc_type_mask_padding` 20× at `GOGC=100` and 20× at `GOGC=10`,
+`flate` 250× at each of `GOGC=100` and `GOGC=10`, `p256` 100× at `GOGC=10`,
+`runtime_lock_osthread` 400×. A `main` control of the same script is below.
+
+## Item — baselines regenerated from the merged tree
+
+Every one regenerated in place from `c114580` (never by picking a side), in
+dependency order — the census first, because the two GC differentials read it.
+
+| baseline | command | wall | file changed? |
+|---|---|---:|---|
+| `alloc_census_baseline.txt` | `-run TestAllocationCensus -update-alloc-census-baseline` | 95 s | **no** |
+| `frame_escape_baseline.txt` | `-run TestFrameEscapeAudit -update-frame-escape-baseline` | 96 s | **no** |
+| `loop_alias_baseline.txt` | `-run TestLoopAliasAudit -update-loop-alias-baseline` | 95 s | **no** |
+| `escape_shadow_baseline.txt` | `-run TestEscapeShadowPlacement -update-escape-shadow-baseline` | 107 s | **no** |
+| `escape_gc_differential.txt` | `-run TestEscapeDifferentialAgainstGC -escape-gc-differential -update-…` | 11 s | **no** |
+| `escape_gc_reason_differential.txt` | `-run TestEscapeReasonDifferentialAgainstGC -escape-gc-reason-differential -update-…` | 197 s | **no** |
+| `slog_allocations_baseline.txt` | `-run TestSlogAllocationsAgainstGC -slog-allocations -update-slog-allocations` | 13 s | **no** |
+
+Each ran to `exit 0` and each log ends `baseline rewritten; rerun without …`, and
+every file's mtime moved (19:30:04 … 19:38:45) — so these were *written* and then
+found byte-identical, not skipped. `git status` after all seven: clean except
+this report.
+
+**What moved, and why nothing did.** The brief expected movement because two of
+the three changes move emitted code. It does not appear here, and that is the
+correct answer rather than a suspicious one:
+
+* Six of the seven come from a corpus pass that stops at IR and escape analysis —
+  before `opt`'s whole-module stage and before the back end. Branch 1's real
+  effect is that `opt.InlineIntoNoSplitCallers` can now clone closures, which is
+  a whole-module pass *after* that stopping point. Branch 3's two round-trip
+  fixes (`StackPointerWords`, inline provenance) are exercised by encode/decode,
+  which the audit path does not do. So these six are invariant *by construction*,
+  and the brief is right that their invariance is not evidence about emitted code.
+* The seventh, `slog_allocations_baseline.txt`, does see the back end. It counts
+  mallocs per operation over 32 cases; a 208-byte `.text` move and a handful of
+  newly-inlinable closures do not change how many times a case allocates. Its
+  invariance is a (weak) positive signal and not a construction.
+* The one instrument in this set that both sees the back end *and* is directly
+  downstream of branch 1's change is the nosplit debt register — reported
+  separately below.
+
+For the record, the census baseline the branch itself regenerated (11 lines,
+type-symbol column only, `65f7e89`) reproduces exactly here: the trimmed symbol
+names are stable across this checkout too, which is the same property the
+two-checkout-path test measures from the other side.
+
+### Nosplit debt register — regenerated, unchanged
+
+`scripts/nosplit-debt-regen.sh -update -j 32`, exit 0 in 566 s (the three-arm
+sweep: `pack` per capability-matrix pack root with and without `-O`, `whole` for
+every corpus program with no prebuilt runtime, `split` for every program against
+the prebuilt packs — roughly 1600 compiles). **`arm64/nosplit_debt.go` is
+byte-identical to what is committed.**
+
+This is the interesting one, because it is the single instrument in the set that
+is both downstream of the back end *and* directly downstream of branch 1: the
+whole point of the `ir.Verify` fix is that `opt.InlineIntoNoSplitCallers` can now
+clone and measure closures it silently declined before, and the debt register is
+the record of which nosplit chains exceed the reserve. Newly-enabled inlining
+into nosplit callers did **not** move any chain past the reserve, and did not
+retire any recorded chain either. `git status` after all eight regenerations:
+clean except this report.
+
+## Item 2 — `make test-unit`, `make test-goc-cmd`, with `main` controls
+
+| run | tree | exit | wall |
+|---|---|---:|---:|
+| `make test-unit` | branch | **0** | 12 s |
+| `make test-unit` | `main` control | 0 | 12 s |
+| `make test-goc-cmd` | branch | **2** (`make` wrapping `go test`'s 1) | 469 s |
+
+`test-goc-cmd`'s only failure is `TestCheckedRuntimeCoverageBaselineDenominator`
+— one `--- FAIL` in the package, same message as inside `verify-full`.
+
+**Controls, run directly on both trees, same box, same minute:**
+
+| test | `main` (`21ca7b3`) | merge (`c114580`) |
+|---|---|---|
+| `TestCheckedRuntimeCoverageBaselineDenominator` | **FAIL** (exit 1) | **FAIL** (exit 1) |
+| `TestEveryTestIsParallelOrListedAsSequential` | **PASS** | **FAIL** (exit 1) |
+
+So Finding 2 is confirmed **pre-existing on `main`** — identical message,
+capability `gc-invariants/slice-tail-pointer` missing from both the accepted
+baseline and the pending list — and is not attributable to this merge. Finding 1
+is confirmed **introduced by this merge**.
+
+## Item 3 — the four audits, `TestIRVerifyAudit`, and the census twice
+
+All in check mode against the baselines regenerated above (which are the
+committed ones).
+
+| run | result | wall |
+|---|---|---:|
+| `make verify-audits` (`TestAllocationCensus`, `TestFrameEscapeAudit`, `TestLoopAliasAudit`, `TestEscapeShadowPlacement`) | **all 4 PASS**, `ok github.com/evanphx/cg12/goc 83.941s` | 85 s |
+| `TestIRVerifyAudit` | **PASS** — `1 559 314 function verifications across 406 programs, all clean` | 84 s |
+| `TestAllocationCensus`, run 1 | PASS (82.95 s) | 85 s |
+| `TestAllocationCensus`, run 2 | PASS (82.48 s) | 84 s |
+
+**Census twice: the two `-v` logs are identical once wall-clock numbers are
+stripped.** No run-to-run drift.
+
+`TestIRVerifyAudit` is the test the `optionc-stage2` report said "does not exist
+in this tree" — it exists in the merge, it runs, and its number is the direct
+measurement of what branch 1 fixed: 1 559 314 verifications over the whole
+corpus, zero failures, where the same walk on `main` would reject roughly 4–6% of
+functions. (It is also the test whose two names trip Finding 1.)
+
+## Item 4 — determinism, both arms, plus the parallel back end
+
+* `scripts/determinism-check.sh -corpus` — PASS (427 s), inside `verify-full`.
+* `scripts/determinism-check.sh -corpus -O` — PASS (902 s), inside `verify-full`.
+* `TestParallelBackendIsByteIdenticalToSerial` — **PASS**, all six worker counts
+  (1, 2, 3, 8, 64, 256) byte-identical to the serial object, `ok ./arm64 0.228s`.
+* Two checkout paths — 12/12 identical, reported above.
+
+## Item 5 — reducers, branch and `main` control
+
+Both arms ran `scripts/reducers.sh full`, the gate counts.
+
+| case | branch | `main` control |
+|---|---|---|
+| `runtime_gc_type_mask_padding` GOGC=100, `GOMAXPROCS=3`, 20× | 0 of 20 failed | 0 of 20 failed |
+| `runtime_gc_type_mask_padding` GOGC=10, `GOMAXPROCS=3`, 20× | 0 of 20 failed | 0 of 20 failed |
+| `flate` GOGC=100, 250× | 0 of 250 failed | 0 of 250 failed |
+| `flate` GOGC=10, 250× | 0 of 250 failed | 0 of 250 failed |
+| `p256` GOGC=10, 100× | 0 of 100 failed | 0 of 100 failed |
+| `runtime_lock_osthread` GOGC=100, 400× | 0 of 400 failed | 0 of 400 failed |
+| total | **clean**, 109 s | **clean**, 104 s |
+
+Both flate and p256 panic on a wrong answer rather than merely crashing, so
+these are correctness loops. 1040 executions per arm, 2080 in total, zero
+failures on either side.
+
