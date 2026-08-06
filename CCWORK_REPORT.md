@@ -5874,3 +5874,85 @@ contributes different functions to different programs by construction.
 ```
 
 That is the defect Stage 1 exists to remove, measured rather than argued.
+
+## What made lowering program-dependent, and what each was worth
+
+Four mechanisms, found by driving the comparison down to zero. The count is
+"of 2813 functions the two programs share, how many differ":
+
+| | differing | after |
+|---|---:|---:|
+| baseline on `main` | 145 | |
+| 1. escape devirtualisation (`interfaceMethodDoesNotRetainReceiver`) | — | **145** |
+| 2. `.goc.global.initfunc.<whole-program rank>` | 19 | 126 |
+| 3. method-value wrapper's trailing `len(mod.Funcs)` | 105 | 21 |
+| 4. `x.(I)` opened with a chain over every implementation in the program | 1 | 20 |
+| the remaining 20 are generated after lowering — see below | | **0** |
+
+**The item the brief named first turned out to account for none of them.**
+Turning off `interfaceMethodDoesNotRetainReceiver`'s devirtualisation changed
+the comparison not at all: 145 before, 145 after. It is still the item that
+matters most, because it is the only one whose reuse would be *wrong* rather
+than merely different — a program with one more implementation of an interface
+needs a conservative placement the first program's IR does not have — but on
+these two programs the escape walk's whole-program answer happened to agree.
+Its cost is real and is measured below; its benefit to this comparison was
+zero.
+
+**The two that actually moved the number were symbol names.** Both are the same
+defect `.goc.module.inittask` was fixed for, in two more places:
+
+- `.goc.global.initfunc.%d.<pkg>.<name>` numbered initializers by their rank in
+  a list gathered over every loaded unit, so `strconv.ErrRange`'s initializer
+  was `.30.` in one program and `.98.` in the other — and every global in
+  `strconv` whose initializer calls it carried the difference. Now
+  `contentSymbolName(".goc.global.initfunc", "<pkg>.<declared names>")`, with
+  the declaration's position appended only when every name is blank.
+- A method-value wrapper's name ended in `len(g.mod.Funcs)` — how many
+  functions the module had emitted when the wrapper was reached. `runtime.itabAdd`
+  called `...itabTableType.add.154.17.2236` in one program and `....4269` in the
+  other. The prefix is now the enclosing function's symbol, which is exactly what
+  `enclosingFunctionName`'s comment says makes a *function literal's* name
+  unique, and the sequence is gone. `analysis/sepcompile` lists
+  `^_goc_global_initfunc_\d+` as one of its counter-named symbol families; that
+  family is now empty.
+
+**The fourth is `x.(I)`.** `interfaceTypeMatch` and `interfaceTypeWord` opened
+an interface assertion with a chain of comparisons against every type in the
+program that implements the interface, falling through to `runtime.getitab`.
+`interfaceTypeMatch`'s own comment already records that this broke a split
+build — a function subtracted into a pack was compiled against the pack's
+method set, fell off the end of the chain and aborted — which is why the
+getitab fallback exists. The chain is therefore a fast path over an answer that
+is already correct without it, and dropping it is free of correctness risk.
+`runtime.preprintpanics` was 25 704 bytes of encoded IR in one program and
+46 865 in the other; it is now the same in both. The freestanding subset (no Go
+runtime, so no `getitab`) keeps its chain and is not cacheable — a freestanding
+program is compiled whole or not at all.
+
+## The result
+
+```
+51 packages shared by both programs, 2496 functions lowered by both, 2496 identical
+34 initializer symbols, all named identically in both programs
+```
+
+**Every function that both programs lower from a shared package now lowers to
+byte-identical encoded IR.**
+
+Two families are excluded from the comparison, and the exclusion is the honest
+part of the claim. Both are generated *after* `compile`'s `funcDecl` loop, from
+the assembled module, and a per-package cache would not hold either:
+
+- **297 interface-call wrappers.** `redirectUnavailableInterfaceCallWrappers`
+  points a wrapper at `runtime.unreachableMethod` when the program did not lower
+  the method it wraps, so its body is a property of the program's reachable set.
+- **5 interface-method dispatchers** (`error.Error`, `runtime.stringer.String`,
+  three `internal/reflectlite.Type.*`). `addInterfaceMethodWrappers` switches
+  over every concrete type in the program; that is what a dispatcher is.
+
+The dispatcher predicate requires both the `abort`/`gocInterfaceDispatchFailure`
+halt shape *and* the absence of any source position, because
+`runtime.goroutineReady` is an ordinary lowered function that also ends in that
+shape — a failed type assertion lowers to it — and excluding it would have
+hidden exactly the kind of difference the test looks for.

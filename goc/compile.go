@@ -250,7 +250,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	goABITypes := make(map[string]*ir.AggType)
 	linkNames := make(map[*types.Func]string)
 	globalLinkNames := make(map[types.Object]string)
-	interfaceMethods := make(map[*types.Func]bool)
+	interfaceMethods := collectInterfaceMethods([]*ast.File{file}, info, loader.units)
 	interfaceItabs := make(map[string]string)
 	interfaceCallWrappers := make(map[string]string)
 	collectLinkNames([]*ast.File{file}, info, linkNames)
@@ -366,6 +366,13 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		reachableFunctions:      functions,
 		interfaceCandidates:     make(map[interfaceCandidateKey][]interfaceMethodCandidate),
 		escapeDiag:              newEscapeDiagnostics(),
+	}
+	// The dispatcher symbol for each collected method, resolved through the
+	// generator so a //go:linkname on one is honoured exactly as it is at the
+	// call site. See requireInterfaceMethod.
+	g.interfaceMethodSymbols = make(map[string]bool, len(interfaceMethods))
+	for method := range interfaceMethods {
+		g.interfaceMethodSymbols[g.functionSymbol(method)] = true
 	}
 	g.mod.File(TrimPath(name))
 	registerNoEscapeDirectives(g)
@@ -1627,9 +1634,18 @@ type gen struct {
 	methodTargets           map[string]*types.Func
 	functionDecls           map[*types.Func]functionDecl
 	noWriteBarrierFunctions map[*types.Func]bool
-	interfaceMethods        map[*types.Func]bool
-	interfaceItabs          map[string]string
-	interfaceCallWrappers   map[string]string
+	// interfaceMethods is the set addInterfaceMethodWrappers generates a
+	// dispatcher for. collectInterfaceMethods fills it before lowering starts;
+	// nothing writes to it during lowering. See requireInterfaceMethod.
+	interfaceMethods map[*types.Func]bool
+	// interfaceMethodSymbols is interfaceMethods keyed by the symbol the
+	// dispatcher will be called, so requireInterfaceMethod's check is a map
+	// lookup rather than a scan. Two *types.Func can name one dispatcher -- an
+	// instantiated generic interface has its own method objects -- and the
+	// dispatcher is what the caller needs to exist.
+	interfaceMethodSymbols map[string]bool
+	interfaceItabs         map[string]string
+	interfaceCallWrappers  map[string]string
 	// interfaceDispatchers names the generated interface-method dispatchers.
 	// They switch over the concrete types the whole program contains, so a
 	// prebuilt runtime module must leave them for the program module to define.
@@ -2216,6 +2232,132 @@ func collectFunctionDeclarations(rootInfo *types.Info, rootPkg *types.Package, r
 		collect(unit.files, unit.info, unit.pkg)
 	}
 	return declarations
+}
+
+// collectInterfaceMethods is the set addInterfaceMethodWrappers generates an
+// interface-method dispatcher for: every interface method the program may have
+// to call without knowing the concrete type.
+//
+// # Why this is a collector and not a side effect of lowering
+//
+// It used to be filled by seven writes inside funcDecl, at the syntax that
+// needed a dispatcher, and enumerated afterwards to generate them. That works
+// only for as long as every function is lowered. A per-package cache exists to
+// skip lowering, and a skipped lowering would leave this set short by exactly
+// the methods the skipped code called -- and the failure would not be an error.
+// addInterfaceMethodWrappers would simply not generate that dispatcher, and the
+// call site would bind to nothing.
+//
+// The alternative was to carry the names in each cached unit and re-resolve
+// them. That is worse in both directions. Resolving a name back to a
+// *types.Func means searching the interface types of the loaded units for a
+// method with that symbol -- this pass, run backwards and able to fail -- and it
+// would make the completeness of a program's dispatcher set depend on units
+// written by an older compiler. This pass reads what every compile already has
+// in hand: the ASTs and the *types.Info of every loaded unit, which the front
+// end cannot skip anyway because its other whole-program analyses consume them
+// (BUILD_CACHE.md 2.2).
+//
+// # What it finds
+//
+// Two shapes, matching the two ways lowering used to reach one:
+//
+//   - A selector whose selection is a method value, method call or method
+//     expression on a value whose type is an interface. That is the six writes
+//     in the call and method-value paths.
+//   - A method promoted into a concrete type from an interface it embeds. That
+//     is the seventh, in ensureInterfaceCallWrapperFor: an itab slot for such a
+//     method points at a wrapper that calls the dispatcher, so the dispatcher
+//     has to exist. Finding it needs the type graph rather than the syntax,
+//     because the conversion that builds the itab need not mention the method.
+//
+// It over-approximates in one direction on purpose: it records the method the
+// selector names, without resolving a type parameter's method to the concrete
+// one the way lowering does. An extra entry costs a dispatcher no call site
+// reaches, which DeadFuncElim removes; a missing entry costs a call to nothing.
+func collectInterfaceMethods(
+	rootFiles []*ast.File,
+	rootInfo *types.Info,
+	units map[string]*sourceUnit,
+) map[*types.Func]bool {
+	methods := make(map[*types.Func]bool)
+	record := func(method *types.Func) {
+		if methodHasInterfaceReceiver(method) {
+			methods[method] = true
+		}
+	}
+
+	walked := make(map[types.Type]bool)
+	var recordEmbeddedInterfaces func(valueType types.Type, depth int)
+	recordEmbeddedInterfaces = func(valueType types.Type, depth int) {
+		// The bound is against a type that embeds itself through a pointer,
+		// which go/types admits and this walk would otherwise follow forever.
+		if valueType == nil || depth > 16 || walked[valueType] {
+			return
+		}
+		walked[valueType] = true
+		structure, isStructure := valueType.Underlying().(*types.Struct)
+		if !isStructure {
+			return
+		}
+		for index := 0; index < structure.NumFields(); index++ {
+			field := structure.Field(index)
+			if !field.Embedded() {
+				continue
+			}
+			fieldType := field.Type()
+			if pointer, isPointer := fieldType.(*types.Pointer); isPointer {
+				fieldType = pointer.Elem()
+			}
+			if interfaceType, isInterface := fieldType.Underlying().(*types.Interface); isInterface {
+				for method := 0; method < interfaceType.NumMethods(); method++ {
+					record(interfaceType.Method(method))
+				}
+				continue
+			}
+			recordEmbeddedInterfaces(fieldType, depth+1)
+		}
+	}
+
+	collect := func(files []*ast.File, info *types.Info) {
+		if info == nil {
+			return
+		}
+		for _, file := range files {
+			ast.Inspect(file, func(node ast.Node) bool {
+				selector, isSelector := node.(*ast.SelectorExpr)
+				if !isSelector {
+					return true
+				}
+				selection := info.Selections[selector]
+				if selection == nil {
+					return true
+				}
+				if selection.Kind() != types.MethodVal && selection.Kind() != types.MethodExpr {
+					return true
+				}
+				if method, isFunction := info.Uses[selector.Sel].(*types.Func); isFunction {
+					record(method)
+				}
+				return true
+			})
+		}
+		// Defs rather than the package scope, so a type declared inside a
+		// function is covered too; such a type can be converted to an interface
+		// exactly as a package-level one can.
+		for _, object := range info.Defs {
+			typeName, isTypeName := object.(*types.TypeName)
+			if !isTypeName {
+				continue
+			}
+			recordEmbeddedInterfaces(typeName.Type(), 0)
+		}
+	}
+	collect(rootFiles, rootInfo)
+	for _, unit := range orderedUnits(units) {
+		collect(unit.files, unit.info)
+	}
+	return methods
 }
 
 func collectDynamicInitializers(
@@ -7638,9 +7780,7 @@ func (g *gen) ensureInterfaceCallWrapperFor(sourceType types.Type, method *types
 	if receiver == nil {
 		return methodSymbol
 	}
-	if methodHasInterfaceReceiver(method) {
-		g.interfaceMethods[method] = true
-	}
+	g.requireInterfaceMethod(method)
 
 	var function *ir.Func
 	if signature.Results().Len() == 0 {
@@ -8175,9 +8315,7 @@ func (g *gen) evaluateMultiValueCall(call *ast.CallExpr) ([]ir.Ref, *types.Signa
 		if selection != nil && selection.Kind() == types.MethodVal {
 			selection, function = g.concreteMethodSelection(selection, function)
 			receiver = g.methodReceiver(expression, selection, function)
-			if methodHasInterfaceReceiver(function) {
-				g.interfaceMethods[function] = true
-			}
+			g.requireInterfaceMethod(function)
 		}
 	}
 	signature, ok := g.typeAndValue(call.Fun).Type.Underlying().(*types.Signature)
@@ -9651,9 +9789,7 @@ func (g *gen) multiValueAssignment(statement *ast.AssignStmt, call *ast.CallExpr
 		if selection != nil && selection.Kind() == types.MethodVal {
 			selection, object = g.concreteMethodSelection(selection, object)
 			receiver = g.methodReceiver(function, selection, object)
-			if methodHasInterfaceReceiver(object) {
-				g.interfaceMethods[object] = true
-			}
+			g.requireInterfaceMethod(object)
 		}
 	}
 	signature, ok := g.typeAndValue(call.Fun).Type.Underlying().(*types.Signature)
@@ -10515,9 +10651,7 @@ func (g *gen) returnMultiValueCall(call *ast.CallExpr) {
 		if selection != nil && selection.Kind() == types.MethodVal {
 			selection, function = g.concreteMethodSelection(selection, function)
 			receiver = g.methodReceiver(target, selection, function)
-			if methodHasInterfaceReceiver(function) {
-				g.interfaceMethods[function] = true
-			}
+			g.requireInterfaceMethod(function)
 		}
 	}
 
@@ -12701,9 +12835,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 			if selection := g.info.Selections[fun]; selection != nil && selection.Kind() == types.MethodVal {
 				selection, obj = g.concreteMethodSelection(selection, obj)
 				receiver = g.methodReceiver(fun, selection, obj)
-				if methodHasInterfaceReceiver(obj) {
-					g.interfaceMethods[obj] = true
-				}
+				g.requireInterfaceMethod(obj)
 			}
 		}
 		var callee ir.Ref
@@ -13015,9 +13147,7 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 			}
 			if selection.Kind() == types.MethodExpr {
 				if function, ok := g.info.Uses[n.Sel].(*types.Func); ok {
-					if methodHasInterfaceReceiver(function) {
-						g.interfaceMethods[function] = true
-					}
+					g.requireInterfaceMethod(function)
 					return g.methodExpressionValue(function, selection)
 				}
 			}
@@ -13145,6 +13275,33 @@ func (g *gen) isUnsafeAggregatePointerConversion(expression ast.Expr, resultType
 	}
 	basic, ok := g.info.Types[conversion.Args[0]].Type.Underlying().(*types.Basic)
 	return ok && basic.Kind() == types.UnsafePointer
+}
+
+// requireInterfaceMethod checks that collectInterfaceMethods found the
+// interface method this call site is about to dispatch through, so that a
+// dispatcher will exist for it.
+//
+// It replaces a write. Lowering used to *add* to the set here, which made the
+// program's dispatcher set a function of which functions were lowered -- and a
+// skipped lowering would have taken a dispatcher with it, silently, leaving a
+// call bound to nothing. Turning the write into a check is what makes that
+// class of failure a compile error instead.
+//
+// The check is on the dispatcher's symbol rather than the *types.Func, because
+// two method objects can name one dispatcher (an instantiated generic interface
+// has its own) and it is the dispatcher the caller needs.
+func (g *gen) requireInterfaceMethod(method *types.Func) {
+	if !methodHasInterfaceReceiver(method) {
+		return
+	}
+	if g.interfaceMethods[method] || g.interfaceMethodSymbols[g.functionSymbol(method)] {
+		return
+	}
+	if g.err == nil {
+		g.err = fmt.Errorf(
+			"goc: interface method %s is dispatched in %s but was not collected, so no dispatcher would be generated for it",
+			method.FullName(), g.functionName)
+	}
 }
 
 func methodHasInterfaceReceiver(method *types.Func) bool {
@@ -13354,9 +13511,7 @@ func (g *gen) methodValue(expression *ast.SelectorExpr, selection *types.Selecti
 		return ir.R
 	}
 	selection, method = g.concreteMethodSelection(selection, method)
-	if methodHasInterfaceReceiver(method) {
-		g.interfaceMethods[method] = true
-	}
+	g.requireInterfaceMethod(method)
 	signature := g.concreteType(selection.Type()).(*types.Signature)
 	methodSignature := method.Type().(*types.Signature)
 	receiverType := methodSignature.Recv().Type()
