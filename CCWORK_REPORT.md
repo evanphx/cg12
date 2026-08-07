@@ -7755,3 +7755,38 @@ this is the check that it changed nothing.
 two rounds each: every hash identical within and across rounds, including
 `runtime_defer_capture_allocs.go`, the standing exception RUNTIME_PLAN.md §5.10
 records.
+
+**`make verify-fast`**: PASS in 5m27s — build, vet, gofmt, unit, the three corpus
+shards, the parallel corpus, both capability-matrix arms and the reducers. (The
+first run failed on `TestEveryTestIsParallelOrListedAsSequential`: the new
+cross-program test uses `t.Setenv` and so cannot call `t.Parallel`, and the suite
+requires such a test to be named in `goc/sequential_tests.txt`. It is.)
+
+## 7. What it cost
+
+Correctness here is not free, and the bill is almost all in one line item: the
+declarations refused because their lowering read the program's implementation set.
+
+| | before | after |
+|---|---|---|
+| `fmt_sprintf` declarations replayed | 3080 / 3204 | 3034 / 3204 |
+| `fmt_sprintf` share of lowered IR | 90.3% | 84.2% |
+| `fmt_sprintf` whole compile, warm against nocache | −21.2% | **−19.7%** |
+| http/tls declarations replayed | 7388 / 8102 | 6976 / 8102 |
+| http/tls share of lowered IR | 81.1% | 68.8% |
+| http/tls whole compile, warm against nocache | −17.3% | **−7.9%** |
+
+`fmt_sprintf` barely moves: 16 declarations refused for a whole-program fact.
+http/tls loses more than half its saving on 140 — and they are the expensive
+ones, because a declaration that converts to a non-empty interface is usually a
+declaration that does a lot else besides. The rest of the drop is the artifact
+bookkeeping itself: 10173 artifact definitions recorded on that program, at 48 ms
+of encoding.
+
+What would get it back is not more cache machinery. It is moving
+`materialiseInterfaceImplementations` out of per-declaration lowering and into a
+whole-program pass over the interfaces the program converts to — which is what it
+already is in substance, since the comment on it says the calls "touch neither
+g.cur nor g.fn". That changes the order data is appended in on the COLD path,
+which is why it is not in this change: the 812-of-812 arm against `main` would
+have to be re-established, and this change is the one that has to be right.
