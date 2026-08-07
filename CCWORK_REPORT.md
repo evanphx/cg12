@@ -6252,3 +6252,554 @@ the brief.
   cached package contributes to `Module.Data` — this stage does not.
 - **Generics are the larger half of the remaining problem**, not a detail:
   22–32% of packages, but 52–89% of lowered functions.
+
+# Gate: `ccwork/lowering-package-pure` (161292f) — independent verification
+
+`ccwork/stage1-gate` is the same commit as `ccwork/lowering-package-pure`:
+both are `161292f89f09c662208b8cb8d5038143a985c3e5`, merge-base with `main` is
+`8920449154ffd23af56fed19dfcac4ecc7866f33`, and `git diff` between the two
+branches is empty. So everything below was measured on the branch under test,
+not on a rebase of it.
+
+## What was run
+
+One `make verify-full` (build, vet, gofmt, unit, the corpus split three ways,
+`cmd/goc` minus the matrix, the Ruby/C differential, **all four** shards of
+**both** capability arms with `-v`, both determinism sweeps, the full reducers,
+and the recorded `main` controls), then `make bench-crypto` and `make bench-perf`
+alone on the otherwise idle box, then the items the tier does not schedule
+(`go test ./goc/...` whole, `make test-unit`, the audits and census a second
+time, `TestIRVerifyAudit`, `TestParallelBackendIsByteIdenticalToSerial`, the
+`main` control of the reducers). Each is reported below with the command and the
+output it produced.
+
+## The census baseline, read directly (item 3, part 1)
+
+`goc/testdata/alloc_census_baseline.txt` is 14489 site lines on `main` and 12578
+on the branch — it *shrank by 1911 lines*, which is not what "11 sites move" on
+its own would produce, so it was read before any suite was believed.
+
+Grouping both files by the site's identity (position, function, allocator, type)
+and comparing the set of decisions per key:
+
+| | main | branch |
+|---|---|---|
+| distinct sites | 13890 | **12086** |
+| sites whose decision set differs | — | 2831 |
+| … of those, `frame` → `heap` | — | **11** |
+| … `heap` → `frame` | — | **0** |
+| … present only on `main` | — | 2312 |
+| … present only on the branch | — | 508 |
+
+**Every one of the 2312 + 508 appearing/disappearing sites has
+`.goc.global.initfunc` or `methodvalue` in its function column, with two
+exceptions** (`net.Conn.LocalAddr` and `net.Conn.RemoteAddr` at
+`stdlib/src/net/pipe.go:138`/`139`, new on the branch). That is the rename
+working exactly as advertised rather than a placement change: on `main` the same
+initializer in the same package was called `.goc.global.initfunc.<rank>.…` with a
+*different rank in every corpus program that loaded it*, so it contributed one
+census line per program; the branch's content-derived name is the same in every
+program, so those lines collapse to one. `.goc.global.initfunc.N.…hpack.staticTable`
+alone accounts for 252 main-only lines collapsing to 126.
+
+So the "12086 sites, 11 moved" claim checks out against the file, and the 1911-line
+shrink is de-duplication, not disappearance. The 11:
+
+| site | function |
+|---|---|
+| `crypto/tls/handshake_client.go:785:17` | `clientHandshakeState.doFullHandshake` (`certificateVerifyMsg`) |
+| `crypto/tls/handshake_client_tls13.go:811:14` | `clientHandshakeStateTLS13.sendClientFinished` (`finishedMsg`) |
+| `crypto/tls/handshake_server_tls13.go:893:14` | `serverHandshakeStateTLS13.sendServerFinished` (`finishedMsg`) |
+| `testdata/allocation_counts.go:379:18` | `main.interfaceLocalMethodCall` |
+| `testdata/runtime_interface_method_gc.go:23:18`, `:25:10` | `main.main` |
+| `testdata/runtime_interface_stack_gc.go:31:11` | `main.main` |
+| `testdata/runtime_type_param_method_shapes.go:243:12`, `:248:10` | `main.main` |
+| `testdata/stdlib_container_heap.go:31:12`, `:31:27` | `main.main` |
+
+All eleven are `frame` → `heap` — the conservative direction. Three are on the
+TLS handshake path, which is why `make bench-crypto` (item 6) is the load-bearing
+timing item here and not `bench-perf`.
+
+`goc/testdata/frame_escape_baseline.txt` **does not appear in `git diff main..HEAD`
+at all** — confirmed: it is byte-identical to `main`. The correctness-critical
+baseline did not move.
+
+## The one thing checked by inspection: did any side effect go with the `x.(I)` chain?
+
+**Read first, then measured. No side effect was lost, and the measurement says
+the emitted descriptor and itab sets are identical to `main`'s on all 406 corpus
+programs.**
+
+The chain was emitted in exactly two places, and this is what each one did per
+implementation on `main` (`goc/compile.go` at `8920449`):
+
+| call site | per-implementation side effect on `main` | on the branch |
+|---|---|---|
+| `interfaceTypeWord` (interface→interface conversion, line 7738) | `g.typeTag(impl)` → `ensureTypeTag(impl)`; **and** `g.ensureInterfaceItab(impl, target)` | `materialiseInterfaceImplementations` → `g.ensureInterfaceItab(impl, target)` |
+| `interfaceTypeMatch` (`x.(I)` / `, ok`, line 9781) | `g.typeTag(impl)` → `ensureTypeTag(impl)` **only** — no itab | `materialiseInterfaceImplementations` → `g.ensureInterfaceItab(impl, target)` |
+
+`ensureInterfaceItab` itself calls `ensureTypeTag(sourceType)`,
+`ensureRuntimeTypeEqual(sourceType, tag)`, `ensureTypeTag(targetType)` and
+`ensureInterfaceCallWrapperFor` for each interface method. So the replacement is
+a **superset** of what each site used to do, not a subset — at the `x.(I)` site
+it now materialises the itab and the promoted-method wrappers as well, which
+`main` did not.
+
+`ensureTypeTag` is the only thing that writes `g.runtimeTypes[key]` and emits the
+descriptor with its `.gcdata` and its method table, so it is the single
+side effect that `runtime.getitab` and `reflect.Type.Implements` depend on, and
+it is reached on both paths. `g.typeTag(targetType)` is still emitted in the
+`runtime.getitab` call that replaces the chain, so the *interface's* descriptor
+is materialised too.
+
+Guard conditions were checked line by line: the early returns
+(`!g.runtimeAllocation`, `!interfaceHasMethods`, `NumMethods() == 0`,
+`len(implementations) == 0`) are identical to `main`'s, so there is no input on
+which `main` materialised something and the branch reaches neither branch of the
+new code. The freestanding subset (`!g.runtimeAllocation`) still emits the real
+chain, which is correct: it has no `getitab` to fall through to.
+`g.interfaceImplementations` is pure (it reads `g.functionDecls` and calls
+`types.Implements`), so nothing else was riding on the loop.
+
+### The measurement
+
+Reading the code says the side effect is preserved; a missing descriptor fails at
+run time, so it was also measured. Both compilers were built (`$TMPDIR/goc-main`
+from `8920449`, `$TMPDIR/goc-branch` from `161292f`), every one of the **406**
+`goc/testdata/*.go` programs was compiled with `-emit-ir` by each, and the set of
+`.goc.type.*` and `.goc.itab.*` data symbols was compared:
+
+```
+programs=406  total-lost=0  total-gained=0  empty-main=0
+```
+
+**Zero descriptors and zero itabs present on `main` are missing on the branch,
+across every corpus program** — and, as it happens, zero are gained either: the
+extra itabs the `x.(I)` site now materialises were already being materialised by
+some other conversion in every one of these programs. `hello.go` alone carries
+3240 such symbols and the two sets are equal.
+
+Residual risk, stated plainly: this compares the *set* of symbols, not their
+contents, and it covers the 406-program corpus rather than every program that
+could be written. The remaining exposure is a type that only ever reaches an
+interface through `reflect`, in a program not in the corpus — which is precisely
+what `TestRuntimeReflectiveInterfaceAssertionKeepsMethodReachable`
+(`goc/corpus_test.go:1337`) was added for, and it passes.
+
+The new failure mode this change introduces is in the opposite direction and is
+loud: `requireInterfaceMethod` turns "lowering adds to the dispatcher set" into
+"lowering asserts the dispatcher set already contains it", so an
+under-approximating `collectInterfaceMethods` is a **compile error**, not a call
+bound to nothing. That is the right direction, and the corpus + both matrix arms
+exercise it.
+
+## Item 1 — the capability matrix, both arms: **368/368 and 368/368, PASS sets**
+
+`make verify-full` ran all four shards of each arm with `-v`
+(`go test -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/... -v -args
+-runtime-status-shards=4 -runtime-status-shard=N [-runtime-opt]`). Unioning the
+four shards' `--- PASS:` / `--- FAIL:` / `--- SKIP:` subtest names per arm:
+
+| arm | PASS | FAIL | SKIP | shards |
+|---|---|---|---|---|
+| default | **368** | 0 | 0 | 79s, 83s, 44s, 48s — all PASS |
+| `-O` | **368** | 0 | 0 | 140s, 135s, 129s, 47s — all PASS |
+
+These are name-set counts of distinct capabilities, not run counts. The
+branch-vs-`main` set comparison is below with the controls.
+
+## Item 2, first half — `./cmd/goc/...`: one FAILURE, and it is `main`'s
+
+`verify-full`'s `goc-cmd` item (`go test -timeout 15m -parallel 32 -skip
+'^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/...`) **FAILED**, exit 1, 375s.
+Exactly one test:
+
+```
+--- FAIL: TestCheckedRuntimeCoverageBaselineDenominator (0.03s)
+    capability "gc-invariants/promoted-local-root" is in neither the accepted
+    baseline nor testdata/runtime_coverage_baseline_pending.json; record why the
+    baseline does not cover it, or rerun and accept a new baseline
+```
+
+Attributed with a control, since the branch touches no file under `cmd/goc`:
+
+```
+$ cd <worktree of main 8920449> && go test -count=1 \
+    -run '^TestCheckedRuntimeCoverageBaselineDenominator$' ./cmd/goc/
+--- FAIL: TestCheckedRuntimeCoverageBaselineDenominator (0.08s)
+    capability "gc-invariants/promoted-local-root" is in neither the accepted
+    baseline nor testdata/runtime_coverage_baseline_pending.json; ...
+FAIL	github.com/evanphx/cg12/cmd/goc	0.095s
+```
+
+**`main` fails it identically.** It is a bookkeeping gap — a capability in the
+matrix that the accepted runtime-coverage baseline does not cover and that nobody
+recorded a reason for — and it is pre-existing, not a regression of this branch.
+It does mean `make verify-full` cannot return a clean exit on this tree until
+someone accepts a coverage baseline or records the pending entry. Nothing else in
+`./cmd/goc/...` failed.
+
+## Item 4 — determinism, both configurations: **PASS, 406/406 byte-identical**
+
+`scripts/determinism-check.sh -corpus` and `-corpus -O`, each driving all 406
+`goc/testdata` programs to a written image four times over, 64 workers:
+
+| sweep | rounds | reproducible | content varies | layout-only | failed | wall |
+|---|---|---|---|---|---|---|
+| unoptimised | 4 | **406** | 0 | 0 | 0 | 445 s |
+| `-O` | 4 | **406** | 0 | 0 | 0 | 887 s |
+
+```
+reproducible=406 varying=0 failed=0 of 406 over 4 rounds        (optimize=false)
+reproducible=406 varying=0 failed=0 of 406 over 4 rounds        (optimize=true)
+```
+
+Not one program produced two distinct images, and nothing landed in the
+"same content digest, different image" bucket either.
+
+## Item 5, branch arm — the reducers at full counts: **PASS, 1040 executions, 0 failures**
+
+`scripts/reducers.sh full` (107 s, all six cases, each rep an independent process):
+
+```
+reducer ok    testdata/runtime_gc_type_mask_padding GOGC=100: 0 of 20 runs failed
+reducer ok    testdata/runtime_gc_type_mask_padding GOGC=10:  0 of 20 runs failed
+reducer ok    flate/main GOGC=100:                            0 of 250 runs failed
+reducer ok    flate/main GOGC=10:                             0 of 250 runs failed
+reducer ok    p256/main GOGC=10:                              0 of 100 runs failed
+reducer ok    testdata/runtime_lock_osthread GOGC=100:        0 of 400 runs failed
+reducers (full): all cases clean
+```
+
+That is the GC reducer 20× at GOGC=100 and 20× at GOGC=10, flate 250× at each
+GOGC (both correctness loops — the program panics on a decompression mismatch),
+p256 100× (panics on "signature did not verify"), and
+`runtime_lock_osthread` 400×. The `main` control of the same script is below.
+
+## Item 2, second half — `make test-unit`: **PASS**
+
+`go test -parallel 32 <every package outside goc/, cmd/goc/, difftest/, cc/>`,
+run twice (once for the log, once for the exit code): **exit 0**, every package
+`ok`, no failures. `arm64` 8.5 s, `link` 2.0 s, `pe` 1.2 s, `opt` 0.92 s,
+`lift` 0.98 s, `parse` 0.67 s; the rest under half a second each.
+`verify-full`'s equivalent `unit` item also passed (11 s).
+
+## Item 4, second half — `TestParallelBackendIsByteIdenticalToSerial`: **PASS**
+
+```
+$ go test -count=1 -run '^TestParallelBackendIsByteIdenticalToSerial$' ./arm64/ -v
+--- PASS: TestParallelBackendIsByteIdenticalToSerial (0.21s)
+    --- PASS: .../workers=1 (0.04s)      --- PASS: .../workers=8 (0.02s)
+    --- PASS: .../workers=2 (0.03s)      --- PASS: .../workers=64 (0.02s)
+    --- PASS: .../workers=3 (0.03s)      --- PASS: .../workers=256 (0.03s)
+ok  	github.com/evanphx/cg12/arm64	0.227s
+```
+
+## Item 1, continued — the branch's PASS set against the `main` control
+
+The `main` control was **measured on this box in this run**, not reused: the
+control cache had no record for the current key, so `verify-full` ran
+`go test -run '^TestARM64RuntimeCapabilityStatus$' ./cmd/goc/... -v` unsharded
+against a worktree of `8920449`, on each arm (151 s and 199 s), and both passed.
+
+| arm | branch PASS set | `main` control PASS set | in branch only | in control only | control FAIL+SKIP |
+|---|---|---|---|---|---|
+| default | 368 | 368 | **0** | **0** | 0 |
+| `-O` | 368 | 368 | **0** | **0** | 0 |
+
+The sets are equal by name, not merely equal in size: `comm` between the sorted
+capability-name sets is empty in both directions on both arms. Nothing regressed
+and nothing newly passes. This is the item the change most needed to answer —
+the matrix is where interface dispatch is exercised — and it is clean.
+
+## `make verify-full` as a whole
+
+2908 s. One item failed, `goc-cmd`, and it fails identically on `main` (above).
+Everything else, with the wall clock the run recorded:
+
+| item | s | result | | item | s | result |
+|---|---|---|---|---|---|---|
+| build | 0 | PASS | | matrix-default-0…3 | 83/79/44/48 | PASS |
+| vet | 3 | PASS | | matrix-opt-0…3 | 140/135/129/47 | PASS |
+| gofmt | 0 | PASS | | determinism | 445 | PASS |
+| unit | 11 | PASS | | determinism-opt | 887 | PASS |
+| corpus-parallel | 257 | PASS | | reducers (full) | 107 | PASS |
+| corpus-sequential-0/1/2 | 246/108/116 | PASS | | control-corpus | 516 | PASS |
+| ruby | 49 | PASS | | control-matrix-default | 151 | PASS |
+| **goc-cmd** | **375** | **FAIL — also fails on `main`** | | control-matrix-opt | 199 | PASS |
+
+## Item 2, first half proper — `go test ./goc/...` as one command: **PASS**
+
+`verify-full` splits the corpus into four concurrent processes, so it was also
+run the way the item asks, unsplit:
+
+```
+$ go test -timeout 60m -count=1 -parallel 32 ./goc/...
+ok  	github.com/evanphx/cg12/goc	516.527s        exit 0
+```
+
+## Item 3 — the four audits, `TestIRVerifyAudit`, census twice: **all PASS**
+
+`make verify-audits` (`-count=1 ... -run
+'^(TestAllocationCensus|TestFrameEscapeAudit|TestLoopAliasAudit|TestEscapeShadowPlacement)$' -v`),
+run twice as asked, plus `TestIRVerifyAudit` on its own:
+
+| run | TestAllocationCensus | TestFrameEscapeAudit | TestLoopAliasAudit | TestEscapeShadowPlacement | exit |
+|---|---|---|---|---|---|
+| 1 | PASS (82.77s) | PASS | PASS | PASS | 0 (84.3s) |
+| 2 | PASS (83.64s) | PASS | PASS | PASS | 0 (85.2s) |
+
+The two runs' logs are **identical once the timings are stripped** — the census
+is stable across repeated corpus compiles, which is the property the second run
+exists to test. These are check-mode runs against the committed baselines, so a
+PASS means the branch reproduces its own four baselines exactly.
+
+```
+$ go test -count=1 -run '^TestIRVerifyAudit$' ./goc/ -v
+    irverifyaudit_test.go:48: 1564724 function verifications across 406 programs, all clean
+--- PASS: TestIRVerifyAudit (85.15s)
+```
+
+**1564724** — the same count the branch reported, reproduced here.
+
+`frame_escape_baseline.txt`: confirmed unmoved, two independent ways. It does not
+appear in `git diff main..HEAD` at all (the diff touches only
+`alloc_census_baseline.txt`, `escape_shadow_baseline.txt` and
+`loop_alias_baseline.txt` among the baselines), and `TestFrameEscapeAudit` passes
+in check mode against it on both runs. The correctness-critical baseline is
+byte-identical to `main`'s.
+
+## Item 5, control arm — the reducers on `main` (8920449): **PASS, identical**
+
+```
+$ cd <worktree of main 8920449> && ./scripts/reducers.sh full
+reducer ok    testdata/runtime_gc_type_mask_padding GOGC=100: 0 of 20 runs failed
+reducer ok    testdata/runtime_gc_type_mask_padding GOGC=10:  0 of 20 runs failed
+reducer ok    flate/main GOGC=100:                            0 of 250 runs failed
+reducer ok    flate/main GOGC=10:                             0 of 250 runs failed
+reducer ok    p256/main GOGC=10:                              0 of 100 runs failed
+reducer ok    testdata/runtime_lock_osthread GOGC=100:        0 of 400 runs failed
+reducers (full): all cases clean
+```
+
+Branch and control are the same: 1040 executions each, zero failures each. The
+change moves 11 allocation sites to the heap, and neither the GC reducers at
+`GOGC=10` nor the two correctness loops see anything from it.
+
+## Item 6 — `make bench-crypto`: **PASS, nothing moved**
+
+The item the branch did not run. Run alone on the idle box; its pre-flight
+agreed the box was quiet ("core 63 is quiet enough to measure on … 1 of 64 cores
+busy"), 5 interleaved repetitions pinned to core 63, host toolchain go1.26.1.
+
+```
+case                       baseline   this run   change   resolved verdict
+p256/sign-verify            24.0648    23.9443    -0.5%      +0.2% within tolerance (6%)
+p256/verify                 16.9991    16.9378    -0.4%      +0.2% within tolerance (6%)
+p384/sign-verify            20.3676    20.3262    -0.2%      -0.0% within tolerance (6%)
+rsa2048/sign-verify          2.3470     2.3385    -0.4%      -0.4% within tolerance (6%)
+--- PASS: TestCryptoSigningBench (102.21s)
+```
+
+**All four cases moved between −0.2% and −0.5% — the faster direction — and three
+of the four cannot be told from zero once the intervals are taken into account.**
+The suite fails in both directions and it did not fire.
+
+**But read what it covers before reading it as covering the three TLS sites.**
+`goc/testdata/crypto_signing_bench/main.go` times P-256 sign/verify, P-384
+sign/verify and RSA-2048 sign/verify. It performs **no TLS handshake**. So
+`bench-crypto` does not reach `crypto/tls.clientHandshakeState.doFullHandshake`,
+`clientHandshakeStateTLS13.sendClientFinished` or
+`serverHandshakeStateTLS13.sendServerFinished` — the three moved sites — any more
+than `bench-perf` does. It says the ECDSA/RSA arithmetic under them is unchanged,
+which is worth knowing and is not the same claim. A targeted measurement of the
+handshake itself is below.
+
+## Item 7 — `make bench-perf`: **PASS, 42 measurements, all within tolerance**
+
+Run alone after `bench-crypto`, pre-flight clean ("core 62 is quiet enough…"),
+564 s. **42 rows** compared against the committed baseline — 11
+`control/spin-fixed-work` rows and 31 workload rows — and **every one of the 42
+is `within tolerance`**. (42, not 44: that is the row count this suite produced
+on this tree today.)
+
+The control is where the branch said it would be: the eleven
+`control/spin-fixed-work` rows read 0.9248–0.9272, **mean 0.9258** against the
+reported 0.9260.
+
+Largest movements, in both directions, none resolved past its own tolerance:
+
+| program | case | baseline | this run | change | resolved | tol |
+|---|---|---|---|---|---|---|
+| sortmap | map/build-probe | 6.0921 | 5.7836 | **−5.1%** | −3.9% | 14.5% |
+| conc | chan/pingpong-unbuffered | 4.3782 | 4.2419 | −3.1% | +1.9% | 5.0% |
+| text | text/sprintf | 6.6966 | 6.8691 | **+2.6%** | −2.9% | 16.6% |
+| conc | goroutine/spawn-join | 4.0102 | 3.9086 | −2.5% | −2.1% | 16.4% |
+| text | text/format-append | 7.6592 | 7.4970 | −2.1% | −4.0% | 12.8% |
+| regexp | regexp/replace | 5.9579 | 5.8479 | −1.8% | −2.5% | 10.7% |
+| json | json/unmarshal | 9.2838 | 9.4046 | +1.3% | −2.0% | 10.4% |
+| gcpress | gc/alloc-churn | 5.9451 | 6.0159 | +1.2% | −3.0% | 9.5% |
+| json | json/marshal | 14.7342 | 14.8348 | +0.7% | −3.0% | 5.5% |
+| flate | flate/compress | 4.9410 | 4.9747 | +0.7% | −0.2% | 5.0% |
+
+Every remaining row is under ±1%. The two `+` rows large enough to look at
+(`text/sprintf` +2.6%, `json/unmarshal` +1.3%) both have a **negative resolved
+change**, meaning this run cannot distinguish them from zero; and the largest
+movement of all is a 5.1% *improvement*. The allocation-heavy rows one would
+expect a frame→heap change to show in — `gc/alloc-churn` +1.2%, `gc/live-heap-churn`
+−0.6%, `gc/pointer-write` −0.1% — are flat, which is consistent with the census:
+none of the eleven moved sites is in these programs.
+
+## Closing item 6's gap: a direct measurement of the TLS handshake
+
+Three of the eleven moved allocation sites are on the TLS handshake path, and
+neither committed timing suite reaches it — `bench-perf` has no TLS row and
+`bench-crypto` times signing, not handshaking. That left the change's most
+exposed path measured by nothing, so it was measured here.
+
+The probe is deliberately the same shape as
+`goc/testdata/stdlib_http_tls_client_server.go`, which the capability matrix
+already compiles and runs, so it is known to build under goc: an
+`httptest.NewTLSServer`, a client with `DisableKeepAlives = true` so every
+request performs a full handshake, 20 warm-up requests, then 200 timed ones,
+divided by a fixed integer-arithmetic burst measured in the same process for the
+same reason `cryptobench_test.go` indexes its cases. Both compilers were built
+from source (`8920449` and `161292f`), the same program was compiled by each,
+and the two binaries were run **interleaved, five repetitions each, pinned to
+core 63 with `taskset`**, on the idle box after `bench-perf` had finished.
+It is not committed to the tree — this gate diagnoses, it does not change the
+tree — so the source is reproduced at the end of this section.
+
+| config | compiler | 200 handshakes, mean | min | index (mean) | index sd |
+|---|---|---|---|---|---|
+| default | `main` 8920449 | 35.7608 s | 35.7557 s | 183.271 | 0.042 |
+| default | branch 161292f | 35.8769 s | 35.8698 s | 183.730 | 0.240 |
+| `-O` | `main` 8920449 | 9.6788 s | 9.6741 s | 71.901 | 0.029 |
+| `-O` | branch 161292f | 9.6764 s | 9.6692 s | 71.869 | 0.058 |
+
+**Unoptimised: the branch is +0.33% slower** (by mean ns; +0.32% by min ns). It
+is small but it is *real* rather than noise — the branch's fastest of five
+repetitions (35.8698 s) is slower than `main`'s slowest (35.7763 s), so the two
+distributions do not overlap at all. That is the cost of the three handshake
+allocations moving to the heap, and it is about a third of one percent of a
+handshake.
+
+**At `-O`: −0.025%, which is nothing.** The branch's range and `main`'s overlap
+(branch min 9.6692 s is below `main` min 9.6741 s); the optimiser recovers
+whatever the conservative placement cost.
+
+So `bench-crypto` did not move, and the path `bench-crypto` does not cover moved
+by a third of a percent unoptimised and not at all optimised. Neither is a
+regression worth blocking on, and the number now exists instead of being absent.
+
+<details><summary>the probe's source</summary>
+
+```go
+package main
+
+import (
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"time"
+)
+
+const (
+	warmup     = 20
+	handshakes = 200
+	spinRounds = 40000000
+)
+
+func spin() uint64 {
+	var accumulator uint64 = 1
+	for round := 0; round < spinRounds; round++ {
+		accumulator = accumulator*6364136223846793005 + 1442695040888963407
+		accumulator ^= accumulator >> 17
+	}
+	return accumulator
+}
+
+func main() {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	client := server.Client()
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		panic("unexpected transport")
+	}
+	transport.DisableKeepAlives = true // every request must handshake, which is the point
+
+	request := func() {
+		response, err := client.Get(server.URL)
+		if err != nil {
+			panic(err)
+		}
+		if _, err := io.Copy(io.Discard, response.Body); err != nil {
+			panic(err)
+		}
+		response.Body.Close()
+		if response.TLS == nil || !response.TLS.HandshakeComplete {
+			panic("no handshake")
+		}
+	}
+
+	for i := 0; i < warmup; i++ {
+		request()
+	}
+	controlStart := time.Now()
+	sink := spin()
+	control := time.Since(controlStart)
+	start := time.Now()
+	for i := 0; i < handshakes; i++ {
+		request()
+	}
+	elapsed := time.Since(start)
+	fmt.Printf("control_ns=%d handshake_ns=%d handshakes=%d sink=%d\n",
+		control.Nanoseconds(), elapsed.Nanoseconds(), handshakes, sink&1)
+}
+```
+</details>
+
+## Verdict
+
+| # | item | result |
+|---|---|---|
+| 1 | capability matrix, default arm | **368 PASS / 0 FAIL / 0 SKIP**, name set identical to the `main` control |
+| 1 | capability matrix, `-O` arm | **368 PASS / 0 FAIL / 0 SKIP**, name set identical to the `main` control |
+| 2 | `go test ./goc/...` | PASS, 516.5 s, exit 0 |
+| 2 | `make test-unit` | PASS, exit 0 |
+| 2 | `./cmd/goc/...` (bonus, via verify-full) | **1 FAIL — `TestCheckedRuntimeCoverageBaselineDenominator`, fails identically on `main`** |
+| 3 | four audits, ×2 | PASS ×2, logs identical bar timings |
+| 3 | `TestIRVerifyAudit` | PASS, **1564724** verifications across 406 programs, all clean |
+| 3 | `frame_escape_baseline.txt` | **unmoved** — absent from `git diff main..HEAD`, and the audit passes against it |
+| 3 | census delta, read directly | **11 sites of 12086 move `frame`→`heap`, 0 move `heap`→`frame`**; the 1911-line file shrink is initfunc-name de-duplication |
+| 4 | determinism, unoptimised | PASS, **406/406 reproducible**, 4 rounds |
+| 4 | determinism, `-O` | PASS, **406/406 reproducible**, 4 rounds |
+| 4 | `TestParallelBackendIsByteIdenticalToSerial` | PASS, workers=1/2/3/8/64/256 |
+| 5 | reducers full, branch | PASS — 1040 executions, 0 failures |
+| 5 | reducers full, `main` control | PASS — 1040 executions, 0 failures |
+| 6 | `make bench-crypto` | **PASS — did not move**; all four cases −0.2%…−0.5%, three unresolvable from zero |
+| 6+ | TLS handshake, measured directly | +0.33% unoptimised (real, non-overlapping), −0.02% at `-O` (nothing) |
+| 7 | `make bench-perf` | **PASS — 42 of 42 rows within tolerance**; control mean 0.9258 |
+| — | the `x.(I)` side effect, by inspection | **no side effect lost**; replacement is a strict superset, and 406/406 programs emit identical descriptor and itab symbol sets |
+
+**SAFE TO MERGE TO MAIN.**
+
+Two things the merger should know rather than discover:
+
+1. **`make verify-full` cannot exit 0 on this tree, and that is `main`'s fault,
+   not this branch's.** `TestCheckedRuntimeCoverageBaselineDenominator` fails on
+   `8920449` with the identical message: the capability
+   `gc-invariants/promoted-local-root` is in the matrix but in neither the
+   accepted runtime-coverage baseline nor the pending list. Someone has to accept
+   a coverage baseline or record the pending entry; until then every gate that
+   runs `test-goc-cmd` will go red for this reason. It is unrelated to lowering.
+2. **The eleven moved sites cost about a third of a percent of an unoptimised TLS
+   handshake and nothing at `-O`.** That is the only number in this gate that
+   moved at all, it took a purpose-built probe to see it, and it is the price the
+   branch's own comments say Stage 1 is paying on purpose.
+
