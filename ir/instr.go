@@ -7,11 +7,27 @@ package ir
 // trades a little density for a builder API that reads naturally and for uniform
 // iteration in the passes.
 type Instr struct {
-	Op   Op
-	Cls  Cls   // class of the result (and of integer operands, where relevant)
+	Op  Op
+	Cls Cls // class of the result (and of integer operands, where relevant)
+	Cmp Cmp // predicate, valid only when Op == OCmp
+
+	// The rest of the single-byte fields are gathered here rather than left
+	// beside the comments that explain them. Instr is stored by value in
+	// Block.Instrs, and a one-byte field sitting between two eight-byte ones
+	// costs up to seven bytes of padding on every instruction in the program --
+	// 297,389 of them for a 168-line source. Scattered, these eight fields cost
+	// 24 bytes of padding; gathered, they cost none.
+	//
+	// Each field's meaning is documented where it used to be declared, below.
+	CallConv    CallConvention
+	CallConvSet bool
+	RetValues   bool
+	Tail        bool
+	Volatile    bool
+	ClosureCall bool
+
 	To   Ref   // result temporary, or R when the op has no result
 	Args []Ref // operands
-	Cmp  Cmp   // predicate, valid only when Op == OCmp
 
 	// Aux is an op-specific immediate. Each op that uses it reads exactly one
 	// meaning, and they are mutually exclusive, but the field is untyped, so the
@@ -57,8 +73,8 @@ type Instr struct {
 	// the containing function's convention; an explicit override is represented
 	// by CallConvSet. Keeping this on the call makes foreign and raw-runtime
 	// boundaries local facts instead of properties inferred from the caller.
-	CallConv    CallConvention
-	CallConvSet bool
+	//
+	// Declared with the other single-byte fields at the top of the struct.
 
 	// AggArgs types by-value aggregate call arguments: for an OCall, AggArgs[k]
 	// (when non-nil) is the aggregate type of the value argument Args[1+k],
@@ -81,7 +97,8 @@ type Instr struct {
 
 	// RetValues means To and Defs are the scalar parts of RetAgg rather than To
 	// being an address at which the aggregate result is reconstructed.
-	RetValues bool
+	//
+	// Declared with the other single-byte fields at the top of the struct.
 
 	// StackResult identifies a local aggregate slot that receives an
 	// ABIInternal stack-assigned result. The emitter copies RetAgg from the
@@ -99,7 +116,8 @@ type Instr struct {
 	// or report an error. It is not a best-effort optimisation, so an author can
 	// rely on it (e.g. for guaranteed tail-call elimination) and learn at compile
 	// time when a target cannot honour it.
-	Tail bool
+	//
+	// Declared with the other single-byte fields at the top of the struct.
 
 	// Volatile marks a load or store whose execution is itself observable: the
 	// access must happen, exactly once, in the order written. It is what C's
@@ -112,12 +130,14 @@ type Instr struct {
 	// access. Without this the optimizer is free to reason that reading the same
 	// address twice must yield the same value -- which is exactly what an MMIO
 	// register, a signal-handler flag, and another thread's variable all violate.
-	Volatile bool
+	//
+	// Declared with the other single-byte fields at the top of the struct.
 
 	// ClosureCall marks an indirect call whose callee receives a closure
 	// environment in the architecture's dedicated closure register. ABIInternal
 	// reserves an additional spill word for that register in the outgoing frame.
-	ClosureCall bool
+	//
+	// Declared with the other single-byte fields at the top of the struct.
 	// ClosureContext is the source-level closure object placed in the dedicated
 	// register for a ClosureCall. Keeping it explicit lets the inliner replace a
 	// callee's incoming closure register with the caller's ordinary SSA value.
