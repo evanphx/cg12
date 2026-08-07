@@ -6832,3 +6832,211 @@ programs lowers identically too. That does not make instantiations part of their
 package's unit -- *which* of them exist is still a whole-program fact -- but it
 does mean each is keyable as its own unit on its origin plus its type arguments,
 which is exactly what `genericInstanceSymbol` already writes into the name.
+
+## Item 3 -- the corrected cacheable share
+
+Both programs are the ones the shape census used, so every figure below sits on
+the same denominator as the tables above: functions the front end lowered, before
+the optimiser's dead-function elimination. `goc/genericshape.go`'s census now
+carries the function-granular classification alongside the package-granular one,
+so the two accountings are read off one compile rather than two.
+
+Weighted **by function**, and **by IR instruction** -- because the excluded
+families are not average-sized, and counting functions alone would say something
+very different from counting code:
+
+| | small (`fmt_sprintf.go`) | http (`stdlib_http_tls_client_server.go`) |
+|---|---:|---:|
+| lowered functions | 5108 | 14 974 |
+| lowered IR instructions | 287 774 | 1 141 845 |
+| **Stage 1, package unit -- cacheable** | 24.3% of functions / 21.3% of IR | 51.3% / 53.3% |
+| **Stage 2, function unit -- cacheable** | **77.7% of functions / 95.4% of IR** | **65.7% / 90.3%** |
+
+What is excluded, and what each exclusion actually weighs:
+
+| excluded | small: functions | small: IR | http: functions | http: IR | mean size |
+|---|---:|---:|---:|---:|---:|
+| generic instantiations | 110 (2.15%) | 2.73% | 619 (4.13%) | 6.11% | 71 / 113 instrs |
+| interface-call wrappers | 950 (18.60%) | **1.11%** | 4197 (28.03%) | **1.78%** | 3.4 / 4.8 instrs |
+| interface-method dispatchers | 80 (1.57%) | 0.76% | 320 (2.14%) | 1.86% | 27 / 66 instrs |
+
+**Two things in that table are worth stating plainly.**
+
+First, the correction to Stage 1 is large and it is in the expected direction:
+the cacheable share of the IR goes from **21.3% to 95.4%** on the small program
+and from **53.3% to 90.3%** on the http one. `runtime` alone is 50.2% of the
+small program's lowered IR and 13.1% of the http program's, and it moves from
+entirely excluded to 2224 of 2450 functions cacheable.
+
+Second, **by function count the biggest exclusion is no longer generics at all --
+it is interface-call wrappers**, 18.6% and 28.0% of lowered functions. By weight
+they are nothing: 3.4 and 4.8 IR instructions each, 1.1% and 1.8% of the module's
+code. A wrapper loads a receiver and tail-calls. So the honest headline is the
+instruction-weighted one, and the function-count column is the one that would
+mislead. Whoever builds the store should still expect a third of the *entries* on
+an http-sized program to be things the cache cannot hold, which is a fact about
+entry-count overhead rather than about saved work.
+
+### Against BUILD_CACHE.md's 18-21% Option B ceiling
+
+§3.4's Option B -- cache the front end plus the per-function optimiser prefix --
+is worth 18% of a small compile and 21% of an http one, net of decode, **if the
+whole closure is cacheable**. Scaling that ceiling by the share of the IR that
+actually is:
+
+| | Option B ceiling | Stage 1's package unit | **Stage 2's function unit** |
+|---|---:|---:|---:|
+| small | 18% | 3.8% | **17.2%** |
+| http | 21% | 11.2% | **19.0%** |
+
+Stage 1's own projection was "nearer 2% on a small program and nearer 9% on the
+http one"; measured here on the corpus programs rather than on the `programSmall`
+/`programWide` pair, the package unit reaches 3.8% and 11.2%. Either way the
+conclusion is the same: **at package granularity generics ate most of Option B,
+and at function granularity they eat almost none of it.** The function-granular
+prize is within a percentage point or two of the whole ceiling, and what
+separates it from the ceiling is now instantiations (2.7% / 6.1% of the IR)
+rather than the packages that declare them.
+
+The caveat on that scaling, stated rather than buried: share of lowered IR is a
+proxy for share of lowering *time*, not a measurement of it. It is a better proxy
+than share of functions -- the per-function optimiser prefix and `funcDecl` both
+scale with the code in a function, not with the fact of it -- but Option B's
+18-21% was measured with a stopwatch and this scaling was not.
+
+## Item 4 -- what still cannot be cached, and why
+
+Three populations, and they are excluded for two different kinds of reason.
+
+**1. Generic instantiations** -- 2.15% / 4.13% of lowered functions, 2.7% / 6.1%
+of lowered IR. Not because they lower unpredictably: the boundary test above
+found that an instantiation present in both programs lowers to identical bytes,
+17 of 17. They are excluded because *which* of them exist is a whole-program
+fact. `runtime.AddCleanup[main.tracked,main.note]` is a function of package
+`runtime` that exists only because `main` asked for it, so no unit belonging to
+`runtime` can contain it and no key over `runtime`'s source can predict it.
+
+What that leaves is not "uncacheable" but "a different unit". An instantiation is
+identified by its origin and its type arguments -- exactly what
+`genericInstanceSymbol` already writes into the symbol -- and its key would be
+the origin package's identity plus the identity of every package that declares a
+type in the argument list. That is a Stage 3 design, not built here, and it is
+worth roughly the 2.7-6.1% above.
+
+**2. Interface-call wrappers** -- 950 / 4197 functions, 1.1% / 1.8% of the IR.
+`redirectUnavailableInterfaceCallWrappers` picks the body from the assembled
+module: a wrapper points at `runtime.unreachableMethod` when the program did not
+lower the method it wraps. That is a property of the program's reachable set, so
+a cache must regenerate them.
+
+**3. Interface-method dispatchers** -- 80 / 320 functions, 0.8% / 1.9% of the IR.
+`addInterfaceMethodWrappers` synthesizes a switch over every concrete type in the
+*program* that implements the interface. That is what a dispatcher is.
+
+The last two are excluded *by construction*, and this stage checked that the
+construction is not merely theoretical. Of the 327 wrappers and dispatchers the
+two boundary programs share, **326 are byte-identical and one is not**:
+`runtime.stringer.String`, whose switch differs because the two programs have
+different concrete types implementing `fmt.Stringer`. So the family genuinely
+varies with the program, at a rate of about one in three hundred on a pair of
+programs this similar. A cache that held them and re-ran the redirect step would
+be a Stage 3 optimisation over 1-2% of the IR, and it would need to prove that
+the *rest* of a wrapper is program-independent, which nothing here shows.
+
+Regenerating all three is cheap in the sense that matters: they are produced
+after `compile`'s `funcDecl` loop from data the compile already has, and Stage 1
+already made the dispatcher set derived rather than accumulated, so skipping a
+function's lowering cannot silently drop one.
+
+### And one thing that is not on this list but should be
+
+The unit boundary this stage measures is *lowering*. A cached function still has
+to survive the optimiser, and the inliner may splice an instantiated body into a
+non-generic caller in the same package -- which makes that caller's final form
+depend on the program again, downstream of everything proven here. That is the
+same hazard `opt.Session.Freeze` and `opt.InlineDeps` already handle for the
+memoised compile, and it needs proving rather than assuming. It is out of scope
+for this stage and it is the first thing Stage 3 has to answer.
+
+## Item 1 -- the unit, and what its key has to cover
+
+`goc/functioncache.go`. It is a classification and a key, not a store: nothing in
+it writes or reads a cached byte, because a stored unit needs the per-package
+slice of `ir.Module` that BUILD_CACHE.md §3.3 lists as missing. What it does have
+to get right is the part that decides correctness rather than speed.
+
+**The classification.** `ClassifyCacheUnit(*ir.Func)` returns one of four
+answers: cacheable, generic instantiation, interface-call wrapper,
+interface-method dispatcher. They partition the module, and
+`TestFunctionCacheCensusPartitionsEveryLoweredFunction` asserts that they do,
+both in total and per package.
+
+**Recognising an instantiation.** Instantiation symbols are
+`<origin>[<type arguments>]` with a dotted suffix for a derived closure or method
+value, so the predicate reads the name. That is a compromise and it is worth
+naming: at cache-fill and cache-lookup time the compiler *knows*, because
+`reachableFunctions` carries the type arguments, but a name is what a key and a
+store index on. So the predicate is held to the compiler's own answer by
+`TestGenericInstanceSymbolMatchesTheCompilersOwnAnswer`, which compiles a real
+program with the census sink armed and requires agreement in both directions --
+every recorded instantiation recognised, and every symbol the predicate calls an
+instantiation traceable to one.
+
+That test earned its place immediately. The obvious predicate,
+`strings.Contains(name, "[")`, is wrong: `errors.interface{Unwrap() []error}
+.Unwrap` is an interface-method dispatcher whose name spells out the interface
+type, brackets and all. The scan therefore tracks brace depth, tracks bracket
+depth inside the argument list (`slices.SortFunc[[]*main.tracked,*main.tracked]`
+nests one), and requires the list to end the symbol or be followed by a dot.
+Where it is still unsure it answers "instantiation", because a function wrongly
+excluded is a slower build and a function wrongly included is a wrong binary.
+
+**The key.** Every clause of §3.2 is a separate field of `FunctionCacheEntry`,
+and `Valid` checks them one at a time and returns which one moved:
+
+| clause | field | failure reason |
+|---|---|---|
+| §3.2.1 unit format version | `UnitVersion` | `unit format version moved` |
+| §3.2.2 the package | `Package` | `package P is not loaded` |
+| §3.2.3 the package's own source | `Source` | `package P source moved` |
+| §3.2.4 each dependency's identity | `Deps[]` | `dependency Q moved` / `left the compile` |
+| §3.2.5 target | `Target` | `target moved` |
+| §3.2.6 `-O` | `Optimize` | `-O moved` |
+| §3.2.7 `arm64.TextLayoutIdentity()` | `TextLayout` | `text layout policy moved` |
+| §3.2.8 `opt.PipelineIdentity()` | `Pipeline` | `optimiser pipeline moved` |
+| §3.2.9 the goc binary | `Compiler` | `compiler binary moved` |
+
+Clause by clause rather than one opaque digest, and for a measured reason rather
+than a stylistic one: the memoiser (`memo.Entry.Valid`, `memo/memo.go:258`)
+learned it the expensive way, where one over-broad clause invalidated 4607 of
+4608 entries on a one-character edit and the only reason that was findable at all
+was that the reason came back per clause.
+`TestFunctionCacheEntryValidNamesTheClauseThatMoved` walks all ten, moves each
+one, and requires both the refusal and the right name.
+
+**Clause 4 is the one that must not be weakened**, so it is a property rather
+than a digest. A package's `Transitive` identity is its own source folded with
+the transitive identity of everything it imports;
+`TestPackageIdentityIsTransitive` edits one leaf (`internal/runtime/atomic`) and
+requires that every package that can reach it moves and every package that cannot
+does not. Measured on the boundary program: 9 of 39.
+
+Two details of the source clause that are easy to get wrong and are not:
+
+- **Overlay decisions are in it**, including deletions. `goc/stdlib_overlay.go`
+  can delete a standard-library file, which changes what the package is without
+  changing the content of any file that remains; hashing only the parsed files
+  would miss it.
+- **Assembly and native `.ssa` overlay sources are in it**, with the assembly
+  includes each `#include` pulled in, because those are inputs to the same
+  package that the Go files are.
+
+`ProgramCompileIdentity` computes all of it from a type-checked closure without
+lowering anything, which is the property a cache needs: it has to decide a hit
+before doing the work the hit would save.
+
+**What was NOT changed.** `goc/cacheability.go`'s
+`ClassifyPackageCacheEligibility` still classifies packages by whether they
+declare a generic. It is no longer the cache's rule -- that is the whole point of
+this stage -- but it is still the input to the measurement above, which needs to
+report both accountings on the same program.

@@ -289,6 +289,10 @@ type PackageFunctionCounts struct {
 	Instantiations             int
 	InterfaceCallWrappers      int
 	InterfaceMethodDispatchers int
+	// LoweredInstructions is the row's weight in IR instructions, so a reader can
+	// see that a package with many functions is not necessarily a package with
+	// much code in it.
+	LoweredInstructions int
 }
 
 // CacheableShare is the share of lowered functions a function-granular cache may
@@ -328,6 +332,7 @@ func CensusFunctionCache(module *ir.Module, paths []string) FunctionCacheCensus 
 		row.Lowered++
 		instructions := loweredInstructionCount(function)
 		census.LoweredInstructions += instructions
+		row.LoweredInstructions += instructions
 		switch ClassifyCacheUnit(function) {
 		case CacheUnitCacheable:
 			census.Cacheable++
