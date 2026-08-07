@@ -7845,3 +7845,18 @@ The cost is stated in §7 and is real: http/tls loses more than half its compile
 saving, because a declaration that converts to a non-empty interface reads the
 program's implementation set and can no longer be a unit. That is recoverable and
 the recovery is named.
+
+---
+
+# Gate 2 verification of `ccwork/interned-artifact-units`
+
+Gate branch `ccwork/stage2-gate2`, at the same tree as
+`ccwork/interned-artifact-units` (`0cfe5aa`). Host: aarch64 Linux, 64 cores,
+250 GiB, go1.26.1, box held exclusively for this run.
+
+_(sections appended as each item lands; nothing below is a number this gate did
+not watch a process produce)_
+
+## 0. `make verify-full`
+
+_(running; matrix and corpus arms already in)_
