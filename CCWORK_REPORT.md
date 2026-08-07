@@ -7387,3 +7387,127 @@ The remaining warm lowering time is not the decode: it is the 124 and 714
 declarations that missed. Those are the root package and the generic
 instantiations, which are the program's own code and are disproportionately large
 -- 8.8% of http's declarations taking 22% of its cold lowering time.
+
+## 6. Guards
+
+Scaled to the change: this stage added an on-disk cache and a merge, and changed
+the compiler on the path every build takes (eight one-line journal calls, one
+signature, and a branch in the lowering loop). The guards were chosen to cover
+that and no more.
+
+| guard | result |
+|---|---|
+| `go build ./...`, `go vet ./...`, `gofmt` | clean |
+| **`make verify-fast`** | **PASS in 314 s (5m14s)** — build, vet, gofmt, unit, the whole goc corpus suite in four processes, one capability shard on each arm, the reducers |
+| `TestIRVerifyAudit` | PASS — **1 564 724 function verifications across 406 programs, all clean** |
+| `scripts/determinism-check.sh` (5 programs, cold and warm, 2 rounds) | all identical |
+| `scripts/determinism-check.sh -O` | all identical |
+| **`scripts/function-cache-check.sh`** | **PASS — 4 programs × 2 `-O` arms, nocache/cold/warm identical in all 8** |
+| `TestWarmCompileIsByteIdenticalToCold` | PASS — module and 19.7 MB object identical |
+| `TestCacheFilledByAnotherProgramIsUsable` | PASS |
+| `TestNoCacheBypassesTheStore` | PASS — no read, no write, empty directory |
+| `TestChangedDependencyInvalidatesTheUnit`, `TestPackageUnitRoundTrip` | PASS |
+| `TestCacheableFunctionsAfterTheOptimiser` | PASS — the §1 measurement |
+| `TestEveryTestIsParallelOrListedAsSequential`, `TestDeriveClassifiesEveryGenField` | PASS after the two edits below |
+
+The determinism check's hashes are the same hashes `function-cache-check.sh`
+prints — `2de0b7f76aa3c648` for `hello.go`, `463df9fb813a58d7` for
+`fmt_sprintf.go`, `3e9d56fbb7da3f5c` for `gc_struct.go` — which is an independent
+confirmation from a script that knows nothing about this cache that the cached
+compiles produced the image the tree already expects.
+
+Both suite-policy tests failed on the first `verify-fast` run and both were right
+to. Three of the new tests call `t.Setenv` and one installs `opt`'s process-global
+inline-dependency recorder, so all four are now in `goc/sequential_tests.txt`; the
+recorder needed a reason tag of its own (`inlinedeps`) since `census` names a
+different global. And `gen` gained a field, so `derive_test.go`'s
+`wholeCompilationGenFields` had to say which side of the line it falls on — the
+journal is inherited for exactly the reason the interning tables it journals are,
+because a wrapper built by a derived generator interns through the same maps.
+
+Not run, deliberately: the corpus suite on its own, the capability matrix in full,
+`make test-unit`, the four audits, the crash loops. `verify-fast` runs the corpus
+suite and one matrix shard per arm as part of its own definition, which is why
+they appear above.
+
+One cross-arm check worth recording separately, because it holds a claim the code
+makes in a comment: a cache **filled by a non-`-O` compile serves a `-O` compile**,
+and the resulting executable is identical to an uncached `-O` build
+(`7dc1f7267b8ffccd`, `fmt_sprintf.go`). That is the evidence for `-O` not being a
+clause of this key: what is stored is the front end's output and the optimiser
+runs after the merge.
+
+## 7. What is not covered, and what a reader should not conclude
+
+**The cache is off unless `CG12_FUNC_CACHE` is set.** See §2 for why. Nothing in a
+default build or a default test run reads or writes it.
+
+**Declined compiles.** Non-executable, test-package, external-test-package,
+runtime-split (either half), coverage, and `-m` compiles do not use the cache and
+are unchanged. The `-m` case is the one worth naming: the escape diagnostic is
+accumulated while a function is lowered, so a cached build would report on a
+subset of the program without saying so.
+
+**The soundness of cross-program reuse rests on Stage 1's boundary, not on this
+key.** The key covers each package's own source and its imports' transitive
+source. It does not cover the whole-program facts lowering consults —
+`collectDynamicTypes`, `reachableFunctions`, the interface-method candidate sets.
+The evidence that those do not change a cacheable function's lowering is
+`goc/functionlowering_test.go`'s 2453 of 2453, and now
+`TestCacheFilledByAnotherProgramIsUsable`, which takes 91.8% of one program's
+lowered IR from units another program wrote and gets the same module. That is
+measurement, not proof, and it is the assumption a future stage should attack
+first if a cached build ever produces a wrong binary.
+
+**The delta model assumes lowering is append-only, and it is not quite.** One
+exception was found and journalled (§2). The audit that found the rest was a read
+of every write to `Module.Data`, `Module.Funcs`, `Module.Types` and the generator's
+whole-compilation tables during the lowering loop; `ensureRuntimeTypeEqual` was the
+only one that reaches backwards. A future edit that adds a second such write will
+not be caught by the type system — it will be caught by
+`TestWarmCompileIsByteIdenticalToCold`, which is in the suite `verify-fast` runs,
+and that is the reason that test compares whole modules rather than a sample.
+
+**Union across programs is by carry-forward, not by merge.** A compile that hits a
+package's unit and also lowers a few declarations of it that the unit lacked
+rewrites the file with both sets. Two programs alternating on one directory
+therefore converge rather than thrash. A compile that hits everything it needs
+does not rewrite the file at all.
+
+## Verdict
+
+**1. Do cached functions survive the optimiser?** No, and the reason that matters
+is not the one that was expected. Their *bodies* very nearly do — 1933 of 1935 are
+byte-identical after `opt.OptimizeModule` in two deliberately-divergent programs.
+Their *existence* does not: 518 of 2453 are deleted by `DeadFunc` in one program
+and not the other, because reachability is a whole-program fact. So the cache
+stores pre-optimiser IR and the warm compile re-optimises the assembled module,
+which is the design Stage 1 described, now held knowingly and with the number
+behind it.
+
+**2. Is warm output byte-identical to cold?** Yes. Four programs, both `-O` arms,
+cold and warm in separate processes: identical executables in all eight cases,
+against a `CG12_NOCACHE=1` control so it is the cache being tested and not
+determinism. In-process, the whole pre-optimiser module and the finished 19.7 MB
+object are identical, and a program compiled entirely from *another program's*
+units is identical to the same program compiled cold.
+
+**3. The storage layout.** One file per package, holding every cacheable
+declaration of it, content-addressed by the sha256 of the package's key with one
+two-hex-character fanout level — gc's shape, and one read per package rather than
+5100 reads per module. Validation stays per function. The key hashes each
+package's own files and its imports' transitive identities, and deliberately not
+the 73 MB stdlib tree the pack cache hashes. Eviction is cmd/go's policy —
+mtime-on-use hourly, trim daily, five-day cutoff — in `internal/cachefile`, which
+the pack cache now shares, so the tree's two directory-shaped caches are bounded
+where neither was before.
+
+**4. The measured saving.** The cache removes **79% of the lowering loop on the
+small program and 69% on the http one** (1.99 s → 0.41 s; 8.74 s → 2.73 s),
+replaying 90.3% and 81.1% of lowered IR. On a whole compile that is **9.7% and
+8.8% with `-O`, 21.8% and 17.0% without**. Against the projected 17.2% / 19.0%:
+the numerator held and the denominator moved — the lowering loop is 11.8% of a
+`-O` compile on this tree where §3.4 measured its ceiling at 18–21%, because
+`opt.OptimizeModule` is now 9.97 s of a 16.2 s `fmt_sprintf` compile. 11.8% ×
+79.2% = 9.3% against 9.7% measured; 11.7% × 68.8% = 8.0% against 8.8% measured.
+The arithmetic closes.
