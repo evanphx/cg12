@@ -22,6 +22,12 @@ import (
 // is. Everything between those two facts -- when eviction is triggered, whether
 // it runs before or after the writes, whether a previous build's stamp locks it
 // out -- is under test by being in the way.
+//
+// None of these call t.Parallel, and they must not: they move functionCacheBudget
+// and functionCacheDefaultOn, which are process globals. t.Setenv already forbids
+// it, and the ordering is what makes that safe -- go test runs the serial tests
+// to completion before it resumes the parallel ones, so the cache tests that do
+// run in parallel never see a budget somebody shrank.
 
 // directorySize is every byte in a cache directory, by the same walk Trim uses
 // but without Trim: both layouts, no exclusions, no policy. If this number is
@@ -126,13 +132,16 @@ func TestTrimmingKeepsTheGenerationInUse(t *testing.T) {
 	generation := directorySize(t, directory)
 	functionCacheBudget = 2 * generation
 
-	for round := 1; round <= 8; round++ {
+	// Four rounds against a two-generation budget, so eviction has run repeatedly
+	// by the end and the first generation is long gone.
+	const rounds = 4
+	for round := 1; round <= rounds; round++ {
 		compileGeneration(t, directory, round)
 	}
 
 	// The generation the last round wrote is the youngest, so it survived. Compile
 	// it again and it should come back out of the cache.
-	compileGeneration(t, directory, 8)
+	compileGeneration(t, directory, rounds)
 	stats := LastFunctionCacheStats()
 	t.Logf("after eviction: %s", stats)
 	require.Greater(t, stats.PackagesHit, 10,

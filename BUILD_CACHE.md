@@ -477,6 +477,12 @@ pack**, permanently, at 20.8 MB per package set for `fmt` and tens of MB for
 package sets is a few GB of dead files in `~/.cache/cg12/runtime-pack`. gc's
 5-day mtime trim is the thing to copy here, and it is about fifty lines.
 
+> **Since resolved, and the estimate was low by an order of magnitude.** It got
+> the trim (age-only) and then a size budget; the directory it was predicting "a
+> few GB" for reached **39.0 GB**, because copying gc's trim was not enough on its
+> own — 33.7 GB of it was in a layout the trim could not see. See the eviction
+> notes under §3.1.
+
 ---
 
 ## Part 3 — The design
@@ -592,6 +598,40 @@ package sets is a few GB of dead files in `~/.cache/cg12/runtime-pack`. gc's
 > rebuilds the compiler mints a whole new generation of units every time, and five
 > days of that is unbounded. A read refreshes an entry's mtime (hourly
 > granularity), so a unit a build is using is the last thing to go.
+>
+> **And the bound is only as good as its trigger, which it was not.** As shipped
+> above, `Trim` rate-limited itself to once per 24 hours per directory and wrote
+> its stamp *before* walking. A daily interval is right for an age cutoff and
+> useless for a size cap: a gate drove 24 compiler generations through in 45
+> minutes and left the directory at **1,407,765,443 bytes against the 1 GiB bound**
+> with the stamp never moving, at ~55 MB a generation. The bound was tested by
+> filling a directory and calling `Trim`, which passes while the real path never
+> reaches it.
+>
+> The rate limit is gone rather than smaller. Eviction is triggered by the only
+> thing that makes a cache directory grow — a build finishing its writes — and runs
+> *after* them, so the bound describes the directory a build leaves rather than the
+> one it found. The check is a readdir per fanout directory and a stat per entry:
+> `BenchmarkTrimWalk` measures 14.5 ms at the budget's ~3000 entries, 0.05% of the
+> compile it runs inside. Concurrent trims are safe by determinism rather than by a
+> lock — same eviction order, and a `Remove` that lost the race still counts
+> against the total. `goc/functioncachetrigger_test.go` holds it end to end without
+> calling `Trim` at all: eight generations compiled into one directory, which sits
+> at exactly its budget here and reaches 50,860,187 bytes against a 33,906,806 byte
+> budget by generation 2 on the code above.
+>
+> **The pack cache had the same bound and a worse hole.** It was age-only by
+> decision, and `~/.cache/cg12/runtime-pack` on the gate box reached **39.0 GB in
+> 1177 packs** — but 1079 of them, **33,669,679,910 bytes**, sit flat in the top of
+> the cache directory in the layout that predates the two-hex fanout. `Trim`
+> descended only into two-character directories, so those files were not merely
+> un-budgeted: the age cutoff could not reach them either and nothing had ever been
+> able to delete one. The walk now reads the top of the directory too (a top-level
+> file counts as an entry only if it is named like a key), and the pack cache has a
+> budget: **8 GiB**, from the fourteen packs a compiler generation comes to against
+> a measured 8.7 / 18.5 / 98.8 MB size distribution. Looser than the function
+> cache's gibibyte on purpose — a missed unit is a package lowered again, a missed
+> pack is 4.6 s to 154 s of `goc build-runtime`.
 >
 > **A broken cache never fails a compile.** A read that fails is a miss, a unit
 > that does not decode is a miss — the format carries a sha256 of its own body — and

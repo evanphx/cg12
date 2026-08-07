@@ -436,3 +436,151 @@ are not merely un-budgeted, they are unreachable by the age cutoff too: nothing
 has ever been able to delete one. Only 98 packs / 5.3 GB were in the fanout the
 walk descends into. The 37 GB in the brief is mostly not a policy failure at all;
 it is a walk that cannot reach its own cache.
+
+### What triggers cleanup now
+
+Not a clock. **The only event that can make a cache directory grow: a build
+finishing its writes.** `cachefile.Trim` has no rate limit and no stamp; both
+callers invoke it at the end of a build, after their own output has landed.
+
+The alternative triggers were a bytes-written-since-last-trim counter and a
+smaller interval, and the argument against both is the same: they are ways of
+avoiding a walk that turns out not to be worth avoiding. `BenchmarkTrimWalk`
+measures a full walk of a function cache at its budget -- about 3000 entries of
+the corpus's 355 kB mean, spread over the 256 fanout directories -- at **14.5 ms**.
+That is 0.05% of the 30-second compile the gate ran eviction inside, and about a
+four-thousandth of what the cache saves that compile. A counter would buy back 14
+milliseconds at the price of a second piece of shared state that can be lost, and
+a smaller constant would still be a constant somebody has to re-choose the next
+time the workload changes. A check tied to the writes is right at any rate of
+writing, which is the property the daily interval did not have.
+
+Two consequences worth stating:
+
+- **After the writes, not before.** The old order meant every build ended over
+  budget by its own output even when the trigger fired -- a bound that is never
+  true at the moment anyone would look at it. It now holds at the moment a build
+  ends; during a build the directory may exceed it by that build's output, which
+  is ~60 MB for the largest program in the corpus.
+- **Unconditionally, including when a build wrote nothing.** A build that wrote
+  nothing did not grow the directory, but the age cutoff has work to do and a box
+  whose builds are all hits is exactly where last month's branches sit undisturbed.
+
+The stamp is not written after the walk, because there is no stamp. It was doing
+a second job -- keeping two builds that start together from both walking -- and
+that job is done instead by making a concurrent trim harmless: eviction order is
+fully determined (oldest first, path within a timestamp), so two processes choose
+the same files in the same order, and a `Remove` that fails because someone else
+got there first still counts against the running total, so the loser stops where
+the winner did instead of evicting a second budget's worth.
+`TestConcurrentTrimsEvictOnce` holds that with eight goroutines on one directory.
+
+### Steady-state size under the workload that reached 1.41 GB
+
+`goc/functioncachetrigger_test.go` is the test the bound did not have. It never
+calls `Trim`. It compiles programs into a cache directory, generation after
+generation, and then asks the directory how big it is -- so the trigger, the
+ordering and the absence of a lockout are all under test by being in the way of
+the answer. The generation clause it moves is the optimisation pipeline rather
+than the compiler binary's hash, because a test inside one process cannot rehash
+the binary it is running; both are key clauses covering every package and both
+mint a full generation.
+
+One generation of `programCacheSmall` is 16,953,392 bytes. The budget is set to
+two of them and eight generations are driven through:
+
+| after generation | bytes on disk | budget |
+|---|---|---|
+| 1 | 33,906,784 | 33,906,784 |
+| 2 | 33,906,784 | 33,906,784 |
+| 3 | 33,906,784 | 33,906,784 |
+| 4 | 33,906,784 | 33,906,784 |
+| 5 | 33,906,784 | 33,906,784 |
+| 6 | 33,906,784 | 33,906,784 |
+| 7 | 33,906,784 | 33,906,784 |
+| 8 | 33,906,784 | 33,906,784 |
+
+**Flat at exactly the budget, from the first generation to the eighth.** Against
+`fb32a6d` the same test fails at generation 2 with **50,860,187 bytes against the
+33,906,806 byte budget**, growing by one whole generation per round -- which is
+the 1.41 GB, in miniature and in about a minute instead of 45.
+
+Scaled to the real bound: the gate's workload -- 24 generations at ~55 MB --
+settles at **1 GiB and stays there** instead of reaching 1,407,765,443 bytes and
+continuing. `TestEvictionRunsAfterTheWritesNotBefore` pins the ordering
+separately: at a one-generation budget, trim-then-write leaves two generations on
+disk and write-then-trim leaves one.
+
+And the bound does not cost the cache its point.
+`TestTrimmingKeepsTheGenerationInUse` compiles four generations through a
+two-generation budget and then recompiles the last one: 46 of 46 packages hit,
+84.1% of lowered IR replayed. Eviction is least-recently-used and a hit refreshes
+an entry's mtime, so the generation in use is the last thing to go.
+
+### Is the pack cache bounded
+
+**Yes -- 8 GiB, and the age-only decision was not the reason it reached 37 GB.**
+
+The size bound was the smaller half of the problem. `~/.cache/cg12/runtime-pack`
+on this box is 39.0 GB in 1177 packs, and **1079 of them holding
+33,669,679,910 bytes sit flat in the top of the cache directory**, left by the
+layout that predates the two-hex fanout. `Trim` walked only entries whose name is
+a two-character directory, so those files were not merely un-budgeted: the age
+cutoff could not see them either, and `Read` cannot see them either, so they have
+never been readable and nothing has ever been able to delete one. Only 98 packs /
+5.3 GB were in the fanout the walk descends into. A budget alone would have
+bounded 5.3 GB of a 39 GB directory.
+
+So the walk now reads the top of the directory as well. A top-level file counts as
+an entry only if it is *named* like one -- a run of at least sixteen hex
+characters before the first dot, which is what a key is -- so a cache directory
+somebody pointed at a directory of their own does not lose a README, a lock file
+or a subdirectory of their own things. `TestTrimReachesTheFlatLayout` and
+`TestTrimLeavesFilesThatWereNeverEntries` hold both halves.
+
+The budget is 8 GiB, and it is sized rather than picked. `goc build-runtime` runs
+over seven capability-matrix pack roots with and without `-O`, so one compiler
+generation is fourteen packs; the packs on this box measure 8.7 MB at the
+smallest, 18.5 MB at the median and 98.8 MB at the largest, which puts a
+worst-case generation near 1.4 GB and a typical one near 300 MB. Eight gibibytes
+is five to twenty-five full generations.
+
+It is deliberately looser than the function cache's gibibyte, because the two
+have opposite miss costs. A missed unit is one package lowered again. A missed
+pack is `goc build-runtime` again: 4.6 s for the runtime alone, 154 s for one
+carrying `net/http`. The bound is set where it stops a disk filling, not where it
+keeps the cache small.
+
+**One-time effect worth knowing about:** the first `goc build-runtime` that
+writes a pack after this change will reclaim roughly 31 GB from that directory --
+the 33.7 GB of unreachable flat entries are all far past the five-day cutoff, and
+what remains is then brought under 8 GiB. On a filesystem the gate saw hit 100%,
+that is the point. Nothing reclaimed is readable: `Read` resolves keys through the
+fanout, so no flat entry has ever been a cache hit.
+
+### Also: FunctionCacheUnitVersion is 2
+
+`cachedDeclaration.NewFiles` becoming `Files` moved no byte of the wire format --
+a count and that many strings, before and after -- and moved `packageUnitVersion`
+not at all, because the layout is the same layout. What changed is what the
+strings *mean*: they were the files a declaration APPENDED to `Module.Files`,
+which is a fact about which declarations happened to run before it, and they are
+now the files its lowering resolved a position in, which is a fact about the
+declaration. A vintage-1 unit decodes cleanly under the new reading and replays
+the wrong file table.
+
+The compiler binary's hash did keep the two vintages apart in practice, and that
+is why nothing caught fire -- but it is a coincidence of how this cache is used,
+not a property of it. A released binary from before the change and a rebuild of
+the same source after it hash identically. This clause is the one that exists to
+keep them apart.
+
+### Guards
+
+Build, `go vet`, `gofmt`, `make verify-fast`, `internal/cachefile` (including the
+five new eviction tests and the walk benchmark) and the three new trigger tests,
+each also run against `fb32a6d` to confirm it fails there. The corpus suite, the
+capability matrix, `make test-unit`, the audits and the crash loops were not run,
+as briefed; the cache's compile correctness was verified over 1624 images in the
+previous change and nothing here touches the key's clauses except the version
+bump, which can only turn a hit into a miss.
