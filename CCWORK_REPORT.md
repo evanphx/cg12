@@ -8048,3 +8048,86 @@ few tens of megabytes; five configurations of one program in §5 came to 203 uni
 and about 70 MB, so a developer who exercises several `-O`/layout/pipeline
 combinations should expect a few hundred megabytes before eviction's five-day
 cutoff starts collecting.
+
+## 8. What this gate did not establish
+
+- **Whether the differing binary is a *wrong* binary.** `hello` -> `fmt_sprintf`
+  produces `ca2884d1f7a3fd49` where an uncached compile produces
+  `463df9fb813a58d7`. Both executables run and exit 0, and `fmt_sprintf.go`
+  panics if `fmt.Sprintf` misbehaves, so that one is not miscompiled in the way
+  it can detect. What differs was not traced to a specific datum. **UNVERIFIED**
+  whether any cross-program warm build that *links* is semantically wrong; what
+  is verified is that it is not the build an uncached compile would have made,
+  which is the branch's own stated correctness criterion.
+- **The extent of the pack cache's orphaned entries** (§0.4) was read from the
+  code, not measured on a box with a pre-existing `CG12_PACK_CACHE`.
+- **`test-goc-coverage`** is not part of `verify-full` and was not run.
+- **A minimal fix** was not attempted; this gate was scoped to diagnose.
+
+## 9. Verdict
+
+**1. Is the default path byte-identical to `main`?** **Yes.** 408 corpus programs
+x 2 `-O` arms = 816 images, every one byte-identical to `main` (`4ad59d2`), with
+both compilers built from one absolute path so the `runtime.Caller` hazard the
+brief warns about cannot produce a false result. With `CG12_FUNC_CACHE` unset the
+branch is `main`. `make verify-full` agrees: 23 of 24 items pass, and the one
+failure (`TestCheckedRuntimeCoverageBaselineDenominator`) fails identically on
+`main` and is not this branch's.
+
+**2. Does warm equal cold everywhere it was tried?** **No.** Warm equals cold
+whenever a cache directory serves **one program**: 16 of 16 in separate processes
+across eight programs and both arms, 72 of 72 under 24-way concurrency, and
+through every staleness case in §5. Warm does **not** equal cold when a directory
+serves **more than one program**, which is the case the cache exists for. Two
+`goc` commands are enough:
+
+```
+CG12_FUNC_CACHE=/tmp/c goc -o a goc/testdata/fmt_sprintf.go   # fills
+CG12_FUNC_CACHE=/tmp/c goc -o b goc/testdata/hello.go         # LINK FAILS
+```
+
+Sixty programs compiled one at a time into one directory: **58 fail to link**.
+The 408-program corpus: 357 of 408 fail on the first pass and 408 of 408 on every
+pass after. The `goc` test suite: 178 failing tests. Every failure is an
+undefined reference to a content-interned symbol — a string literal, a type
+descriptor, an itab, a function descriptor — and the cause is the one the branch
+named in its own section 7 as the assumption to attack: a stored delta records
+the *reference* to a shared artifact while the *definition* stays in the delta of
+whichever declaration minted it first, in the program that filled the cache. The
+key does not cover the root program, and the unit's contents depend on it.
+`TestCacheFilledByAnotherProgramIsUsable` does not catch this because its two
+programs share an import closure; the failure needs two programs whose closures
+differ, which is every real pair.
+
+**3. Is the cache safe under concurrency?** **Yes, as far as the disk mechanics
+go.** 24 concurrent processes writing the same 45 keys, three rounds, 72 of 72
+images identical to the uncached control, no torn read, no corrupted unit, no
+temporary file left behind; a truncated unit and a flipped bit are both misses
+rather than wrong binaries. The corpus failure is not a concurrency failure — it
+reproduces with one process at a time.
+
+**NOT SAFE TO MERGE TO MAIN.**
+
+Not because the default path moved — it did not, and that half of the work is
+clean and well measured. The feature itself does not work: with
+`CG12_FUNC_CACHE` set to any directory that more than one program has ever
+compiled against, `goc` produces images that do not link, and at least sometimes
+images that link and differ. `CG12_FUNC_CACHE=auto`, which the branch documents
+as the intended mode for "any build that reuses one compiler", puts every build
+on that box into one directory and is therefore the broken configuration by
+default once the switch is turned on.
+
+The off-by-default flag limits the blast radius to whoever sets the variable, and
+an argument could be made for landing it as dead code. This gate does not make
+that argument, for two reasons. The branch presents the cache as done and
+measured — "Is warm output byte-identical to cold? Yes" — and merging it would
+put that claim in the tree's record where the next stage will build on it. And
+the defect is not a bug in the store or the merge, both of which are careful and
+correct; it is the cache boundary itself. A unit keyed on a package's source and
+its imports' source cannot hold what this compiler's lowering actually produces,
+because lowering attributes program-wide interned artifacts to whichever
+declaration reaches them first. Fixing that means either putting the root
+program's identity in the key (which makes the cache per-program and gives up
+sharing), or making the emission of interned artifacts independent of declaration
+order so that every delta that references one also defines it. That is a design
+decision for stage 3, and it should be made before this lands rather than after.
