@@ -94,13 +94,23 @@ func compileBatchCommand(arguments []string, input io.Reader, output io.Writer, 
 	prebuiltRuntime := flags.String("runtime", "",
 		"link against the prebuilt runtimes written by `goc build-runtime`, comma-separated; each program takes the richest one it can use")
 	targetName := flags.String("target", defaultTargetName(), "arm64 | amd64")
+	profiles := registerProfileFlags(flags)
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(errorOutput, "usage: goc compile-batch [-O] [-target arch] [-runtime a.gocrt,b.gocrt] < requests.jsonl")
+		fmt.Fprintln(errorOutput, "usage: goc compile-batch [-O] [-target arch] [-runtime a.gocrt,b.gocrt] [-cpuprofile prof] [-memprofile heap] < requests.jsonl")
 		return 2
 	}
+	if err := profiles.start(); err != nil {
+		fmt.Fprintf(errorOutput, "%v\n", err)
+		return 1
+	}
+	defer func() {
+		if err := profiles.finish(); err != nil {
+			fmt.Fprintf(errorOutput, "%v\n", err)
+		}
+	}()
 	target, err := goc.ParseTarget(*targetName)
 	if err != nil {
 		fmt.Fprintf(errorOutput, "%v\n", err)

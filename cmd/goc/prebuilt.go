@@ -32,13 +32,23 @@ func buildRuntimeCommand(arguments []string, errorOutput io.Writer) int {
 	targetName := flags.String("target", defaultTargetName(), "arm64")
 	packages := flags.String("packages", "",
 		"comma-separated standard library packages the pack carries beyond the runtime; empty for the runtime alone")
+	profiles := registerProfileFlags(flags)
 	if err := flags.Parse(arguments); err != nil {
 		return 2
 	}
 	if flags.NArg() != 0 || *output == "" {
-		fmt.Fprintln(errorOutput, "usage: goc build-runtime [-O] [-target arch] [-packages list] -o runtime.gocrt")
+		fmt.Fprintln(errorOutput, "usage: goc build-runtime [-O] [-target arch] [-packages list] [-cpuprofile prof] [-memprofile heap] -o runtime.gocrt")
 		return 2
 	}
+	if err := profiles.start(); err != nil {
+		fmt.Fprintf(errorOutput, "%v\n", err)
+		return 1
+	}
+	defer func() {
+		if err := profiles.finish(); err != nil {
+			fmt.Fprintf(errorOutput, "%v\n", err)
+		}
+	}()
 	target, err := goc.ParseTarget(*targetName)
 	if err != nil {
 		fmt.Fprintf(errorOutput, "%v\n", err)

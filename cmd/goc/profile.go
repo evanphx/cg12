@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"runtime"
@@ -158,4 +159,73 @@ func writeHeapProfile(name string, collect bool) error {
 		return fmt.Errorf("write a heap profile: %w", err)
 	}
 	return file.Close()
+}
+
+// The subcommands parse their own flag sets, so -cpuprofile and -memprofile had
+// to be registered on each of them separately or not exist there at all -- and
+// they did not exist there at all. That left the two commands most worth
+// profiling unprofilable: `compile-batch`, which is the whole test corpus in one
+// process, and `build-runtime`, which is the single most expensive thing goc
+// does. Both were being reasoned about from the outside.
+//
+// A subcommand profiles its whole run rather than a phase inside it. The main
+// path stops its heap profile where the module is finished, because there the
+// link and the compiled program would otherwise be counted as compile cost;
+// here the whole command is the thing being asked about.
+type subcommandProfiles struct {
+	cpuProfile     *string
+	memProfile     *string
+	memProfilePeak *bool
+	peak           *peakHeapProfiler
+}
+
+// registerProfileFlags adds the profiling flags to a subcommand's flag set.
+// Call it before Parse; call start after.
+func registerProfileFlags(flags *flag.FlagSet) *subcommandProfiles {
+	return &subcommandProfiles{
+		cpuProfile: flags.String("cpuprofile", "",
+			"write a CPU profile of this command to this file"),
+		memProfile: flags.String("memprofile", "",
+			"write a heap profile of this command to this file"),
+		memProfilePeak: flags.Bool("memprofile-peak", false,
+			"with -memprofile, profile the peak heap instead of what is retained at the end"),
+	}
+}
+
+// start begins whatever the flags asked for. A failure to start is reported
+// rather than ignored: a command that silently declines to profile is worse
+// than one that refuses, because the absence looks like a result.
+func (p *subcommandProfiles) start() error {
+	if *p.cpuProfile != "" {
+		if err := startCPUProfile(*p.cpuProfile); err != nil {
+			return err
+		}
+	}
+	if *p.memProfile != "" && *p.memProfilePeak {
+		started, err := startPeakHeapProfile(*p.memProfile)
+		if err != nil {
+			stopCPUProfile()
+			return err
+		}
+		p.peak = started
+	}
+	return nil
+}
+
+// finish writes the profiles out. It tolerates being called twice, because the
+// paths that os.Exit have to call it explicitly and the deferred call still
+// runs on the paths that return.
+func (p *subcommandProfiles) finish() error {
+	stopCPUProfile()
+	if *p.memProfile == "" {
+		return nil
+	}
+	if p.peak != nil {
+		p.peak.Stop()
+		p.peak = nil
+		return nil
+	}
+	written := *p.memProfile
+	*p.memProfile = ""
+	return writeHeapProfile(written, true)
 }
