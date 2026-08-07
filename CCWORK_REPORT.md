@@ -7993,3 +7993,65 @@ keys for the same artifact. Both orders still came out byte-identical to their o
 cold builds, and their two cold images differ from each other as they should. The
 divergence is in the unit and does not reach the image here; nothing in the design
 makes that a guarantee.
+
+## 5. The previous gate's passing arms, re-established
+
+### Default-path byte identity against `main`
+
+Both compilers were built from **one absolute path** —
+`/home/evan/.ccwork/ws/stage2-gate2/repo` — by building the branch's `goc`,
+checking `main` out **in the same working directory**, building `main`'s `goc`,
+and checking the branch back out. goc embeds its source path, and a worktree at
+a different path length has produced false differences twice; this arm has no
+worktree in it at all.
+
+```
+arm noO done: 406 identical
+arm O   done: 406 identical
+DEFAULTPATH same=812 differ=0 branchfail=0 mainfail=0
+```
+
+**812 of 812** — every corpus program, both `-O` arms, no cache environment set
+at all, byte-identical between `goc` at `0cfe5aa` and `goc` at `main` (`4ad59d2`).
+Neither compiler failed on any program. (The previous gate quoted 816 against a
+corpus of 408; this tree has 406 programs, so 812 is the same measurement.)
+
+This arm is the check on the one lowering change the branch makes on the default
+path — `staticFunctionLiteral` no longer leaving its scratch function in
+`Module.Funcs` while the literal is lowered. It changed nothing.
+
+### Concurrency
+
+24 `goc` processes compiling 24 different programs into **one shared cache
+directory**, three rounds, each image compared with that program's own
+`CG12_NOCACHE=1` build:
+
+```
+CONCURRENCY ok=72 differ=0 failbuild=0 units=161
+```
+
+**72 of 72.** The shared directory ended with 161 unit files rather than the
+branch's 57 because this gate's 24 programs were sampled independently and reach
+a much larger union of packages (`stdlib_http_cookiejar`, `stdlib_slog_structured`,
+`stdlib_os_exec_goroutine_shape`, `stdlib_netpoll_stress_pipe_deadline_reset` among
+them). The count is a property of the sample, not a discrepancy.
+
+### Staleness exactness
+
+One line appended to `stdlib/src/internal/byteorder/byteorder.go`, a leaf, and
+nothing else; then `fmt_sprintf.go` compiled again against the same directory.
+Measured from `GOC_DEBUG_FUNCCACHE=1`:
+
+| compile | packages hit | declarations replayed | share of lowered IR | files written |
+|---|---|---|---|---|
+| cold fill | 0/45 | 0/3204 | 0.0% | 45 |
+| warm | **45/45** | 3034/3204 | 84.2% | 0 |
+| after the leaf edit | **22/45** | 364/3204 | 8.5% | **23** |
+
+**22 of 45 hit, 23 files rewritten** — the previous gate's number exactly. The
+leaf was restored and `git diff` on it is empty.
+
+The warm row is worth keeping for §4: it independently confirms the branch's §7
+figures for `fmt_sprintf` — 3034 of 3204 declarations replayed and 84.2% of
+lowered IR — and its reason list contains `lowering used a whole-program fact
+x16`, the sixteen refusals the branch attributes the `fmt_sprintf` regression to.
