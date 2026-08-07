@@ -7,27 +7,16 @@ package ir
 // trades a little density for a builder API that reads naturally and for uniform
 // iteration in the passes.
 type Instr struct {
-	Op  Op
-	Cls Cls // class of the result (and of integer operands, where relevant)
-	Cmp Cmp // predicate, valid only when Op == OCmp
-
-	// The rest of the single-byte fields are gathered here rather than left
-	// beside the comments that explain them. Instr is stored by value in
-	// Block.Instrs, and a one-byte field sitting between two eight-byte ones
-	// costs up to seven bytes of padding on every instruction in the program --
-	// 297,389 of them for a 168-line source. Scattered, these eight fields cost
-	// 24 bytes of padding; gathered, they cost none.
+	// Field order here is chosen for size, not for reading: Instr is stored by
+	// value in Block.Instrs, so every byte of padding is paid 297,389 times for
+	// a 168-line source. Eight-byte-aligned fields come first, then the Refs
+	// (four-byte aligned but eight wide), then everything narrower. Interleaved,
+	// the same fields cost 14 bytes of padding; in this order, none.
 	//
 	// Each field's meaning is documented where it used to be declared, below.
-	CallConv    CallConvention
-	CallConvSet bool
-	RetValues   bool
-	Tail        bool
-	Volatile    bool
-	ClosureCall bool
-
-	To   Ref   // result temporary, or R when the op has no result
 	Args []Ref // operands
+
+	To Ref // result temporary, or R when the op has no result
 
 	// Aux is an op-specific immediate. Each op that uses it reads exactly one
 	// meaning, and they are mutually exclusive, but the field is untyped, so the
@@ -54,7 +43,8 @@ type Instr struct {
 	// pass cannot tell apart. That is the overload ir/instr.go's own contract warns
 	// against, and the reason the fold was the one Aux meaning most able to be
 	// misread by a pass that ran after it.
-	Amode int32
+	//
+	// Declared with the other narrow fields at the end of the struct.
 
 	// Unroll is the recursion depth the inliner marks an OCall with while it
 	// decides how far to unroll a cycle. It is transient: opt clears it when the
@@ -151,6 +141,24 @@ type Instr struct {
 	// Intrin carries an OIntrinsic's dispatch name (the intrinsic being invoked).
 	// nil for every other op.
 	Intrin *IntrinOp
+
+	// Amode is four-byte aligned and sits here, next to Pos and the one-byte
+	// fields, so it packs into what would otherwise be tail padding.
+	Amode int32
+
+	// The single-byte fields, last, so nothing eight-byte-aligned has to skip
+	// past them. Scattered through the struct they cost 14 bytes of padding
+	// between them; here they cost none. Each one's meaning is documented above,
+	// where it used to be declared.
+	Op          Op
+	Cls         Cls // class of the result (and of integer operands, where relevant)
+	Cmp         Cmp // predicate, valid only when Op == OCmp
+	CallConv    CallConvention
+	CallConvSet bool
+	RetValues   bool
+	Tail        bool
+	Volatile    bool
+	ClosureCall bool
 }
 
 // Uses returns every SSA value read by the instruction, including operands
