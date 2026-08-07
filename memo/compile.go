@@ -226,6 +226,18 @@ func RunStage(m *ir.Module, session *opt.Session, stage []opt.Pass, store *Store
 		// Install the finished bodies only now, after the live set has settled:
 		// dragInSpliceClosure can still demote a function.
 		for f := range frozen {
+			// A hit whose stored input and output digests agree is a function
+			// the stage does not move. Valid has already established that the
+			// stored input is the digest of the body in hand, so that body is
+			// already the finished one: decoding it would rebuild, allocate and
+			// install an exact copy of what is already there.
+			//
+			// Decoding every hit made a fully-hitting compile decode the whole
+			// program -- 231MB of a 2087MB warm compile in ir.(*dec).decFunc
+			// alone -- to reinstall bodies that were mostly already correct.
+			if entry := used[f]; entry.Input == entry.Output {
+				continue
+			}
 			body, err := UnmarshalFunc(used[f].Body, used[f].Output)
 			if err != nil {
 				return nil, fmt.Errorf("memo: decode %s: %w", f.Name, err)
