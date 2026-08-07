@@ -584,3 +584,39 @@ capability matrix, `make test-unit`, the audits and the crash loops were not run
 as briefed; the cache's compile correctness was verified over 1624 images in the
 previous change and nothing here touches the key's clauses except the version
 bump, which can only turn a hit into a miss.
+
+### The pack bound, measured on the real cache rather than a temp directory
+
+`make verify-fast` built a pack while the guards were running, which fired the
+new trigger against the actual `~/.cache/cg12/runtime-pack`. It is the cleanest
+possible demonstration and it was not staged:
+
+| | before | after one pack write |
+|---|---|---|
+| directory | 38,993,574,108 B (39.0 GB) | **8,551,764,499 B (8.55 GB)** |
+| budget | none | 8,589,934,592 B (8 GiB) |
+| flat `.gocrt` (unreachable layout) | 1079 | 52 |
+| fanout `.gocrt` | 98 | 105 |
+| stale `.lock` leftovers | 752 | 1 |
+
+**30.4 GB reclaimed by one pack write, and the directory landed 38 MB under its
+bound.** The 52 flat packs that survive are the ones written today, before the
+fanout commit landed at 03:41: they are inside the five-day age cutoff and were
+not old enough for the budget pass to reach. They are dead weight -- `Read`
+resolves keys through the fanout, so no flat entry can ever be a hit -- but they
+are now bounded dead weight that ages out within five days, which is the
+difference between this and the 33.7 GB.
+
+`~/.cache/cg12/runtime-pack/index/` (1.0 MB of `.json`) is left alone: it is a
+directory whose name is not two hex characters, nothing in this tree writes it,
+and the walk does not descend into directories it does not recognise.
+
+The function cache on the same box is 142,752,145 bytes, well inside its
+gibibyte, so nothing was evicted there.
+
+One consequence of the version bump worth expecting: every unit already on disk
+is vintage 1 and is now a miss, so the first build after this change on any box
+is a cold fill — the 1.4% to 5.0% first-compile cost measured in the previous
+section, once. The stale units are not orphaned in the way the 33.7 GB was: they
+age out in five days, and the budget reaches them before that if anything else
+needs the room.

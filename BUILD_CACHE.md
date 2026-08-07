@@ -834,6 +834,10 @@ Work items, in order:
 3. **Give the pack cache gc's trim** — mtime-on-use at hourly granularity, a
    daily trim, a 5-day cutoff. Fifty lines against unbounded growth that every
    compiler rebuild adds to.
+   > Done, and copying gc's daily trim was the part that was wrong: it is the
+   > right rate for an age cutoff and useless for the size cap the cache also
+   > needed. The trim is now triggered by a build's writes rather than by a clock,
+   > and the pack cache has a budget. See the eviction notes under §3.1.
 4. **Split `MarshalBinary` into per-package units** with a cross-unit
    `AggType` unification step and file-index remapping, and add the key of
    §3.2 with recursive dependency content hashes.
