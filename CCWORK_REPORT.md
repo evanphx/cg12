@@ -297,3 +297,104 @@ key -- hashing every source file of the closure and the compiler binary -- and t
 encoding of every unit it stores, and gets nothing back. The smallest program pays
 the largest penalty, because the fill is close to a fixed cost against the least
 work. It is documented in BUILD_CACHE.md in those terms rather than as a footnote.
+
+## 9. Guards
+
+| | |
+|---|---|
+| `go build ./...`, `go vet ./...`, `gofmt` | clean |
+| `scripts/function-cache-default-check.sh`, both arms | **812 of 812 byte-identical** (§7) |
+| `scripts/function-cache-corpus-check.sh` | **406 identical, 0 different, 0 failed to link** against a cache filled by `fmt_sprintf.go` |
+| `TestIRVerifyAudit` | ok (90.9 s) |
+| `scripts/determinism-check.sh` | all five programs identical, both rounds, both caching paths, including `runtime_defer_capture_allocs.go` (the RUNTIME_PLAN §5.10 exception) |
+| the goc cache test set | `TestWarmCompileIsByteIdenticalToCold`, `TestNoCacheBypassesTheStore`, `TestCacheFilledByAnotherProgramIsUsable`, `TestCacheFilledByAProgramWithADisjointClosure`, `TestPackageUnitRoundTrip`, `TestChangedDependencyInvalidatesTheUnit`, the two delta probes, the four default/robustness tests and `TestEveryTestIsParallelOrListedAsSequential`: ok (146 s) |
+| `go test ./internal/cachefile/` | ok -- eight eviction tests where there were none |
+| `make verify-fast` | **PASS in 5m34s** -- build, vet, gofmt, unit, the three corpus shards, the parallel corpus, both capability-matrix arms, the reducers |
+| `scripts/function-cache-check.sh` | **all builds identical**: 4 programs x 2 arms x 4 conditions (`nocache`, `funcoff`, `cold`, `warm`), and all 12 ordered cross-program pairs on both arms |
+| `CG12_DELTA_PROBE` sweep | 24 diverse corpus programs and the first 30 in name order: 0 program-dependent deltas |
+
+`TestCheckedRuntimeCoverageBaselineDenominator` fails on `main` too and was not
+investigated, per the brief. Not run, per the brief: the corpus suite beyond what
+`make verify-fast` carries, the capability matrix beyond its two shards,
+`make test-unit` standalone, the four audits and the crash loops.
+
+## 10. What is not covered
+
+- **The default-on corpus arm does not test a stale cache.** It tests an empty
+  one filling and a full one serving, both from the same compiler. A cache left
+  over from an older compiler is a key miss by construction (clause 9), and
+  `TestChangedDependencyInvalidatesTheUnit` holds the finer-grained case, but no
+  arm here compiles against a directory a *different* compiler filled.
+- **The 1 GiB budget is not exercised at scale.** `cachefile_test.go` evicts
+  kilobytes and asserts the ordering; nothing has run a real cache past a
+  gibibyte and watched it recover. The failure mode if the ordering is wrong is a
+  cache that evicts its working set and stops hitting -- slow, not incorrect.
+- **The probe compares what two programs BOTH stored.** A declaration only one of
+  them reached is not compared, and neither is one that both refused. What it
+  covers is measured rather than assumed -- 57442 declarations and 54263
+  artifacts over the 24-program sweep -- but it is not everything a unit can hold.
+- **No fifth leak is a negative result, not a proof.** The instrument found leaks
+  1 and 3 on its first run, which is the reason to believe it; it cannot see a
+  fact that is program-dependent in a way that happens to agree across every pair
+  it was pointed at.
+- **The replay path can still return an error.** A unit whose digest is valid and
+  whose IR does not decode aborts the compile rather than falling back, because
+  by then the module has been partly spliced. The argument that it is unreachable
+  is the key: clause 9 means a unit found under a key was written by a
+  byte-identical compiler, so "digest valid" implies "decodable by this binary".
+  That is an argument, not a test.
+- **`cmd/goc` tests now exec a compiler with the cache on.** They get a real
+  cache in the real default location, as a user would, and the binary they build
+  changes with the tree -- so they fill a generation of units per build and read
+  few back. That is what the 1 GiB budget is for, and it is why the budget went
+  in with the default rather than after it.
+
+## 11. Verdict
+
+**Both leaks are fixed and a fifth was looked for.** `NewFiles` is now `Files` --
+the files a declaration touched, in first-touch order, journalled at `g.at`
+rather than inferred from what it appended -- and the pointer key journalled with
+a runtime type is canonicalised before the pointer is taken, at both the journal
+site and the live derivation. The instrument that found them is
+`goc/functioncachedelta_test.go`, kept as a test: it compares the stored deltas of
+two programs that agreed on a unit's key, component by component, and it found a
+third leak of the same shape (a run-collapse that crossed the declaration
+boundary) the moment the first repair was attempted. Pointed at 24 diverse corpus
+programs -- 57442 declaration and 54263 artifact comparisons -- and separately at
+the first 30 in name order, it finds nothing further.
+
+**The default is per caller.** `cmd/goc` calls `goc.UseFunctionCacheByDefault`;
+`goc.Compile` called in process does not have a cache unless it asks. Clause 9 of
+the key is the compiler binary's own hash, which is right for a released binary
+and wrong inside `go test`, which builds a fresh test binary per package under
+test. `CG12_NOCACHE=1` still turns off everything, and is held against the
+default, an explicit directory and `auto`. `CG12_FUNC_CACHE=off` is new and turns
+off this cache alone. The default location is
+`os.UserCacheDir()/cg12/function-cache`, `packCacheDirectory`'s shape, with the
+same fanout.
+
+**A broken cache degrades silently.** Nine ways of breaking the store -- read-only
+directory, file where the directory should be, file where a fanout directory
+should be, truncated, empty, corrupt, foreign and unreadable units -- each
+produces the module a `CG12_NOCACHE=1` compile produces, with no error, and so
+does an unusable default location on the path an ordinary `goc file.go` takes. The
+read-only directory that already has units in it still serves 84% of the lowered
+IR. Eviction, which existed and was untested, is now tested and has a second bound:
+1 GiB of least-recently-used on top of the five-day cutoff, sized from a measured
+76 MB full-corpus fill, with a read refreshing an entry's mtime so a unit in use
+never ages out.
+
+**The measured saving with it on by default**, against a `CG12_NOCACHE=1` control
+in a separate process, median of three:
+
+| | no `-O` | `-O` |
+|---|---|---|
+| `hello.go` | **−28.6%** | **−13.6%** |
+| `fmt_sprintf.go` | **−18.3%** | **−9.6%** |
+| `stdlib_http_tls_client_server.go` | **−8.5%** | **−4.8%** |
+
+and the first compile, which is what a user meets first, is **1.4% to 5.0%
+slower**.
+
+**812 of 812 corpus programs, on both `-O` arms, compiled with nothing set at all
+are byte-identical to the same program compiled with `CG12_NOCACHE=1`.**
