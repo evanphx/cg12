@@ -67,6 +67,10 @@ var wholeCompilationGenFields = []string{
 	// declarations) computation, and the -m diagnostic's single output sink.
 	"reachableFunctions",
 	"interfaceCandidates",
+	// goTypeKeys memoises a pure function of a type and the file set, both fixed
+	// for a compilation, so sharing it across derived generators is the point of
+	// having it.
+	"goTypeKeys",
 	"escapeDiag",
 	"literalData",
 	"runtimeTypes",
@@ -121,6 +125,7 @@ func fullyPopulatedGen() *gen {
 		summaryParents:              map[ast.Node]map[ast.Node]ast.Node{},
 		reachableFunctions:          []functionDecl{{}},
 		interfaceCandidates:         map[interfaceCandidateKey][]interfaceMethodCandidate{},
+		goTypeKeys:                  map[types.Type]string{},
 		escapeDiag:                  &escapeDiagnostics{},
 		literalData:                 map[string]string{},
 		runtimeTypes:                map[string]types.Type{},

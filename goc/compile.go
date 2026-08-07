@@ -369,6 +369,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		reachableGlobals:        reachableGlobals,
 		reachableFunctions:      functions,
 		interfaceCandidates:     make(map[interfaceCandidateKey][]interfaceMethodCandidate),
+		goTypeKeys:              make(map[types.Type]string),
 		escapeDiag:              newEscapeDiagnostics(),
 	}
 	// The journal starts before anything can lower, which is earlier than the cache
@@ -1181,7 +1182,7 @@ func addInterfaceMethodWrappers(g *gen, reachable []functionDecl) {
 		for index, candidate := range candidates {
 			candidateSignature := candidate.function.Type().(*types.Signature)
 			receiverType := candidateSignature.Recv().Type()
-			tagName := g.typeTags[goTypeKey(g.fset, candidate.dynamicType)]
+			tagName := g.typeTags[g.typeKey(candidate.dynamicType)]
 			if tagName == "" {
 				continue
 			}
@@ -1243,7 +1244,7 @@ func interfaceMethodCandidates(g *gen, reachable []functionDecl, method *types.F
 	}
 	var candidates []interfaceMethodCandidate
 	add := func(function *types.Func, dynamicType types.Type, interfacePath []int) {
-		key := g.functionSymbol(function) + "|" + goTypeKey(g.fset, dynamicType)
+		key := g.functionSymbol(function) + "|" + g.typeKey(dynamicType)
 		if seen[key] {
 			return
 		}
@@ -1302,8 +1303,8 @@ func interfaceMethodCandidates(g *gen, reachable []functionDecl, method *types.F
 		}
 	}
 	sort.Slice(candidates, func(i, j int) bool {
-		left := g.functionSymbol(candidates[i].function) + "|" + goTypeKey(g.fset, candidates[i].dynamicType)
-		right := g.functionSymbol(candidates[j].function) + "|" + goTypeKey(g.fset, candidates[j].dynamicType)
+		left := g.functionSymbol(candidates[i].function) + "|" + g.typeKey(candidates[i].dynamicType)
+		right := g.functionSymbol(candidates[j].function) + "|" + g.typeKey(candidates[j].dynamicType)
 		return left < right
 	})
 	return candidates
@@ -1314,6 +1315,18 @@ func goTypeKey(fset *token.FileSet, valueType types.Type) string {
 		return pkg.Path()
 	})
 	return appendLocalTypeIdentities(fset, key, valueType)
+}
+
+// typeKey is goTypeKey with the generator's memo in front of it. Every caller
+// that has a generator should use this; goTypeKey stays exported to the package
+// for the one path that does not.
+func (g *gen) typeKey(valueType types.Type) string {
+	if key, ok := g.goTypeKeys[valueType]; ok {
+		return key
+	}
+	key := goTypeKey(g.fset, valueType)
+	g.goTypeKeys[valueType] = key
+	return key
 }
 
 func appendLocalTypeIdentities(fset *token.FileSet, key string, valueType types.Type) string {
@@ -1704,6 +1717,18 @@ type gen struct {
 	// types x reachable declarations) and would otherwise be recomputed at every
 	// interface method call the escape walk meets.
 	interfaceCandidates map[interfaceCandidateKey][]interfaceMethodCandidate
+	// goTypeKeys memoises goTypeKey, which renders a type to the text every
+	// content-derived symbol name is hashed from. It is a pure function of the
+	// type and the file set, both fixed for a compilation, so the answer can be
+	// kept -- and it is asked over and over for the same handful of types: an
+	// allocation profile of `fmt.Println("...")` put types.TypeString beneath
+	// goTypeKey at 150 MB, 16% of everything the compile allocated, for text
+	// that is hashed and dropped.
+	//
+	// Keyed on the type's identity rather than its spelling. Two structurally
+	// equal types built separately are distinct keys and each gets its own
+	// entry, which costs a recomputation and never a wrong answer.
+	goTypeKeys map[types.Type]string
 	// escapeDiag is the escape diagnostic's explanation state, and is nil unless
 	// -m is on. See goc/escapediag.go.
 	escapeDiag        *escapeDiagnostics
@@ -6353,7 +6378,7 @@ func (g *gen) goABIAggregate(valueType types.Type) *ir.AggType {
 		// instantiated caller, not to the generic function's ABI.
 		return nil
 	}
-	cacheKey := goABIAggregateKey(g.fset, valueType)
+	cacheKey := g.goABIAggregateKey(valueType)
 	if aggregate := g.goABITypes[cacheKey]; aggregate != nil {
 		g.useArtifact(aggregate.Name)
 		return aggregate
@@ -6452,7 +6477,7 @@ func (g *gen) goABIAggregate(valueType types.Type) *ir.AggType {
 	return aggregate
 }
 
-func goABIAggregateKey(fset *token.FileSet, valueType types.Type) string {
+func (g *gen) goABIAggregateKey(valueType types.Type) string {
 	switch value := valueType.Underlying().(type) {
 	case *types.Slice:
 		return "descriptor:slice"
@@ -6463,7 +6488,7 @@ func goABIAggregateKey(fset *token.FileSet, valueType types.Type) string {
 			return "descriptor:string"
 		}
 	}
-	return "aggregate:" + goTypeKey(fset, valueType)
+	return "aggregate:" + g.typeKey(valueType)
 }
 
 func (g *gen) goABIField(valueType types.Type) (ir.Field, bool) {
@@ -15557,7 +15582,7 @@ func (g *gen) placementTypeSymbol(valueType types.Type) string {
 	if valueType == nil {
 		return ""
 	}
-	return contentSymbolName(".goc.runtime.type", goTypeKey(g.fset, valueType))
+	return contentSymbolName(".goc.runtime.type", g.typeKey(valueType))
 }
 
 func (g *gen) allocateZeroed(size ir.Ref) ir.Ref {
@@ -16353,7 +16378,7 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 func (g *gen) channelType(channel *types.Chan) ir.Ref {
 	element := channel.Elem()
 	elementName := g.runtimeTypeSymbol(element)
-	channelName, fresh, done := g.internArtifactSymbol(".goc.channel.type", goTypeKey(g.fset, element))
+	channelName, fresh, done := g.internArtifactSymbol(".goc.channel.type", g.typeKey(element))
 	defer done()
 	if !fresh {
 		return g.fn.Sym(channelName, 0)
@@ -16377,7 +16402,7 @@ func (g *gen) runtimeType(valueType types.Type) ir.Ref {
 // separate from runtimeType so that a descriptor can be referenced from another
 // datum rather than only loaded as an address.
 func (g *gen) runtimeTypeSymbol(valueType types.Type) string {
-	name, fresh, done := g.internArtifactSymbol(".goc.runtime.type", goTypeKey(g.fset, valueType))
+	name, fresh, done := g.internArtifactSymbol(".goc.runtime.type", g.typeKey(valueType))
 	defer done()
 	if !fresh {
 		return name

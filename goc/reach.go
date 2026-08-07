@@ -213,20 +213,21 @@ func reachableFunctions(fset *token.FileSet, roots []*ast.FuncDecl, rootFiles []
 		collectAssertedInterfaces(unit.files, unit.info)
 	}
 	dynamicInterfaceTypes := make(map[string]types.Type)
+	interfaceKeys := newTypeKeyMemo(fset)
 	var addDynamicInterfaceType func(types.Type)
 	addDynamicInterfaceType = func(valueType types.Type) {
 		if valueType == nil {
 			return
 		}
 		valueType = canonicalAliasType(valueType)
-		key := goTypeKey(fset, valueType)
+		key := interfaceKeys.of(valueType)
 		if dynamicInterfaceTypes[key] != nil {
 			return
 		}
 		dynamicInterfaceTypes[key] = valueType
 
 		if named, ok := types.Unalias(valueType).(*types.Named); ok {
-			addDynamicInterfaceType(types.NewPointer(named))
+			addDynamicInterfaceType(interfaceKeys.pointerTo(named))
 		}
 		switch value := valueType.Underlying().(type) {
 		case *types.Pointer:
@@ -876,17 +877,18 @@ func isMapRangeType(valueType types.Type) bool {
 
 func collectDynamicTypes(fset *token.FileSet, rootInfo *types.Info, units map[string]*sourceUnit) []types.Type {
 	byKey := make(map[string]types.Type)
+	typeKeys := newTypeKeyMemo(fset)
 	add := func(valueType types.Type) {
 		if valueType == nil {
 			return
 		}
-		key := goTypeKey(fset, valueType)
+		key := typeKeys.of(valueType)
 		if _, exists := byKey[key]; !exists {
 			byKey[key] = valueType
 		}
 		if named, ok := types.Unalias(valueType).(*types.Named); ok {
-			pointer := types.NewPointer(named)
-			pointerKey := goTypeKey(fset, pointer)
+			pointer := typeKeys.pointerTo(named)
+			pointerKey := typeKeys.of(pointer)
 			if _, exists := byKey[pointerKey]; !exists {
 				byKey[pointerKey] = pointer
 			}
@@ -1030,4 +1032,53 @@ func orderedUnits(units map[string]*sourceUnit) []*sourceUnit {
 		ordered = append(ordered, units[path])
 	}
 	return ordered
+}
+
+// A typeKeyMemo is goTypeKey's answer kept for the length of one walk.
+//
+// goTypeKey renders a type to the text every content-derived symbol name is
+// hashed from, and the reachability walk asks for the same handful of types over
+// and over -- once per occurrence, and again down every path that reaches them.
+// An allocation profile of `fmt.Println("Hello, World!")` put types.TypeString
+// beneath these two walks at 148 MB, 15% of everything the compile allocated,
+// for text that is hashed and dropped.
+//
+// pointerTo is the other half and the less obvious one: types.NewPointer builds
+// a fresh *types.Pointer every call, so the pointer form of a named type has a
+// new identity each time and could never hit a memo keyed on identity. Keeping
+// the pointer keeps its key reachable too.
+//
+// Keyed on identity rather than spelling: two structurally equal types built
+// separately get their own entries, which costs a recomputation and never a
+// wrong answer. The memo lives as long as the walk and is dropped with it.
+type typeKeyMemo struct {
+	fset     *token.FileSet
+	keys     map[types.Type]string
+	pointers map[types.Type]types.Type
+}
+
+func newTypeKeyMemo(fset *token.FileSet) *typeKeyMemo {
+	return &typeKeyMemo{
+		fset:     fset,
+		keys:     make(map[types.Type]string),
+		pointers: make(map[types.Type]types.Type),
+	}
+}
+
+func (m *typeKeyMemo) of(valueType types.Type) string {
+	if key, ok := m.keys[valueType]; ok {
+		return key
+	}
+	key := goTypeKey(m.fset, valueType)
+	m.keys[valueType] = key
+	return key
+}
+
+func (m *typeKeyMemo) pointerTo(named *types.Named) types.Type {
+	if pointer, ok := m.pointers[named]; ok {
+		return pointer
+	}
+	pointer := types.NewPointer(named)
+	m.pointers[named] = pointer
+	return pointer
 }

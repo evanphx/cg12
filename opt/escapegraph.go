@@ -78,7 +78,7 @@ type escapeGraph struct {
 
 	// definitions is the instruction that defines each temporary, for
 	// scalarValue's walk back through copies and casts.
-	definitions map[uint32]ir.Instr
+	definitions map[uint32]escapeDefinition
 }
 
 func analyzeFunction(byName map[string]*ir.Func, function *ir.Func, facts *EscapeFacts) []ParamFact {
@@ -286,20 +286,26 @@ func (graph *escapeGraph) scalarValue(value ir.Ref) bool {
 		if !defined {
 			return false
 		}
-		if definition.Op != ir.OCopy && definition.Op != ir.OCast {
+		if definition.op != ir.OCopy && definition.op != ir.OCast {
 			return true
 		}
-		value = definition.Arg(0)
+		if len(definition.args) == 0 {
+			return false
+		}
+		value = definition.args[0]
 	}
 	return false
 }
 
 func (graph *escapeGraph) build() {
-	graph.definitions = make(map[uint32]ir.Instr, len(graph.function.Temps))
+	graph.definitions = make(map[uint32]escapeDefinition, len(graph.function.Temps))
 	for _, block := range graph.function.Blocks {
 		for _, instruction := range block.Instrs {
 			if instruction.To.Kind == ir.RefTemp {
-				graph.definitions[instruction.To.ID] = instruction
+				graph.definitions[instruction.To.ID] = escapeDefinition{
+					op:   instruction.Op,
+					args: instruction.Args,
+				}
 			}
 		}
 	}
@@ -713,4 +719,17 @@ func (graph *escapeGraph) summary() []ParamFact {
 		}
 	}
 	return facts
+}
+
+// escapeDefinition is the part of a defining instruction scalarValue reads.
+//
+// It used to be the whole ir.Instr. That is 232 bytes, the map is sized to every
+// temporary in the function, and the graph is built once per function across the
+// whole program -- an allocation profile of a hello-world put this map at 82 MB,
+// 10% of everything the compile allocated, to answer two questions about each
+// entry. Keeping the args slice rather than copying it shares the block's
+// backing array, so the entry is a word and two slice fields.
+type escapeDefinition struct {
+	op   ir.Op
+	args []ir.Ref
 }
