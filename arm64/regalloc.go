@@ -273,8 +273,8 @@ func undefinedAllocationsAtSafepoints(f *ir.Func, cfg *analysis.CFG) map[*ir.Ins
 		// A call that returns its aggregate on the stack has the emitted code copy
 		// the outgoing result area into StackResult afterwards. That write is the
 		// allocation's definition and appears in no operand list.
-		if instruction.Op == ir.OCall && instruction.StackResult.Kind == ir.RefTemp {
-			for _, allocation := range allocationsOf[int(instruction.StackResult.ID)] {
+		if instruction.Op == ir.OCall && instruction.StackResult().Kind == ir.RefTemp {
+			for _, allocation := range allocationsOf[int(instruction.StackResult().ID)] {
 				if tracked[uint32(allocation)] {
 					defined = append(defined, allocation)
 				}

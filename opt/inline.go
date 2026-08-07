@@ -1186,24 +1186,22 @@ func cloneInstr(caller *ir.Func, in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBl
 	// it so this remains a total instruction clone if a later pipeline reorders the
 	// pass.
 	out := ir.Instr{
-		Op:                in.Op,
-		Cls:               in.Cls,
-		To:                mapRef(in.To),
-		Cmp:               in.Cmp,
-		Aux:               in.Aux,
-		Amode:             in.Amode,
-		Unroll:            in.Unroll,
-		RetAgg:            in.RetAgg,
-		RetValues:         in.RetValues,
-		StackResult:       mapRef(in.StackResult),
-		StackResultOffset: in.StackResultOffset,
-		Tail:              in.Tail,
-		Volatile:          in.Volatile,
-		ClosureCall:       in.ClosureCall,
-		ClosureContext:    mapRef(in.ClosureContext),
-		Asm:               in.Asm,
-		Intrin:            in.Intrin,
-		Pos:               in.Pos,
+		Op:             in.Op,
+		Cls:            in.Cls,
+		To:             mapRef(in.To),
+		Cmp:            in.Cmp,
+		Aux:            in.Aux,
+		Amode:          in.Amode,
+		Unroll:         in.Unroll,
+		RetAgg:         in.RetAgg,
+		RetValues:      in.RetValues,
+		Tail:           in.Tail,
+		Volatile:       in.Volatile,
+		ClosureCall:    in.ClosureCall,
+		ClosureContext: mapRef(in.ClosureContext),
+		Asm:            in.Asm,
+		Intrin:         in.Intrin,
+		Pos:            in.Pos,
 	}
 	if in.Blk != nil {
 		out.Blk = mapBlock(in.Blk)
@@ -1213,6 +1211,9 @@ func cloneInstr(caller *ir.Func, in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBl
 	}
 	if out.Op == ir.OCmp && len(out.Args) > 0 && caller.ClassOf(out.Args[0]).IsFloat() {
 		out.Cmp = floatingComparison(out.Cmp)
+	}
+	if !in.StackResult().IsNone() || in.StackResultOffset() != 0 {
+		out.SetStackResult(mapRef(in.StackResult()), in.StackResultOffset())
 	}
 	if in.AggArgs() != nil {
 		out.SetAggArgs(append([]*ir.AggType(nil), in.AggArgs()...))

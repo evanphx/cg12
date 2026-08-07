@@ -33,6 +33,39 @@ type InstrExtra struct {
 	// documents the order as To then Defs). They are defined at the instruction
 	// for liveness and allocation.
 	Defs []Ref
+
+	// StackResult identifies a local aggregate slot that receives an ABIInternal
+	// stack-assigned result, and StackResultOffset is the offset in the outgoing
+	// call frame the emitter copies it from before releasing that frame.
+	//
+	// Only arm64 sets them, and only for a Go-ABI call whose result is
+	// stack-assigned (arm64/lower.go); amd64 never touches them.
+	StackResult       Ref
+	StackResultOffset int64
+}
+
+// StackResult reports the local slot receiving a stack-assigned aggregate
+// result, or R.
+func (in *Instr) StackResult() Ref {
+	if in.Extra == nil {
+		return R
+	}
+	return in.Extra.StackResult
+}
+
+// StackResultOffset reports the outgoing-frame offset that result is copied
+// from, or 0.
+func (in *Instr) StackResultOffset() int64 {
+	if in.Extra == nil {
+		return 0
+	}
+	return in.Extra.StackResultOffset
+}
+
+// SetStackResult records the slot and the frame offset it is copied from.
+func (in *Instr) SetStackResult(slot Ref, offset int64) {
+	e := in.extra()
+	e.StackResult, e.StackResultOffset = slot, offset
 }
 
 // extra returns this instruction's InstrExtra, allocating one if it has none.
