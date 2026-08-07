@@ -114,7 +114,13 @@ for program in "${programs[@]}"; do
 done
 
 # The cross-program arm: every ordered pair, filled by one and used by the other.
-printf '\n%-24s %-24s %-9s %s\n' filled-by compiled verdict note
+#
+# The subject is built on both -O arms against the SAME directory, and the filler
+# fills it without -O. That is not sloppiness: -O is deliberately not a clause of
+# this cache's key, because what is stored is the front end's output and the
+# optimiser runs over the assembled module after the merge. A unit written by a
+# build without -O has to serve one with it, so that is what is checked.
+printf '\n%-24s %-24s %-4s %-9s %s\n' filled-by compiled -O verdict note
 for filler in "${programs[@]}"; do
 	fillerSource="goc/testdata/$filler"
 	[ -f "$fillerSource" ] || continue
@@ -131,24 +137,27 @@ for filler in "${programs[@]}"; do
 			failures=$((failures + 1))
 			continue
 		fi
-		if ! CG12_NOCACHE=1 "$work/goc" -o "$work/crosscold" "$subjectSource" >/dev/null 2>&1; then
-			printf '%-24s %-24s %s\n' "$filler" "$subject" "COLD-BUILD-FAILED"
-			failures=$((failures + 1))
-			continue
-		fi
-		if ! CG12_FUNC_CACHE="$cache" "$work/goc" -o "$work/crosswarm" "$subjectSource" >/dev/null 2>&1; then
-			printf '%-24s %-24s %-9s %s\n' "$filler" "$subject" "FAILED" "did not link against another program's cache"
-			failures=$((failures + 1))
-			continue
-		fi
-		c=$(sha256sum "$work/crosscold" | cut -c1-16)
-		w=$(sha256sum "$work/crosswarm" | cut -c1-16)
-		if [ "$c" = "$w" ]; then
-			printf '%-24s %-24s %-9s %s\n' "$filler" "$subject" identical "$c"
-		else
-			printf '%-24s %-24s %-9s %s\n' "$filler" "$subject" DIFFERENT "cold=$c warm=$w"
-			failures=$((failures + 1))
-		fi
+		for arm in "" "-O"; do
+			if ! CG12_NOCACHE=1 "$work/goc" ${arm:+$arm} -o "$work/crosscold" "$subjectSource" >/dev/null 2>&1; then
+				printf '%-24s %-24s %-4s %s\n' "$filler" "$subject" "${arm:--}" "COLD-BUILD-FAILED"
+				failures=$((failures + 1))
+				continue
+			fi
+			if ! CG12_FUNC_CACHE="$cache" "$work/goc" ${arm:+$arm} -o "$work/crosswarm" "$subjectSource" >/dev/null 2>&1; then
+				printf '%-24s %-24s %-4s %-9s %s\n' "$filler" "$subject" "${arm:--}" "FAILED" \
+					"did not link against another program's cache"
+				failures=$((failures + 1))
+				continue
+			fi
+			c=$(sha256sum "$work/crosscold" | cut -c1-16)
+			w=$(sha256sum "$work/crosswarm" | cut -c1-16)
+			if [ "$c" = "$w" ]; then
+				printf '%-24s %-24s %-4s %-9s %s\n' "$filler" "$subject" "${arm:--}" identical "$c"
+			else
+				printf '%-24s %-24s %-4s %-9s %s\n' "$filler" "$subject" "${arm:--}" DIFFERENT "cold=$c warm=$w"
+				failures=$((failures + 1))
+			fi
+		done
 		rm -rf "$cache"
 	done
 done

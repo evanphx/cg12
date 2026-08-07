@@ -7790,3 +7790,58 @@ already is in substance, since the comment on it says the calls "touch neither
 g.cur nor g.fn". That changes the order data is appended in on the COLD path,
 which is why it is not in this change: the 812-of-812 arm against `main` would
 have to be re-established, and this change is the one that has to be right.
+
+## 8. What is not covered
+
+- **The `-O` cross-program arm is checked on three programs, not the corpus.**
+  `-O` is deliberately not a clause of this cache's key — units are the front
+  end's output and the optimiser runs after the merge — so a unit written without
+  `-O` has to serve a build with it. `scripts/function-cache-check.sh` now checks
+  both arms for every ordered pair of its programs and all pass;
+  `scripts/function-cache-corpus-check.sh` runs the non-`-O` arm only, because
+  406 programs × 2 arms × 2 builds is a gate's job, not this change's.
+- **One filler at a time.** The corpus arm fills from a single program.
+  `fmt_sprintf.go` and `stdlib_http_tls_client_server.go` were both run and both
+  gave 406 of 406; a cache filled by *many* programs at once is the concurrency
+  arm, which is 72 of 72 but on 24 programs rather than 406.
+- **The nine mint sites were found by reading, and confirmed by the corpus.**
+  There is no mechanical proof that lowering has no tenth site that interns
+  without journalling. What there is: a site that is missed produces a reference
+  with no definition, `collectScope` refuses the declaration rather than writing
+  the unit, and the corpus arm would show it as a lost hit rather than a wrong
+  binary. Six declarations of 3204 are refused that way on `fmt_sprintf` today,
+  all of them for artifacts minted inside a refused declaration.
+- **Not run, per the brief:** the corpus suite as a whole beyond what
+  `make verify-fast` carries, the capability matrix beyond its two shards,
+  `make test-unit` standalone, the four audits and the crash loops.
+  `TestCheckedRuntimeCoverageBaselineDenominator` fails on `main` too and was not
+  investigated.
+
+## 9. Verdict
+
+The design is **(a)**: a unit carries the definition of every interned artifact it
+references, and the merge deduplicates by content. (b) was rejected on evidence,
+not taste — `.goc.type.<sha8>` hashes a type's *spelling*, not its definition, so
+an independently keyed artifact unit would serve a stale descriptor silently after
+any edit to the type, and making it sound needs a per-artifact transitive
+dependency set that nothing in the tree computes.
+
+The property established: a unit is self-sufficient. Every artifact a stored
+declaration names travels with it, at the position the declaration named it, and a
+replay puts it in the module only if the module does not already have it — which is
+what a cold compile does.
+
+**All 406 corpus programs link and match their own cold image against a cache
+filled by a different program**, from either of two fillers; the gate's 357
+failures out of 408 are zero. Both orders of a disjoint-closure pair are
+byte-identical to their own cold builds, as a test
+(`TestCacheFilledByAProgramWithADisjointClosure`) and as a script arm. The gate's
+other results hold: 812 of 812 default-path builds identical to `main`, 72 of 72
+under 24 concurrent processes sharing one directory, 23 packages invalidated on a
+leaf edit. Build, vet, gofmt, `make verify-fast`, `TestIRVerifyAudit` and
+`scripts/determinism-check.sh` all pass.
+
+The cost is stated in §7 and is real: http/tls loses more than half its compile-time
+saving, because a declaration that converts to a non-empty interface reads the
+program's implementation set and can no longer be a unit. That is recoverable and
+the recovery is named.
