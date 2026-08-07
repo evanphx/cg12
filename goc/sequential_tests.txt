@@ -67,6 +67,9 @@
 #            test is parallel.
 # timing     Measures elapsed time on a pinned core and has a pre-flight that
 #            refuses a busy box. Flag-gated, so it skips in a normal run.
+# inlinedeps Installs opt's process-global inline-dependency recorder, which
+#            panics rather than nest and would otherwise record whatever else in
+#            the process happened to be optimising.
 TestAddressNestedInReturnedCompositeEscapes	placement
 TestAllocationCensus	placement
 TestAllocationCounts	placement
@@ -152,3 +155,7 @@ TestStdlibOverlayRejectsReplacementWithoutUpstreamHash	setenv
 TestNoSplitBudgetErrorNamesTheAllocatorChainWhenItIsForced	setenv
 TestCryptoSigningBench	timing
 TestPerformanceSuite	timing
+TestWarmCompileIsByteIdenticalToCold	setenv
+TestNoCacheBypassesTheStore	setenv
+TestCacheFilledByAnotherProgramIsUsable	setenv
+TestOptimiserIsAFunctionOfTheWholeModule	inlinedeps

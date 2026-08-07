@@ -76,6 +76,13 @@ var wholeCompilationGenFields = []string{
 	"dynamicInitializers",
 	"dynamicInitializerGuards",
 	"dynamicInitializerFunctions",
+	// interns is the per-function cache's journal of the interning decisions the
+	// tables above recorded. It has to be inherited for exactly the reason those
+	// tables do: a wrapper or adapter built by a derived generator interns symbols
+	// through the same maps, so a derived generator with its own journal would
+	// leave the cache a delta that is missing whatever the wrapper interned, and
+	// the next declaration to want that symbol would mint a second one.
+	"interns",
 }
 
 // fullyPopulatedGen returns a gen with every single field set to a distinct
@@ -123,6 +130,7 @@ func fullyPopulatedGen() *gen {
 		dynamicInitializers:         map[types.Object]*globalInitializer{},
 		dynamicInitializerGuards:    map[types.Object]string{},
 		dynamicInitializerFunctions: map[types.Object]string{},
+		interns:                     &internJournal{},
 
 		// Source context.
 		file: &ast.File{},

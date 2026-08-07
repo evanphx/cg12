@@ -215,7 +215,7 @@ func readSequentialTestList(t *testing.T) map[string]string {
 			t.Fatalf("%s:%d: want '<test name>\\t<reason tag>', got %q", sequentialTestList, number, line)
 		}
 		switch reason {
-		case "census", "placement", "setenv", "timing":
+		case "census", "inlinedeps", "placement", "setenv", "timing":
 		default:
 			t.Errorf("%s:%d: unknown reason tag %q for %s; the tags are documented in the file header",
 				sequentialTestList, number, reason, name)

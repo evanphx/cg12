@@ -54,7 +54,6 @@ func TestWarmCompileIsByteIdenticalToCold(t *testing.T) {
 	coldBytes := moduleBytes(t, cold)
 
 	warm, warmStats := compileWithCache(t, directory, "cachecold.go", programCacheSmall)
-	t.Logf("cold: %s", coldStats)
 	t.Logf("warm: %s", warmStats)
 	require.Greater(t, warmStats.PackagesHit, 10, "the warm compile hit no package")
 	require.Greater(t, warmStats.Hits, 1000, "the warm compile replayed almost nothing")
@@ -131,6 +130,8 @@ func TestCacheFilledByAnotherProgramIsUsable(t *testing.T) {
 // sound under cross-package inlining: a package whose *dependency* moved must not
 // serve its old unit, even though its own source is untouched.
 func TestChangedDependencyInvalidatesTheUnit(t *testing.T) {
+	t.Parallel()
+
 	identity, err := ProgramCompileIdentity(TargetARM64, false, "ident.go", []byte(programCacheSmall))
 	require.NoError(t, err)
 
