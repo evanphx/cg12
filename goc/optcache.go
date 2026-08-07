@@ -3,6 +3,7 @@ package goc
 import (
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -238,14 +239,22 @@ func optimiserMemoDirectory() string {
 // compilerIdentity hashes the running binary. Every pass, every heuristic and
 // every constant in the optimiser is part of what produced a memoised body, and
 // none of them are otherwise in the key.
+// It streams rather than reading the file, because the thing being hashed is
+// the goc binary and goc is tens of megabytes: os.ReadFile made a transient
+// that size on every compile, to produce 32 characters.
 var compilerIdentity = sync.OnceValue(func() string {
 	executable, err := os.Executable()
 	if err != nil {
 		return "unknown"
 	}
-	contents, err := os.ReadFile(executable)
+	file, err := os.Open(executable)
 	if err != nil {
 		return "unknown"
 	}
-	return fmt.Sprintf("%x", sha256.Sum256(contents))[:32]
+	defer file.Close()
+	digest := sha256.New()
+	if _, err := io.Copy(digest, file); err != nil {
+		return "unknown"
+	}
+	return fmt.Sprintf("%x", digest.Sum(nil))[:32]
 })
