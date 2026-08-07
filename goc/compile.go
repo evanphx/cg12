@@ -9172,14 +9172,28 @@ func (g *gen) ensureRuntimeTypeEqual(valueType types.Type, typeTag string) strin
 
 	g.emitRuntimeTypeEqual(valueType, symbol)
 	descriptor := g.staticFunctionDescriptor(symbol)
-	for _, data := range g.mod.Data {
+	// This writes into a datum some EARLIER declaration emitted, which is the one
+	// place in lowering that is not append-only, and so the one place the
+	// per-function cache cannot capture by recording what a declaration added. The
+	// journal carries the write itself; see internTypeEqualTarget.
+	if setRuntimeTypeEqualDescriptor(g.mod, typeTag, descriptor) {
+		g.interns.note(internTypeEqualTarget, typeTag, descriptor)
+	}
+	return symbol
+}
+
+// setRuntimeTypeEqualDescriptor points a type descriptor's Equal field at the
+// function descriptor of its equality routine, and reports whether it found the
+// descriptor to point.
+func setRuntimeTypeEqualDescriptor(module *ir.Module, typeTag, descriptor string) bool {
+	for _, data := range module.Data {
 		if data.Name != typeTag || len(data.Items) < 4 {
 			continue
 		}
 		data.Items[3] = ir.DataItem{Sub: ir.SubL, Sym: descriptor}
-		break
+		return true
 	}
-	return symbol
+	return false
 }
 
 func (g *gen) emitRuntimeTypeEqual(valueType types.Type, symbol string) {

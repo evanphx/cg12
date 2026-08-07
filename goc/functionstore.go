@@ -81,6 +81,20 @@ const (
 	// internGoABIType is gen.goABITypes. The value is the aggregate's name, which
 	// is content-derived, so the replay finds the decoded *ir.AggType by it.
 	internGoABIType
+	// internTypeEqualTarget is not an intern table at all: it is the one write
+	// lowering makes to a datum an EARLIER declaration emitted.
+	// ensureRuntimeTypeEqual generates a type's equality routine and then points
+	// that type's descriptor at it, and the descriptor generally belongs to
+	// whichever declaration first needed the type. A delta that records only what
+	// its declaration ADDED cannot express that, so the write is journalled and
+	// replayed: key is the descriptor's symbol, value is the function descriptor
+	// to point it at.
+	//
+	// It is the reason this list is a journal of operations rather than a set of
+	// map deltas. Finding it took a whole-program comparison of an http build --
+	// one datum in 42130, `crypto/x509.UnknownAuthorityError`'s descriptor, whose
+	// Equal field was a function pointer cold and nil warm.
+	internTypeEqualTarget
 )
 
 // internNote is one entry added to one of those tables.
@@ -124,7 +138,7 @@ func (j *internJournal) since(mark int) []internNote {
 // [FunctionCacheUnitVersion], which versions the meaning of a key. Either one
 // moving is a miss; they move for different reasons and a reader should be able
 // to tell which.
-const packageUnitVersion = 1
+const packageUnitVersion = 2
 
 const packageUnitMagic = "gocfn1"
 

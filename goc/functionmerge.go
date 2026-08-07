@@ -473,6 +473,11 @@ func (c *functionCache) replay(g *gen, declaration *cachedDeclaration) error {
 			if aggregate := canonical[note.Value]; aggregate != nil {
 				g.goABITypes[note.Key] = aggregate
 			}
+		case internTypeEqualTarget:
+			// The descriptor is either in this delta -- appended above -- or in one an
+			// earlier declaration contributed, so the module is what is searched
+			// rather than the unit.
+			setRuntimeTypeEqualDescriptor(module, note.Key, note.Value)
 		}
 	}
 	c.replayed[declaration.Decl] = true
