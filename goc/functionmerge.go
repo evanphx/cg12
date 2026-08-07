@@ -999,11 +999,11 @@ func (c *functionCache) internFunctionAggregates(function *ir.Func) {
 		for index := range block.Instrs {
 			instruction := &block.Instrs[index]
 			instruction.RetAgg = c.internAggregate(instruction.RetAgg)
-			for argument := range instruction.AggArgs {
-				instruction.AggArgs[argument] = c.internAggregate(instruction.AggArgs[argument])
+			for argument := range instruction.AggArgs() {
+				instruction.AggArgs()[argument] = c.internAggregate(instruction.AggArgs()[argument])
 			}
-			for group := range instruction.ArgGroups {
-				instruction.ArgGroups[group].Type = c.internAggregate(instruction.ArgGroups[group].Type)
+			for group := range instruction.ArgGroups() {
+				instruction.ArgGroups()[group].Type = c.internAggregate(instruction.ArgGroups()[group].Type)
 			}
 		}
 	}

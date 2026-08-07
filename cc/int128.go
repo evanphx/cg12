@@ -276,7 +276,7 @@ func (g *gen) int128ToFloat(v ir.Ref, from, to moderncc.Type) ir.Ref {
 		fn = "__floatuntisf"
 	}
 	r := g.cur.Call(clsOf(to), g.fn.Sym(fn, 0), v)
-	g.lastInstr().AggArgs = []*ir.AggType{g.int128Agg()}
+	g.lastInstr().SetAggArgs([]*ir.AggType{g.int128Agg()})
 	return r
 }
 
@@ -458,7 +458,7 @@ func (g *gen) ti3(fn string, a, b ir.Ref) ir.Ref {
 	r := g.cur.Call(ir.ClsL, g.fn.Sym(fn, 0), a, b)
 	call := g.lastInstr()
 	call.RetAgg = g.int128Agg()
-	call.AggArgs = []*ir.AggType{g.int128Agg(), g.int128Agg()}
+	call.SetAggArgs([]*ir.AggType{g.int128Agg(), g.int128Agg()})
 	return r
 }
 
@@ -480,6 +480,6 @@ func (g *gen) ti3ShiftAddr(fn string, addr ir.Ref, rn moderncc.ExpressionNode) i
 	r := g.cur.Call(ir.ClsL, g.fn.Sym(fn, 0), addr, n)
 	call := g.lastInstr()
 	call.RetAgg = g.int128Agg()
-	call.AggArgs = []*ir.AggType{g.int128Agg(), nil}
+	call.SetAggArgs([]*ir.AggType{g.int128Agg(), nil})
 	return r
 }

@@ -294,7 +294,7 @@ func (p *parser) parseAsm(b *ir.Block, resName string, cls ir.Cls) {
 				instruction.Cls = outputClass
 				instruction.To = outputRef
 			} else {
-				instruction.Defs = append(instruction.Defs, outputRef)
+				instruction.AddDef(outputRef)
 			}
 			if readWrite {
 				p.expectPunct(",")
@@ -448,7 +448,7 @@ func (p *parser) parseCall(b *ir.Block, resName string, cls ir.Cls, tail bool) {
 	}
 	in := ir.Instr{Op: ir.OCall, Cls: cls, Args: args, RetAgg: p.callRetAgg, Tail: tail}
 	if anyAgg {
-		in.AggArgs = aggArgs
+		in.SetAggArgs(aggArgs)
 	}
 	if resName != "" {
 		in.To = p.defTemp(resName, cls)

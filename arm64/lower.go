@@ -1203,7 +1203,7 @@ func lowerCalls(f *ir.Func, conventions calleeConventions) error {
 			var argSetup []ir.Instr // the OArg run, emitted after value computation
 			a := newArgAssigner(goInternal)
 			for argumentIndex := 0; argumentIndex < len(callArgs); {
-				if group, ok := ir.ValueGroupAt(in.ArgGroups, argumentIndex); goInternal && ok {
+				if group, ok := ir.ValueGroupAt(in.ArgGroups(), argumentIndex); goInternal && ok {
 					end := argumentIndex + group.Count
 					if end > len(callArgs) {
 						return fmt.Errorf("arm64: aggregate argument group extends beyond call argument list")
@@ -1265,7 +1265,7 @@ func lowerCalls(f *ir.Func, conventions calleeConventions) error {
 				if goInternal {
 					var err error
 					if in.RetValues {
-						destinations := append([]ir.Ref{in.To}, in.Defs...)
+						destinations := append([]ir.Ref{in.To}, in.Defs()...)
 						callTo, callCls, callDefs, argSetup, pins, post, stackResult, stackResultOffset, resultEnd, err =
 							lowerGoValueResult(f, destinations, in.RetAgg, resultEnd, &out, argSetup, pins)
 					} else {
@@ -1277,7 +1277,7 @@ func lowerCalls(f *ir.Func, conventions calleeConventions) error {
 					}
 				} else if in.RetValues {
 					var err error
-					destinations := append([]ir.Ref{in.To}, in.Defs...)
+					destinations := append([]ir.Ref{in.To}, in.Defs()...)
 					callTo, callCls, callDefs, argSetup, pins, post, err =
 						lowerAAPCSValueResult(f, destinations, in.RetAgg, &a, &out, argSetup, pins)
 					if err != nil {
@@ -1314,7 +1314,7 @@ func lowerCalls(f *ir.Func, conventions calleeConventions) error {
 			}
 			loweredCall := ir.Instr{
 				Op: ir.OCall, Args: append([]ir.Ref{callee}, pins...),
-				Aux: int64(stackBytes), To: callTo, Cls: callCls, Defs: callDefs,
+				Aux: int64(stackBytes), To: callTo, Cls: callCls, Extra: &ir.InstrExtra{Defs: callDefs},
 				Tail: in.Tail, ClosureCall: in.ClosureCall, ClosureContext: in.ClosureContext,
 				Pos: in.Pos, Inl: in.Inl,
 				CallConv: ir.CallConvPlatform, CallConvSet: true,

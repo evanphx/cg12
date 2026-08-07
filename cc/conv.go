@@ -300,12 +300,12 @@ func (g *gen) genCall(n *moderncc.PostfixExpression) ir.Ref {
 		r := g.cur.Call(ir.ClsL, callee, args...)
 		call := g.lastInstr()
 		call.RetAgg = g.aggTypeOf(ft.Result())
-		call.AggArgs = aggArgs
+		call.SetAggArgs(aggArgs)
 		return r
 	}
 	if ft != nil && ft.Result().Kind() == moderncc.Void {
 		g.cur.CallVoid(callee, args...)
-		g.lastInstr().AggArgs = aggArgs
+		g.lastInstr().SetAggArgs(aggArgs)
 		return ir.R
 	}
 	retCls := ir.ClsW
@@ -313,7 +313,7 @@ func (g *gen) genCall(n *moderncc.PostfixExpression) ir.Ref {
 		retCls = clsOf(ft.Result())
 	}
 	r := g.cur.Call(retCls, callee, args...)
-	g.lastInstr().AggArgs = aggArgs
+	g.lastInstr().SetAggArgs(aggArgs)
 	return r
 }
 

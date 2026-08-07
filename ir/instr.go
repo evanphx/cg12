@@ -76,20 +76,14 @@ type Instr struct {
 	//
 	// Declared with the other single-byte fields at the top of the struct.
 
-	// AggArgs types by-value aggregate call arguments: for an OCall, AggArgs[k]
-	// (when non-nil) is the aggregate type of the value argument Args[1+k],
-	// which is a pointer to that aggregate. nil entries are scalar arguments.
-	AggArgs []*AggType
-
-	// ArgGroups describes aggregate call arguments that have already been
-	// scalarized into consecutive entries of Args[1:]. Unlike AggArgs, whose
-	// argument is an address, an ArgGroup carries the value's scalar SSA parts.
-	ArgGroups []ValueGroup
-
-	// Defs lists physical-register results an OCall produces beyond To — the
-	// extra registers of a multi-register aggregate return. They are defined at
-	// the call for liveness/allocation.
-	Defs []Ref
+	// Extra holds the fields only a narrow set of opcodes ever uses. It is nil
+	// for the great majority of instructions -- see [InstrExtra].
+	//
+	// Reach it through the accessors ([Instr.AggArgs()], [Instr.SetAggArgs] and
+	// friends), not directly: they read through a nil Extra and allocate one
+	// only on write, so a caller never has to know whether this instruction has
+	// one.
+	Extra *InstrExtra
 
 	// RetAgg is the aggregate type of an OCall's result (the result temporary is
 	// a pointer to it), or nil for a scalar result.
@@ -220,7 +214,7 @@ func (in *Instr) AsmRegOuts() []Ref {
 	if in.Asm == nil || in.To.Kind != RefTemp {
 		return nil
 	}
-	return append([]Ref{in.To}, in.Defs...)
+	return append([]Ref{in.To}, in.Defs()...)
 }
 
 // InlineSite describes one level of inlining: a call to Callee at the source

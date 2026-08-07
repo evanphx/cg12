@@ -254,8 +254,8 @@ func argumentsWidenedToParameters(target *ir.Func, instruction ir.Instr, argumen
 	for _, group := range target.ParamGroups {
 		parameterGroups[group.Index] = group
 	}
-	argumentGroups := make(map[int]ir.ValueGroup, len(instruction.ArgGroups))
-	for _, group := range instruction.ArgGroups {
+	argumentGroups := make(map[int]ir.ValueGroup, len(instruction.ArgGroups()))
+	for _, group := range instruction.ArgGroups() {
 		argumentGroups[group.Index] = group
 	}
 
@@ -303,13 +303,13 @@ func argumentsWidenedToParameters(target *ir.Func, instruction ir.Instr, argumen
 }
 
 // aggregateArgumentType names the aggregate one value argument carries, or nil
-// when the argument is an ordinary scalar. ir.Instr.AggArgs is indexed over the
+// when the argument is an ordinary scalar. ir.Instr.AggArgs() is indexed over the
 // value arguments, which is the same indexing the callers use.
 func aggregateArgumentType(instruction ir.Instr, index int) *ir.AggType {
-	if index < 0 || index >= len(instruction.AggArgs) {
+	if index < 0 || index >= len(instruction.AggArgs()) {
 		return nil
 	}
-	return instruction.AggArgs[index]
+	return instruction.AggArgs()[index]
 }
 
 // scalarisedArgumentsAlign reports that a call's scalarised aggregate arguments
@@ -325,13 +325,13 @@ func aggregateArgumentType(instruction ir.Instr, index int) *ir.AggType {
 // A call with no groups at all is left alone rather than compared against the
 // callee's, so this can only widen what the summaries answer, never narrow it.
 func scalarisedArgumentsAlign(target *ir.Func, instruction ir.Instr) bool {
-	if len(instruction.ArgGroups) == 0 {
+	if len(instruction.ArgGroups()) == 0 {
 		return true
 	}
-	if len(target.ParamGroups) != len(instruction.ArgGroups) {
+	if len(target.ParamGroups) != len(instruction.ArgGroups()) {
 		return false
 	}
-	for index, argument := range instruction.ArgGroups {
+	for index, argument := range instruction.ArgGroups() {
 		parameter := target.ParamGroups[index]
 		if parameter.Index != argument.Index || parameter.Count != argument.Count {
 			return false
@@ -368,7 +368,7 @@ func callLeaksToTrackedResult(instruction ir.Instr, target *ir.Func, fact ParamF
 	if fact.Escape != ParamLeaksToResult || fact.Result != 0 {
 		return false
 	}
-	if target.RetAgg != nil || !target.HasRet || len(instruction.Defs) > 0 {
+	if target.RetAgg != nil || !target.HasRet || len(instruction.Defs()) > 0 {
 		return false
 	}
 	if instruction.To.Kind != ir.RefTemp {

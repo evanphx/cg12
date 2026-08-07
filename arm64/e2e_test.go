@@ -374,8 +374,8 @@ func TestE2EStackedAggregateArg(t *testing.T) {
 	args := []ir.Ref{f.Word(0), f.Word(0), f.Word(0), f.Word(0), f.Word(0), f.Word(0), f.Word(0), f.Word(0), p}
 	r := e.Call(ir.ClsW, f.Sym("sink", 0), args...)
 	call := &e.Instrs[len(e.Instrs)-1]
-	call.AggArgs = make([]*ir.AggType, 9)
-	call.AggArgs[8] = pair
+	call.SetAggArgs(make([]*ir.AggType, 9))
+	call.AggArgs()[8] = pair
 	e.Ret(r)
 
 	_, code := buildAndRun(t, m, `

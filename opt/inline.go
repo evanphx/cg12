@@ -863,7 +863,7 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 	call := b.Instrs[idx]
 	args := call.Args[1:]
 	results := []ir.Ref{call.To}
-	results = append(results, call.Defs...)
+	results = append(results, call.Defs()...)
 
 	// An aggregate-returning callee returns a pointer to its value; the call's
 	// result is a pointer to a buffer holding a copy of it. Materialize that buffer
@@ -1214,14 +1214,14 @@ func cloneInstr(caller *ir.Func, in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBl
 	if out.Op == ir.OCmp && len(out.Args) > 0 && caller.ClassOf(out.Args[0]).IsFloat() {
 		out.Cmp = floatingComparison(out.Cmp)
 	}
-	if in.AggArgs != nil {
-		out.AggArgs = append([]*ir.AggType(nil), in.AggArgs...)
+	if in.AggArgs() != nil {
+		out.SetAggArgs(append([]*ir.AggType(nil), in.AggArgs()...))
 	}
-	if in.ArgGroups != nil {
-		out.ArgGroups = append([]ir.ValueGroup(nil), in.ArgGroups...)
+	if in.ArgGroups() != nil {
+		out.SetArgGroups(append([]ir.ValueGroup(nil), in.ArgGroups()...))
 	}
-	for _, d := range in.Defs {
-		out.Defs = append(out.Defs, mapRef(d))
+	for _, d := range in.Defs() {
+		out.AddDef(mapRef(d))
 	}
 	return out
 }

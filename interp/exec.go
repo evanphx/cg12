@@ -196,8 +196,8 @@ func (mc *Machine) doIRCall(fr *frame, in *ir.Instr, f *ir.Func) error {
 		// A by-value aggregate argument arrives as a pointer; copy the aggregate
 		// into fresh stack storage so the callee mutating its parameter cannot be
 		// seen by the caller (QBE's by-value semantics).
-		if k < len(in.AggArgs) && in.AggArgs[k] != nil {
-			size, align := in.AggArgs[k].Layout()
+		if k < len(in.AggArgs()) && in.AggArgs()[k] != nil {
+			size, align := in.AggArgs()[k].Layout()
 			buf := mc.stackAlloc(uint64(size), uint64(align))
 			if err := mc.copyMem(buf, v.u64(), size); err != nil {
 				return err

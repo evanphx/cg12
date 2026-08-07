@@ -120,7 +120,7 @@ func (c *compiler) emitCall(in *ir.Instr) {
 	site := callSite{
 		argBase: c.argBase,
 		nArgs:   len(args),
-		aggArgs: in.AggArgs,
+		aggArgs: in.AggArgs(),
 		retAgg:  in.RetAgg,
 	}
 	if !in.To.IsNone() {

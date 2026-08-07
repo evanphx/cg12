@@ -198,7 +198,7 @@ func escapingDefs(f *ir.Func, b *ir.Block) []ir.Ref {
 		if in.To.Kind == ir.RefTemp {
 			defs[in.To.ID] = true
 		}
-		for _, d := range in.Defs {
+		for _, d := range in.Defs() {
 			if d.Kind == ir.RefTemp {
 				defs[d.ID] = true
 			}
@@ -247,7 +247,7 @@ func escapingDefs(f *ir.Func, b *ir.Block) []ir.Ref {
 		if in.To.Kind == ir.RefTemp && escaped[in.To.ID] {
 			out = append(out, in.To)
 		}
-		for _, d := range in.Defs {
+		for _, d := range in.Defs() {
 			if d.Kind == ir.RefTemp && escaped[d.ID] {
 				out = append(out, d)
 			}
@@ -609,7 +609,7 @@ func tempLiveIn(f *ir.Func, cfg *analysis.CFG, vars []reconVar) map[*ir.Block]ma
 			if vi, ok := escIndex(idOf, in.To); ok {
 				dfd[vi] = true
 			}
-			for _, d := range in.Defs {
+			for _, d := range in.Defs() {
 				if vi, ok := escIndex(idOf, d); ok {
 					dfd[vi] = true
 				}

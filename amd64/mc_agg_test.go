@@ -35,7 +35,7 @@ func TestObjAggIntPairArg(t *testing.T) {
 	e.StoreSub(ir.SubW, f.Word(35), e.Add(ir.ClsL, ptr, f.Long(4)))
 	r := e.Call(ir.ClsW, f.Sym("sum2", 0), ptr)
 	call := &e.Instrs[len(e.Instrs)-1]
-	call.AggArgs = []*ir.AggType{pair}
+	call.SetAggArgs([]*ir.AggType{pair})
 	e.Ret(e.Sub(ir.ClsW, r, f.Word(42)))
 	require.Equal(t, 0, runObj(t, m))
 }
@@ -61,7 +61,7 @@ func TestObjAggFourIntArg(t *testing.T) {
 	}
 	r := e.Call(ir.ClsW, f.Sym("sum4", 0), ptr)
 	call := &e.Instrs[len(e.Instrs)-1]
-	call.AggArgs = []*ir.AggType{quad}
+	call.SetAggArgs([]*ir.AggType{quad})
 	e.Ret(e.Sub(ir.ClsW, r, f.Word(10))) // 1+2+3+4
 	require.Equal(t, 0, runObj(t, m))
 }
@@ -84,7 +84,7 @@ func TestObjAggDoublePairArg(t *testing.T) {
 	e.Store(f.Double(2.5), e.Add(ir.ClsL, ptr, f.Long(8)))
 	r := e.Call(ir.ClsW, f.Sym("sumd", 0), ptr)
 	call := &e.Instrs[len(e.Instrs)-1]
-	call.AggArgs = []*ir.AggType{vec}
+	call.SetAggArgs([]*ir.AggType{vec})
 	e.Ret(e.Sub(ir.ClsW, r, f.Word(4))) // 1.5+2.5 == 4.0
 	require.Equal(t, 0, runObj(t, m))
 }
@@ -107,7 +107,7 @@ func TestObjAggMixedArg(t *testing.T) {
 	e.Store(f.Double(32.0), e.Add(ir.ClsL, ptr, f.Long(8)))
 	r := e.Call(ir.ClsW, f.Sym("mix", 0), ptr)
 	call := &e.Instrs[len(e.Instrs)-1]
-	call.AggArgs = []*ir.AggType{mixed}
+	call.SetAggArgs([]*ir.AggType{mixed})
 	e.Ret(e.Sub(ir.ClsW, r, f.Word(42))) // 10 + 32
 	require.Equal(t, 0, runObj(t, m))
 }
@@ -173,7 +173,7 @@ func TestObjAggMemoryArgReturn(t *testing.T) {
 	mkcall.RetAgg = big
 	r := e.Call(ir.ClsW, f.Sym("sumbig", 0), s)
 	sumcall := &e.Instrs[len(e.Instrs)-1]
-	sumcall.AggArgs = []*ir.AggType{big}
+	sumcall.SetAggArgs([]*ir.AggType{big})
 	e.Ret(e.Sub(ir.ClsW, r, f.Word(75)))
 	require.Equal(t, 0, runObj(t, m))
 }

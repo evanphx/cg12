@@ -114,7 +114,7 @@ func refreshRematAllocas(f *ir.Func, remat map[int]rematRule) {
 // the selection driver's src path (which rebuilds a rematerialised value), rather than
 // a parallel move, memcpy, or frame-address path that reads a spill slot directly.
 func srcResolvesOperands(in *ir.Instr) bool {
-	if in.AggArgs != nil || in.RetAgg != nil {
+	if in.AggArgs() != nil || in.RetAgg != nil {
 		return false
 	}
 	switch in.Op {
