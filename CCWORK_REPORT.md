@@ -7724,3 +7724,19 @@ The http/tls cache is *smaller*: three packages no longer get a file at all,
 because every cacheable declaration in them consulted the program's
 implementation set and is now refused. Per-file sizes on `fmt_sprintf`: min 1.1
 kB, median 56 kB, max 9.4 MB (`runtime`), mean 375 kB.
+
+**Staleness exactness.** One line appended to `stdlib/src/internal/byteorder/byteorder.go`,
+a leaf, and nothing else. The next compile of `fmt_sprintf.go` went from 45 of 45
+packages hit to **22 of 45, rewriting 23 files** — the 23 packages whose
+transitive identity that leaf is part of, and no others. The gate's number.
+
+**`scripts/function-cache-check.sh`.** All four programs on both `-O` arms:
+`nocache`, `cold` and `warm` byte-identical. All **12 ordered cross-program pairs**
+of those four programs: the warm image identical to the subject's own `nocache`
+build. Warm is still the fastest of the three (`hello` 4.19 s against 5.50 s
+uncached, http/tls 30.0 s against 33.0 s).
+
+**Corpus, second filler.** Filled by `stdlib_http_tls_client_server.go` instead:
+**406 identical, 0 different, 0 failed to link.**
+
+**`TestIRVerifyAudit`**: ok (177 s).
