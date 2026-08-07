@@ -42,6 +42,40 @@ type InstrExtra struct {
 	// stack-assigned (arm64/lower.go); amd64 never touches them.
 	StackResult       Ref
 	StackResultOffset int64
+
+	// Unroll is the recursion depth the inliner marks an OCall with while it
+	// decides how far to unroll a cycle. It is transient: opt clears it when the
+	// unroller is done, and nothing outside opt reads it.
+	//
+	// It has a field of its own because it used to live in Aux, which an OCall
+	// also uses for its outgoing stack bytes. The two never met -- the backend's
+	// ABI lowering rebuilds the call instruction, so a stale depth was
+	// overwritten rather than misread -- but nothing said so, and what kept them
+	// apart was the order the passes happen to run in plus one clearCallDepth
+	// call. Aux is an untyped int64 with several meanings; that is exactly how a
+	// pass reordering turns into a wrong stack frame.
+	Unroll int32
+}
+
+// Unroll reports the inliner's recursion depth for this call, or 0.
+func (in *Instr) Unroll() int32 {
+	if in.Extra == nil {
+		return 0
+	}
+	return in.Extra.Unroll
+}
+
+// SetUnroll records the inliner's recursion depth.
+//
+// Clearing a depth that was never set allocates nothing: the unroller sweeps
+// every instruction of a function to reset the marks it left, and an
+// InstrExtra per instruction is exactly what this field was moved out of Instr
+// to avoid.
+func (in *Instr) SetUnroll(depth int32) {
+	if depth == 0 && in.Extra == nil {
+		return
+	}
+	in.extra().Unroll = depth
 }
 
 // StackResult reports the local slot receiving a stack-assigned aggregate

@@ -1118,7 +1118,7 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 					continue
 				}
 				if g := directCallee(caller, in, cg.byName); g != nil && scc.comp[g] == cycle {
-					in.Unroll = int32(depth + 1)
+					in.SetUnroll(int32(depth + 1))
 				}
 			}
 		}
@@ -1192,7 +1192,6 @@ func cloneInstr(caller *ir.Func, in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBl
 		Cmp:            in.Cmp,
 		Aux:            in.Aux,
 		Amode:          in.Amode,
-		Unroll:         in.Unroll,
 		RetAgg:         in.RetAgg,
 		RetValues:      in.RetValues,
 		Tail:           in.Tail,
@@ -1215,6 +1214,7 @@ func cloneInstr(caller *ir.Func, in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBl
 	if !in.StackResult().IsNone() || in.StackResultOffset() != 0 {
 		out.SetStackResult(mapRef(in.StackResult()), in.StackResultOffset())
 	}
+	out.SetUnroll(in.Unroll())
 	if in.AggArgs() != nil {
 		out.SetAggArgs(append([]*ir.AggType(nil), in.AggArgs()...))
 	}
