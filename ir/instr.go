@@ -67,7 +67,8 @@ type Instr struct {
 	// order the passes happen to run in plus one clearCallDepth call. Aux is an
 	// untyped int64 with several meanings; that is exactly how a pass reordering
 	// turns into a wrong stack frame.
-	Unroll int32
+	// Moved to InstrExtra: only an OCall carries a recursion depth, and only
+	// while the unroller is running.
 
 	// CallConv is the physical convention used by this OCall. Calls default to
 	// the containing function's convention; an explicit override is represented

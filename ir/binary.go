@@ -731,7 +731,7 @@ func (e *enc) encInstr(in *Instr, blockRef func(*Block)) {
 	}
 	e.u8(byte(in.Cmp))
 	e.iv(in.Aux)
-	e.iv(int64(in.Unroll))
+	e.iv(int64(in.Unroll()))
 	e.u8(byte(in.CallConv))
 	e.boolean(in.CallConvSet)
 	e.iv(int64(in.Amode))
@@ -1173,7 +1173,7 @@ func (d *dec) decInstr(blockRef func() *Block) Instr {
 	}
 	in.Cmp = Cmp(d.u8())
 	in.Aux = d.iv()
-	in.Unroll = int32(d.iv())
+	in.SetUnroll(int32(d.iv()))
 	in.CallConv = CallConvention(d.u8())
 	in.CallConvSet = d.boolean()
 	in.Amode = int32(d.iv())

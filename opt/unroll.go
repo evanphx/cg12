@@ -79,7 +79,7 @@ func unrollInto(caller *ir.Func, cg *callGraph, scc *sccInfo) bool {
 		if callee == nil {
 			break
 		}
-		depth := int(b.Instrs[idx].Unroll)
+		depth := int(b.Instrs[idx].Unroll())
 		spliceCall(caller, b, idx, callee, cg, scc, depth)
 		if activeDeps != nil {
 			activeDeps.unrolled[caller] = true
@@ -109,7 +109,7 @@ func findUnrollable(caller *ir.Func, cg *callGraph, scc *sccInfo) (*ir.Block, in
 			if len(in.Args)-1 != len(callee.Params) {
 				continue
 			}
-			if int(in.Unroll) >= maxRecursionDepth {
+			if int(in.Unroll()) >= maxRecursionDepth {
 				continue // this chain is already unrolled to the limit
 			}
 			if inlinableStructure(callee) && funcSize(callee) <= inlineSmallBudget {
@@ -130,7 +130,7 @@ func clearCallDepth(f *ir.Func) {
 	for _, b := range f.Blocks {
 		for i := range b.Instrs {
 			if b.Instrs[i].Op == ir.OCall {
-				b.Instrs[i].Unroll = 0
+				b.Instrs[i].SetUnroll(0)
 			}
 		}
 	}
