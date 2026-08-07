@@ -6551,3 +6551,200 @@ that caller's final form depend on the program again. That boundary needs the
 same treatment `opt.Session.Freeze` and `InlineDeps` already give the memoised
 compile, and it needs proving, not assuming. And the 2--5% is a floor for what
 a cache must recompute, not a claim that instantiations are cheap to key.
+
+## Stage B -- what building it would take
+
+Stage A does not justify building it. This section exists because the answer to
+"how big is it" is part of the decision, and because two of its findings are
+worth having on record whatever is decided. It is a cost estimate against the
+real code, not a design.
+
+### 1. Computing and naming the shape -- done, and it was the cheap part
+
+`goc/genericshape.go` already computes gc's shape from a `types.Type` and names
+it, and `scripts/compare_gc_shapes.py` shows it agrees with the real gc on 9 of
+9 comparable origins. That is ~150 lines and it is the only part of this that
+is small. Everything below is the rest.
+
+### 2. `genericInstanceSymbol` and the reach walk
+
+`genericInstanceSymbol` (`goc/compile.go:17361`) is a pure function of origin
+plus literal type arguments, and `instantiatedFunctionSymbol`
+(`compile.go:17638`) is the call-side twin that has to name the same thing.
+Under shapes each instantiation needs **two** names, not one:
+
+- the **body** symbol, `origin[go.shape....]`, which is what gets lowered, and
+- the **dictionary** symbol, `..dict.origin[literal types]`, which still has to
+  exist once per literal type-argument tuple.
+
+Both must be reached. The three walk sites (`goc/reach.go:538`, `:806`, `:823`)
+today do `declaration.typeArguments = arguments; declaration.symbol =
+genericInstanceSymbol(...)` and push one `functionDecl`. They would have to push
+a body keyed on the shape tuple and a dictionary keyed on the literal tuple, and
+`processQueue`'s dedupe -- one `seen[key]` map over `symbol` -- has to
+distinguish the two, because two literal tuples that share a shape must
+converge on one body and diverge on two dictionaries. The walk also currently
+*discards* nothing, which is lucky: it must keep the literal arguments after
+shaping, because the dictionary is built from them and because a nested generic
+call inside the shared body needs a sub-dictionary derived from them.
+
+`checkUniqueFunctionSymbols` (`compile.go:577`) becomes the test that this is
+right: two literal tuples colliding on a body symbol is now correct rather than
+a bug, and the check has to learn the difference.
+
+### 3. The lowering -- this is the bulk
+
+`compile.go:468` sets `generator.typeArguments = function.typeArguments`, and
+from there `g.typeSubstitutions()` (`:17598`) binds each type parameter to its
+literal argument. Every downstream question about a type parameter is answered
+by substitution: `g.concreteType` (12 sites), `g.objectType` (11),
+`g.typeAndValue` (**97**). Under shapes those substitutions bind to the *shape*,
+and every one of the ~120 sites has to be triaged into two classes.
+
+**Layout-only, and still correct.** `typeSize` (`:17151`), `typeAlign`
+(`:17195`), `fieldOffset` (`:17282`), `markPointerWords` (`:16300`). A shape
+carries the layout by construction, so these keep working unchanged. This class
+is genuinely free.
+
+**Needs the real type, so needs a dictionary slot.** Everything else:
+
+- **Type descriptors.** `runtimeTypeSymbol` (`:16224`) interns a
+  `_goc_runtime_type_*` with a size, a kind, an alignment and a GC mask, at
+  lowering time, from the concrete type. In a shared body it cannot be interned;
+  it has to be loaded from the dictionary. This is not a quiet corner -- the
+  head commit on this branch (`0bbd953`, "keep the type descriptors the
+  assertion chain used to materialise") is about exactly this machinery.
+- **Interface conversion and itabs.** goc names an itab
+  `_goc_itab_<concrete>__<interface>_<hash>`, materialised where the conversion
+  is lowered. Converting a `T` to an interface inside a shared body means the
+  itab is a dictionary slot.
+- **`new(T)`, `make([]T, n)`, `make(map[K]V)`, channel operations.** All lowered
+  against the concrete element type today; all become dictionary loads.
+- **Method calls on a type parameter.** `typeParameterMethodSelection`
+  (`compile.go:13372`) re-selects the constraint's method against the concrete
+  type argument and lowers a **direct call**; its own doc says a shared generic
+  body "keeps its existing lowering", which today means the interface-dispatch
+  fallback. Under shapes there is no concrete receiver to re-select against, so
+  every such call becomes an indirect call through a dictionary slot -- and when
+  the type argument satisfies the constraint through an embedded field, the
+  receiver has to be advanced by `fieldOffset(selection)` first, which is itself
+  a per-instantiation number and so another dictionary slot. **This is the
+  largest correctness surface in the change**, and it is downhill of the escape
+  analysis: Stage 1's item 1 already made this path conservative, at a measured
+  cost of 11 allocation sites moving frame -> heap out of 12 086. Shapes make it
+  conservative at *every* type-parameter method call in every shared body,
+  because the callee stops being statically known there.
+- **Nested generic calls.** `instantiatedFunctionSymbol` resolves a callee from
+  `g.info.Instances` plus `g.concreteType`. In a shared body the callee's *shape*
+  is derivable but its *dictionary* is not; it has to be a sub-dictionary slot,
+  which is what gc's `dict.subdicts` is. This is where gc's remaining bugs live:
+  `shapify` in go1.26.1 still carries workarounds for issues #54535, #65362 and
+  #71184, all of them about recursive or nested instantiation.
+
+### 4. Passing the dictionary
+
+`HasClosureContext` is the right precedent and shows the true footprint of
+adding one hidden parameter. It is: a bit on `ir.Func` (`ir/func.go:230`); a
+temporary marked `ClosureContext` and pinned to a fixed register by
+`g.closureRegister()` (`compile.go:14880` -- X26 on arm64, RDX on amd64, matching
+Go's ABIInternal); two invariants in `ir/verify.go:195-201`; a copy out of the
+volatile register at entry, `arm64.stabilizeClosureContext` (`arm64/lower.go:61`);
+a spill group so the GC can see it, `arm64/goabi.go:172`; and a rule in the
+inliner, `opt/inline.go:727`. Six places, for one pointer.
+
+A dictionary needs the same six -- but it cannot have a third dedicated
+register. Go's ABIInternal reserves X26/RDX for the closure context and nothing
+for a dictionary; gc passes the dictionary as an ordinary **leading argument**
+in the normal register sequence. goc would have to do the same to stay
+interoperable, which means the hidden parameter is a signature change, not a
+register convention, and it moves `compiledFunctionSignature`
+(`compile.go:17357`), the call-convention symmetry checks
+(`goc/callconv_symmetry_test.go`), `goc/goabi_layout_test.go`, and every
+`//go:linkname`d or assembly-reachable generic touchpoint.
+
+### 5. What `runtime` needs
+
+The runtime both declares generics and would be where dictionaries are consumed,
+and goc already has a degenerate version of this working -- which is both the
+encouraging fact and the warning.
+
+`reach.go:572` seeds `genericRuntimeMethods` for `internal/runtime/atomic` and
+`internal/runtime/gc/scan`, and those methods are queued **with no type
+arguments at all**. The module ends up carrying `internal/runtime/atomic.Pointer.Load`
+*and* `internal/runtime/atomic.Pointer.Load[runtime.g]` side by side. So a
+shared, unshaped, dictionary-free body already exists and already works. It
+works because those bodies are pure pointer-word operations that never mention
+`T`. That is precisely the class the census says most instantiations are not in.
+
+Beyond that: a dictionary is a data symbol with pointer words in it, so
+`registerSymAttrs` and the GC's view of it have to be right or the collector
+follows a bad word; anything a runtime function needs before `schedinit` has to
+be linker-initialised, not built at run time; and a dictionary load inside a
+nosplit function adds to a frame already measured against the 920-byte reserve
+that `stackcheck` enforces, where 16 chains were already over budget before this
+change.
+
+### 6. Size, bluntly
+
+gc did this in one release (Go 1.18) with a team, and go1.26.1's `shapify` still
+carries three issue-numbered workarounds for cases that were not right the first
+time. For goc:
+
+| piece | size |
+|---|---|
+| shape model and naming | **done** -- ~150 lines, validated against gc |
+| reach walk, two-key instantiation, dedupe, symbol uniqueness | ~1 week |
+| lowering triage across ~120 substitution sites, dictionary slots for rtypes, itabs, allocation, method dispatch, sub-dictionaries | **the bulk** -- weeks, and it is where the correctness risk is |
+| ABI: hidden leading parameter through backend, verifier, inliner, GC maps, linkname/assembly boundary | ~1--2 weeks |
+| runtime: dictionaries on early paths, nosplit budget, GC visibility | open-ended |
+| re-proving the corpus, capability matrix, determinism, byte-identity, runtime status | the usual, and larger than usual |
+
+**Multi-week at best, multi-month once the runtime is in scope.** The return
+measured in Stage A is 0.24% of `.text` and 0.25% of optimiser time on the http
+program, 0.00% on the small one, before subtracting what dictionary indirection
+costs back.
+
+### What to do instead
+
+1. **Make the cache unit finer than a package.** The census says the
+   importer-dependent population is 2--5% of lowered functions, not the 52--89%
+   the package-granular rule excludes. Caching a generic-declaring package's
+   *non-generic* functions and treating each instantiation as its own unit --
+   keyed on origin plus type arguments, which is exactly what
+   `genericInstanceSymbol` already writes into the name -- recovers 44--74% of
+   lowered functions with no new type theory. It needs the inliner boundary
+   proved (see the caveat at the end of Stage A), and that is the real work.
+2. **Leave shapes alone.** If a future goc program mix looks like the probe --
+   many program-local pointer types through the same stdlib generics -- the
+   number to re-check is 3.4% of `.text`, and the census in this branch will
+   produce it again in about a minute per program.
+
+## What was added to the tree, and the guards
+
+No compiler behaviour changed. Two additions, both off by default:
+
+- `goc/genericshape.go` -- the shape model and the census. The hook in
+  `compile()` (`goc/compile.go:293`) is `recordGenericInstantiations`, which
+  loads a package-level sink and returns immediately when it is nil, which it is
+  in every compile that is not a census run.
+- `opt/functime.go` and one branch in `opt.funcPass.runTracked`
+  (`opt/pass.go`) -- per-function optimiser timing behind `GOC_OPT_FUNCTIME=1`.
+  Off, the cost is one bool test per function per pass.
+
+Driven by `goc.TestGenericShapeCensus`, which skips unless
+`-generic-shape-census=<dir>` is passed, so nothing about it runs in
+`verify-fast`. `goc.TestGCShapeName` does run by default: it is cheap and it
+pins the shape model's clauses.
+
+Also added: `analysis/genericshape/probe_pointer_generics.go` (`//go:build
+ignore`, not a corpus case), `scripts/analyse_census.py`,
+`scripts/compare_gc_shapes.py`.
+
+Reproduce:
+
+```
+GOC_OPT_FUNCTIME=1 go test ./goc/ -run TestGenericShapeCensus -count=1 \
+  -generic-shape-census=/tmp/census \
+  -generic-shape-census-program=fmt_sprintf.go
+python3 scripts/analyse_census.py /tmp/census/fmt_sprintf.census.json <binary>
+```
