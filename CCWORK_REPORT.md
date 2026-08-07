@@ -7740,3 +7740,13 @@ uncached, http/tls 30.0 s against 33.0 s).
 **406 identical, 0 different, 0 failed to link.**
 
 **`TestIRVerifyAudit`**: ok (177 s).
+
+**Default path against `main`.** Every corpus program on both `-O` arms, with no
+cache environment set at all: **812 of 812 byte-identical** to the same program
+built by a `goc` compiled from `main`. (The gate quoted 816 against a corpus of
+408; this tree has 406 programs, so 812 is the same measurement.)
+
+That arm is not a formality here. The cache is off by default, but one lowering
+change was needed on the default path anyway — `staticFunctionLiteral` no longer
+leaves its scratch function in `Module.Funcs` while the literal is lowered — and
+this is the check that it changed nothing.
