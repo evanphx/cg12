@@ -183,10 +183,10 @@ function w $use(:pt %a, :big %b) {
 	require.NotNil(t, use.Params[0].Agg)
 	assert.Equal(t, "pt", use.Params[0].Agg.Name)
 	call := use.Blocks[0].Instrs[0]
-	require.Len(t, call.AggArgs, 3)
-	assert.Nil(t, call.AggArgs[0])
-	assert.Equal(t, "pt", call.AggArgs[1].Name)
-	assert.Equal(t, "big", call.AggArgs[2].Name)
+	require.Len(t, call.AggArgs(), 3)
+	assert.Nil(t, call.AggArgs()[0])
+	assert.Equal(t, "pt", call.AggArgs()[1].Name)
+	assert.Equal(t, "big", call.AggArgs()[2].Name)
 }
 
 func reparse(t *testing.T, src string) string {

@@ -1861,7 +1861,7 @@ func main() {
 				}
 				callee := function.Consts[instruction.Args[0].ID]
 				if callee.Kind == ir.ConstSym && callee.Sym == "main.shorten" {
-					foundGroupedCall = len(instruction.ArgGroups) == 1 && instruction.ArgGroups[0].Count == 3
+					foundGroupedCall = len(instruction.ArgGroups()) == 1 && instruction.ArgGroups()[0].Count == 3
 				}
 			}
 		}

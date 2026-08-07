@@ -56,7 +56,7 @@ func TestCompileAggregateArg(t *testing.T) {
 	ptr := e.Alloc(8, 8)
 	r := e.Call(ir.ClsW, f.Sym("sink", 0), ptr)
 	call := &e.Instrs[len(e.Instrs)-1]
-	call.SetAggArgs([]*ir.AggType{pair} // the single arg is a by-value aggregate)
+	call.SetAggArgs([]*ir.AggType{pair}) // the single arg is a by-value aggregate
 	e.Ret(r)
 
 	asm := disasmModule(t, m)
