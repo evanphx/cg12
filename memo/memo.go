@@ -203,15 +203,34 @@ func ModuleDigest(m *ir.Module, pipeline, target, compiler string) Digest {
 	h := sha256.New()
 	fmt.Fprintf(h, "pipeline\x00%s\x00target\x00%s\x00compiler\x00%s\x00", pipeline, target, compiler)
 	// The file table, because a per-function unit stores positions as indices
-	// into it and does not carry it (see MarshalFunc). Its order is a
-	// deterministic function of what the front end read, so this is a clause that
-	// changes when the answer would have changed and not otherwise.
-	for i, name := range m.Files {
-		fmt.Fprintf(h, "file\x00%d\x00%s\x00", i, name)
+	// into it and does not carry it (see MarshalFunc). What a decoded body needs
+	// is that its own indices still mean the same files, so only the entries
+	// these bodies actually name are hashed -- not the whole table.
+	//
+	// Hashing the whole table is what stopped one program's work from being
+	// reusable by another. Two programs that load the same packages get the same
+	// table but for the root source file at index 0: 313 entries, 312 of them
+	// identical, and that one difference invalidated every entry of every
+	// package. A package's bodies do not name the importing program's file, so
+	// scoping the clause to what they name makes their digest a fact about the
+	// package.
+	for _, index := range referencedFiles(m) {
+		name := ""
+		if int(index) < len(m.Files) {
+			name = m.Files[index]
+		}
+		fmt.Fprintf(h, "file\x00%d\x00%s\x00", index, name)
 	}
-	names := make([]string, 0, len(m.SymAttrs))
-	for name := range m.SymAttrs {
-		names = append(names, name)
+	// SymAttrs likewise: the whole map is a fact about the program, and the
+	// entries belonging to these functions are a fact about the package. A pass
+	// that reads the attributes of a function in another package records that
+	// function in its consulted set, and Entry.Deps carries it -- so nothing that
+	// was read goes unchecked by narrowing this clause.
+	names := make([]string, 0, len(m.Funcs))
+	for _, function := range m.Funcs {
+		if _, ok := m.SymAttrs[function.Name]; ok {
+			names = append(names, function.Name)
+		}
 	}
 	sort.Strings(names)
 	for _, name := range names {
@@ -224,6 +243,38 @@ func ModuleDigest(m *ir.Module, pipeline, target, compiler string) Digest {
 	var out Digest
 	copy(out[:], h.Sum(nil))
 	return out
+}
+
+// referencedFiles is every file-table index the given functions name, sorted.
+//
+// Index 0 is skipped: SrcPos.Valid reads File != 0, so 0 is "no position" and
+// naming it would put the root source file -- the one entry that differs
+// between two programs loading the same packages -- back into every digest.
+func referencedFiles(m *ir.Module) []uint32 {
+	seen := map[uint32]bool{}
+	note := func(pos ir.SrcPos) {
+		if pos.File != 0 {
+			seen[pos.File] = true
+		}
+	}
+	for _, function := range m.Funcs {
+		for _, block := range function.Blocks {
+			note(block.Pos)
+			for _, instr := range block.Instrs {
+				note(instr.Pos)
+			}
+		}
+		for _, alloc := range function.PlacedAllocs {
+			note(alloc.Pos)
+			note(alloc.Use)
+		}
+	}
+	indices := make([]uint32, 0, len(seen))
+	for index := range seen {
+		indices = append(indices, index)
+	}
+	sort.Slice(indices, func(i, j int) bool { return indices[i] < indices[j] })
+	return indices
 }
 
 // DataDigest is the module's data section.
