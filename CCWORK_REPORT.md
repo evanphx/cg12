@@ -6252,3 +6252,23 @@ the brief.
   cached package contributes to `Module.Data` — this stage does not.
 - **Generics are the larger half of the remaining problem**, not a detail:
   22–32% of packages, but 52–89% of lowered functions.
+
+# GC shape stenciling in goc — is it worth building?
+
+Branch `ccwork/generic-shapes-measure`, cut from `ccwork/lowering-package-pure`
+(`161292f`). Stage A is measurement and changes no compiler behaviour: the
+census hook in `compile()` is a nil check, and the optimiser's per-function
+timer is behind `GOC_OPT_FUNCTIME`.
+
+## The headline, first
+
+**The instantiations-to-shapes ratio is 1.00 on the small program and 1.05 on
+the http one.** Under gc's actual GC-shape rule, goc's monomorphic
+instantiations do not collapse.
+
+| program | instantiations goc lowers | distinct gc shapes | **ratio** |
+|---|---:|---:|---:|
+| `fmt_sprintf.go` | 100 | 100 | **1.00** |
+| `stdlib_http_tls_client_server.go` | 542 | 516 | **1.05** |
+
+_(sections below appended as each result lands)_

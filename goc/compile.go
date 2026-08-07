@@ -288,6 +288,9 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	}
 	dynamicTypes := collectDynamicTypes(fset, info, loader.units)
 	functions, reachableGlobals := reachableFunctions(fset, roots, []*ast.File{file}, info, pkg, loader.units, dynamicTypes, compileRuntime, moduleInitFunctions, linkNames, assemblyReferences)
+	// Measurement only, and off unless a caller installed a census. See
+	// genericshape.go.
+	recordGenericInstantiations(functions, pkg)
 	globalPackages := map[string]bool{pkg.Path(): true}
 	if compileRuntime {
 		for path := range loader.units {

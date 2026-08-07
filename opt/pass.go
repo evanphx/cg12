@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	"github.com/evanphx/cg12/ir"
 )
@@ -172,7 +173,15 @@ func (p funcPass) runTracked(m *ir.Module, log *changeLog) bool {
 			log.record(p.id, f, false)
 			continue
 		}
-		moved := p.run(f)
+		var moved bool
+		if funcTimingEnabled {
+			// Measurement only; see opt/functime.go.
+			start := time.Now()
+			moved = p.run(f)
+			recordFuncTime(f.Name, time.Since(start))
+		} else {
+			moved = p.run(f)
+		}
 		log.record(p.id, f, moved)
 		if moved {
 			changed = true
