@@ -519,6 +519,42 @@ package sets is a few GB of dead files in `~/.cache/cg12/runtime-pack`. gc's
 > stage it covers) but because `opt.OptimizeModule` grew after that ceiling was
 > measured, so the fraction has a larger denominator than it did. Without `-O` the
 > same absolute saving is 21.8% and 17.0%.
+>
+> **A unit must be self-sufficient.** The scheme above had a defect the
+> same-program check could not see. Interned artifacts -- itabs, runtime type
+> descriptors, string literals, the eight content-keyed tables lowering journals --
+> belong to no declaration: the first one to want `.goc.type.time.Time.<sha8>`
+> mints it and every later one gets a table hit. A delta that recorded only what
+> its declaration APPENDED therefore recorded the reference and not the definition,
+> and was usable only by a program containing whichever declaration minted it.
+> Across programs it was not: **357 of 408 corpus programs failed to link** against
+> a cache one program had filled.
+>
+> The fix is that a unit carries the definition of every artifact it references,
+> AND the position at which it referenced it. The position is the half that is easy
+> to miss: a cold compile mints an artifact at the point of first reference, and
+> `Module.Data` order is the order `arm64/assembly.go` lays data out in, so
+> carrying definitions without positions gives a program that links and is a
+> different binary — measured, the same symbols with 1874 of them at different
+> addresses. The journal is in `goc/functionstore.go`; the walk that filters a
+> stored sequence by what the module already defines, which is what a cold compile
+> does at an `ensure*` site, is `goc/functionmerge.go`.
+>
+> Two things had to become uncacheable, and both are cases where a delta is not a
+> function of its package. A declaration whose lowering read the program's
+> implementation set — `materialiseInterfaceImplementations`, which mints the
+> descriptor and itab of every type in the PROGRAM implementing the interface being
+> converted to — carries one program's set into another; 89 of 406 corpus programs
+> came out that way before it was refused. And an artifact minted before the
+> journal exists cannot be carried, which is why the journal now starts before the
+> global initializers lower rather than at the declaration loop.
+>
+> After it: **406 of 406** corpus programs link and match their own cold image
+> against a cache filled by a different program, from either of two fillers. The
+> cost is the refusals — the http/tls saving falls from 17.3% to 7.9% of a whole
+> non-`-O` compile, `fmt_sprintf` from 21.2% to 19.7% — and it is recoverable by
+> hoisting `materialiseInterfaceImplementations` into a whole-program pass, which
+> is a change to the cold path and so a separate one.
 
 **The unit is: goc's IR for every function and global of one package, after
 `funcDecl`/`globalDecl` and after the per-function prefix of the optimiser
