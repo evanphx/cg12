@@ -483,6 +483,19 @@ package sets is a few GB of dead files in `~/.cache/cg12/runtime-pack`. gc's
 
 ### 3.1 The cacheable unit, and where the line falls
 
+> **Superseded in one respect: the unit is a function, not a package.** A package
+> that declares one generic cannot be a unit, because an instantiation is a
+> function of that package which exists only because an importer asked for it —
+> and at package granularity that excluded 79% of the small program's lowered IR
+> and 47% of the http program's, `runtime` included. Making the unit a *function*
+> and excluding only the instantiations themselves takes the cacheable share to
+> 95.4% and 90.3% of lowered IR. The boundary that licenses it — a non-generic
+> function lowers identically in two programs that make its package carry
+> disjoint instantiation sets — is proved in `goc/functionlowering_test.go`; the
+> classification and the key are `goc/functioncache.go`; the measurement is in
+> CCWORK_REPORT.md, "Stage 2 of per-package caching". Everything below about
+> *where the line falls in the pipeline*, and every clause of §3.2, still holds.
+
 **The unit is: goc's IR for every function and global of one package, after
 `funcDecl`/`globalDecl` and after the per-function prefix of the optimiser
 (`mem2reg` + `clean`), and before anything that reads another package.**
