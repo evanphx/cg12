@@ -7295,3 +7295,95 @@ is byte-identical to the cold one under `Module.MarshalBinary`, which encodes
 types, call conventions and source positions. A field the format dropped would
 show up as a difference, and the one field that did differ -- `Items[3]` of one
 descriptor -- was a compiler bug in the delta model, not a format loss.
+
+## 4. Done means: byte-identical warm output
+
+`scripts/function-cache-check.sh` compiles each program three times in three
+separate processes and compares the linked images:
+
+- **nocache** -- `CG12_NOCACHE=1`, no function cache and no pack cache. The control.
+- **cold** -- an empty `CG12_FUNC_CACHE` directory. Fills it.
+- **warm** -- the same directory, now full.
+
+The nocache arm is what makes it a test of the cache rather than of determinism:
+all three agreeing says a cached compile produced the image an uncached compile
+would have.
+
+```
+program                                      -O   nocache   cold      warm      verdict
+hello.go                                     -    3.17      3.29      2.23      identical(2de0b7f76aa3c648)
+hello.go                                     -O   7.77      7.79      6.64      identical(ffc2306eba52f5bd)
+fmt_sprintf.go                               -    6.60      6.81      5.16      identical(463df9fb813a58d7)
+fmt_sprintf.go                               -O   16.55     16.89     14.95     identical(7dc1f7267b8ffccd)
+gc_struct.go                                 -    3.15      3.28      2.26      identical(3e9d56fbb7da3f5c)
+gc_struct.go                                 -O   7.72      7.84      6.70      identical(c5004515ad331ec0)
+stdlib_http_tls_client_server.go             -    32.63     33.57     27.07     identical(2bdd921edb943112)
+stdlib_http_tls_client_server.go             -O   73.99     74.79     67.48     identical(88b6ef0d9bae1be4)
+function-cache-check: all builds identical
+```
+
+Four programs, both `-O` arms, cold and warm in separate processes: **identical
+executables in all eight cases.**
+
+Three further properties, in-process, in `goc/functioncachestore_test.go`:
+
+- `TestWarmCompileIsByteIdenticalToCold` compares the whole pre-optimiser module
+  under `MarshalBinary` *and* the finished 19.7 MB ELF object, so a difference the
+  IR comparison tolerated could not hide.
+- `TestCacheFilledByAnotherProgramIsUsable` is the property the key is really for
+  and the one a same-program pair cannot reach: program A fills the directory,
+  program B compiles from it, and B's module is byte-identical to B compiled cold
+  with an empty cache. The two programs are the boundary pair -- they make
+  `runtime`, `slices` and `strconv` carry disjoint generic instantiations over
+  types declared in their own `main` -- and B took 2173 of its 2296 declarations,
+  91.8% of its lowered IR, from units A wrote.
+- `TestChangedDependencyInvalidatesTheUnit` moves one of `strconv`'s dependencies
+  and nothing else, and checks both that `Valid` refuses and names it, and that
+  the key digest moves so the two never share a file.
+
+## 5. The measured saving, and where it differs from the projection
+
+**What the cache does to the stage it covers.** From `GOC_DEBUG_FUNCCACHE=1`:
+
+| program | lowering loop, cold | lowering loop, warm | of which replay | removed |
+|---|---|---|---|---|
+| `fmt_sprintf.go` | 1.987 s | 0.414 s | 0.208 s | **79.2%** |
+| `stdlib_http_tls_client_server.go` | 8.739 s | 2.730 s | 0.777 s | **68.8%** |
+
+It replays **90.3%** of the small program's lowered IR and **81.1%** of the http
+program's, against the census's 95.4% / 90.3% cacheable. The gap is the root
+`main` package (never cacheable by definition) and declarations whose delta
+contains an interface-call wrapper, which are refused whole.
+
+**What that is worth on a compile.** 9.7% and 8.8% of a `-O` compile; 21.8% and
+17.0% without `-O`.
+
+**Against the 17.2% / 19.0% projection: the numerator held and the denominator
+moved.** That projection is the cacheable IR share times BUILD_CACHE.md §3.4's
+18-21% "Option B ceiling", and that ceiling was the lowering stage's share of a
+compile as measured when §3.4 was written. It is not that share any more, because
+the optimiser got much more expensive in between -- §3.4's own successor note
+records the change ("The budget is gone: size no longer decides the pipeline"),
+and `cmd/stagetime` on this tree puts `opt.OptimizeModule` at 9.97 s of a 16.2 s
+`fmt_sprintf` compile. On this tree the lowering loop is 11.8% of a `-O`
+`fmt_sprintf` compile and 11.7% of a `-O` http one, so:
+
+    11.8% x 79.2% = 9.3%   measured 9.7%
+    11.7% x 68.8% =  8.0%  measured 8.8%
+
+The arithmetic closes. Nothing about the cache underperformed the projection;
+the compile it is a fraction of grew. Measured without `-O`, where the optimiser
+is not in the denominator, the delivered 21.8% and 17.0% straddle the projected
+17.2% and 19.0%.
+
+**What a hit costs, stated rather than assumed.** The projection priced a hit at
+zero. A hit is a decode: 208 ms for the small program's 3385 functions, 777 ms
+for the http program's 8364. Computing the key -- hashing every source file of
+the closure and the compiler binary -- is 27 ms and 38 ms, paid whether anything
+hits or not. Filling the cache costs 122 ms and 418 ms of delta encoding plus the
+writes, which is the 3.5% and 2.9% gap between the nocache and cold columns above.
+
+The remaining warm lowering time is not the decode: it is the 124 and 714
+declarations that missed. Those are the root package and the generic
+instantiations, which are the program's own code and are disproportionately large
+-- 8.8% of http's declarations taking 22% of its cold lowering time.
