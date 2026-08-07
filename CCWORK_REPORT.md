@@ -7704,3 +7704,23 @@ failure at once and left 89 programs with the *wrong* definitions — the itabs 
 whatever had filled the cache, from
 `materialiseInterfaceImplementations` walking a whole-program set inside a
 declaration's delta. A fix that had stopped at "it links" would have shipped that.
+
+## 6. The gate's other results, re-measured
+
+**Concurrency.** 24 `goc` processes compiling 24 different programs into one
+shared cache directory, three rounds: **72 of 72** images byte-identical to their
+own `CG12_NOCACHE=1` build. The shared directory ended with 57 unit files. Same
+number the gate got.
+
+**Unit size and count.** Carrying the definitions costs almost nothing, because
+they are stored once per package file rather than once per declaration:
+
+| program | before | after |
+|---|---|---|
+| `fmt_sprintf.go` | 16.48 MB in 45 files | 16.88 MB in 45 files (+2.4%) |
+| `stdlib_http_tls_client_server.go` | 57.97 MB in 159 files | 55.06 MB in 156 files (−5.0%) |
+
+The http/tls cache is *smaller*: three packages no longer get a file at all,
+because every cacheable declaration in them consulted the program's
+implementation set and is now refused. Per-file sizes on `fmt_sprintf`: min 1.1
+kB, median 56 kB, max 9.4 MB (`runtime`), mean 375 kB.
