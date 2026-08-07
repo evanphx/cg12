@@ -573,7 +573,17 @@ package sets is a few GB of dead files in `~/.cache/cg12/runtime-pack`. gc's
 >
 > | | cold fill | warm |
 > |---|---|---|
-> | MEASUREMENT PENDING | | |
+> | `hello.go` | **+5.0%** | −28.6% |
+> | `hello.go -O` | **+1.9%** | −13.6% |
+> | `fmt_sprintf.go` | **+4.7%** | −18.3% |
+> | `fmt_sprintf.go -O` | **+1.4%** | −9.6% |
+> | `stdlib_http_tls_client_server.go` | **+2.9%** | −8.5% |
+> | `stdlib_http_tls_client_server.go -O` | **+1.8%** | −4.8% |
+>
+> One to five per cent once, in exchange for five to twenty-nine per cent on every
+> compile after. It is the right trade and it is not a free one, and the smallest
+> program pays the largest cold penalty because the fill is a fixed cost against
+> the least work.
 >
 > **Eviction is two bounds, not one.** Five days since last use, and least recently
 > used beyond a 1 GiB budget, both in `internal/cachefile.Trim` and both tested in

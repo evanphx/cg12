@@ -213,3 +213,87 @@ cutoff cannot see.
 The pack cache keeps age-only eviction (`Trim(directory, 0)`): it holds a handful
 of large files rather than a generation of small ones, and nothing has measured
 what its budget should be.
+
+## 7. The acceptance test: default-on against `CG12_NOCACHE=1`
+
+`scripts/function-cache-default-check.sh`. Every corpus program compiled with
+**nothing set at all** -- no `CG12_FUNC_CACHE`, so what is exercised is `cmd/goc`'s
+own default and the default *location* -- against a `CG12_NOCACHE=1` control built
+by the same binary, in a separate process. `XDG_CACHE_HOME` is redirected into the
+work tree so the run is reproducible and leaves the caller's real cache alone.
+
+Two passes per program: the first against whatever the other 405 have already put
+in the shared directory, the second against its own units. Both compared to the
+same control. 28 jobs writing into one directory concurrently, which is what
+default-on actually looks like.
+
+**Arm without `-O`: 406 identical, 0 different, 0 failed to build.**
+The shared default cache ended with **204 units, 76 MB** -- which is the number
+the 1 GiB budget was sized against: the whole 406-program corpus converges on the
+union of their closures, not the sum.
+
+**Arm with `-O`: 406 identical, 0 different, 0 failed to build.** Same 204 units,
+76 MB. That arm matters more than it looks: `-O` is deliberately not a clause of
+this cache's key -- units are the front end's output and the optimiser runs after
+the merge -- so the two arms shared nothing except the compiler, and each had to
+be served by units the other arm's shape does not appear in. Stage 2 checked the
+`-O` cross-program property on three programs; this is 406.
+
+    function-cache-default-check: 406 programs, arm 'none'
+    function-cache-default-check: 406 identical, 0 different, 0 failed to build
+    function-cache-default-check: the shared default cache ended with 204 units, 76M
+
+    function-cache-default-check: 406 programs, arm '-O'
+    function-cache-default-check: 406 identical, 0 different, 0 failed to build
+    function-cache-default-check: the shared default cache ended with 204 units, 76M
+
+## 8. What it costs and what it saves
+
+`scripts/function-cache-check.sh -rounds 3`, separate processes, quiet box,
+median of three. The script gained a **`funcoff`** column for this
+(`CG12_FUNC_CACHE=off`, which the switch table above made possible): `nocache`
+turns off the pack cache too, and a saving quoted against it would credit this
+cache with that one's work.
+
+| program | `-O` | nocache | funcoff | cold fill | warm | cold vs nocache | warm vs nocache | warm vs funcoff |
+|---|---|---|---|---|---|---|---|---|
+| `hello.go` | | 3.18 | 3.15 | 3.34 | 2.27 | **+5.0%** | **−28.6%** | −27.9% |
+| `hello.go` | `-O` | 7.77 | 7.70 | 7.92 | 6.71 | **+1.9%** | **−13.6%** | −12.9% |
+| `fmt_sprintf.go` | | 6.60 | 6.64 | 6.91 | 5.39 | **+4.7%** | **−18.3%** | −18.8% |
+| `fmt_sprintf.go` | `-O` | 16.75 | 16.66 | 16.98 | 15.14 | **+1.4%** | **−9.6%** | −9.1% |
+| http/tls | | 32.86 | 32.71 | 33.81 | 30.08 | **+2.9%** | **−8.5%** | −8.0% |
+| http/tls | `-O` | 73.64 | 73.66 | 74.93 | 70.12 | **+1.8%** | **−4.8%** | −4.8% |
+
+Seconds. Every one of the 24 builds byte-identical to its `nocache` control.
+
+**`funcoff` is within 0.4% of `nocache` on every row.** That answers a question
+nobody had asked and should have: a plain `goc -o out prog.go` does not consult
+the pack cache, so the Stage 2 figures were not inflated by it and these are
+directly comparable.
+
+**Against Stage 2.** The brief quotes Stage 2 as −19.6% / −9.7% without `-O` and
+−8.6% / −6.4% with it, for `fmt_sprintf` and http/tls.
+
+| | Stage 2 | here | |
+|---|---|---|---|
+| `fmt_sprintf`, no `-O` | −19.6% | **−18.3%** | 1.3 points worse |
+| http/tls, no `-O` | −8.6% | **−8.5%** | unchanged |
+| `fmt_sprintf`, `-O` | −9.7% | **−9.6%** | unchanged |
+| http/tls, `-O` | −6.4% | **−4.8%** | 1.6 points worse |
+
+Two rows are unchanged and two are one to two points worse. Where it went: the
+`Files` repair records every file a declaration touched rather than only the ones
+it added, so a `g.at` call now costs a short backwards scan and every unit carries
+a slightly longer file list; and `record` allocates that list per declaration
+rather than reslicing `module.Files`. The `-O` http row is the most sensitive
+because it is the row with the most declarations and the largest denominator, and
+it is a whole-compile figure, so a 1.6-point move is about a second on a 74-second
+build. Nothing about the saving's shape changed: the cache still removes most of
+the stage it covers, and what bounds it is still the refusals §7 of the Stage 2
+report describes.
+
+**The cold fill.** +1.4% to +5.0%, and it is what a user meets first. It buys the
+key -- hashing every source file of the closure and the compiler binary -- and the
+encoding of every unit it stores, and gets nothing back. The smallest program pays
+the largest penalty, because the fill is close to a fixed cost against the least
+work. It is documented in BUILD_CACHE.md in those terms rather than as a footnote.
