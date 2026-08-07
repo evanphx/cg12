@@ -7636,3 +7636,53 @@ inside one. `sameDataDefinition` — already in the merge, already modelled on
 name" into a named error rather than a silent winner.
 
 **Decision: (a).**
+
+## 4. What was built
+
+`goc/functionstore.go` gains an **artifact journal** alongside the intern journal.
+At each of the nine sites that mint an interned artifact, lowering now brackets
+the mint (`g.mintArtifact(symbol)`) or records the position of a table hit
+(`g.useArtifact(symbol)`). From those events `record` reconstructs the call tree
+and separates, for each declaration and for each artifact:
+
+- the items it appended **itself**,
+- an ordered list of `(symbol, funcIndex, dataIndex, typeIndex)` **references**,
+- the intern-table entries it made **directly** — so skipping a definition the
+  module already has skips its table entry too.
+
+An artifact's definition has exactly the shape a declaration's delta has —
+minting an itab mints the descriptors and call wrappers it names — so the two
+share one `cachedSequence` type and one recursive walk. Definitions are stored
+once per package file (`packageCacheUnit.Artifacts`), so the duplication is
+across files rather than across the declarations inside one.
+
+The merge walks a stored sequence in order, appending own items and, at each
+reference, splicing the artifact's definition **only if the module does not
+already define its head symbol**. That is what a cold compile does at an
+`ensure*` site, so cold and warm filter the same sequence by the same rule and
+produce the same indices.
+
+Three refusals fell out of building it, each a case where a delta is not a
+function of its package:
+
+1. **A reference with no definition.** Artifacts minted before the journal
+   existed cannot be carried. `newInternJournal` therefore starts the journal
+   before the globals and the dynamic initializers lower, which leaves 6
+   declarations of 3204 refused on `fmt_sprintf` rather than several hundred.
+2. **An empty mint.** `goABIAggregate` and `staticInterfacePayload` open their
+   scope before they know whether they will emit, and leave their intern table
+   untouched when they do not — so the symbol is minted again next call. The
+   empty first attempt is not stored, and the reference to it is dropped.
+3. **A whole-program fact.** `materialiseInterfaceImplementations` walks every
+   type in the *program* that implements the interface being converted to and
+   mints each one's descriptor and itab. That was invisible while a unit recorded
+   only references; carrying the definitions made it visible immediately — the
+   first corpus run linked all 406 programs and 89 came out with the itabs of
+   whatever had filled the cache. `gen.wholeProgramLowering` marks it and those
+   declarations are refused.
+
+One lowering change was needed and is not cosmetic: `staticFunctionLiteral`
+created a scratch function, lowered into it, and removed it from `Module.Funcs`
+at the end. A function that appears in the middle of a declaration and disappears
+again shifts every index recorded after it. It is now taken off the list at once,
+which is what it was going to be either way.
