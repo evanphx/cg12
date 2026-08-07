@@ -449,19 +449,21 @@ func TestFuncRoundTripsEveryField(t *testing.T) {
 func TestInstrRoundTripsEveryField(t *testing.T) {
 	agg := &AggType{Name: "pair", Fields: []Field{{Sub: SubW}, {Sub: SubW}}}
 	in := Instr{
-		Op:                OCall,
-		Cls:               ClsL,
-		To:                Ref{Kind: RefTemp, ID: 1},
-		Args:              []Ref{{Kind: RefTemp, ID: 2}, {Kind: RefTemp, ID: 3}},
-		Cmp:               CmpSlt,
-		Aux:               42,
-		Unroll:            3,
-		CallConv:          CallConvGoInternal,
-		CallConvSet:       true,
-		Amode:             9,
-		AggArgs:           []*AggType{agg},
-		ArgGroups:         []ValueGroup{{Index: 0, Count: 1, Type: agg}},
-		Defs:              []Ref{{Kind: RefTemp, ID: 4}},
+		Op:          OCall,
+		Cls:         ClsL,
+		To:          Ref{Kind: RefTemp, ID: 1},
+		Args:        []Ref{{Kind: RefTemp, ID: 2}, {Kind: RefTemp, ID: 3}},
+		Cmp:         CmpSlt,
+		Aux:         42,
+		Unroll:      3,
+		CallConv:    CallConvGoInternal,
+		CallConvSet: true,
+		Amode:       9,
+		Extra: &InstrExtra{
+			AggArgs:   []*AggType{agg},
+			ArgGroups: []ValueGroup{{Index: 0, Count: 1, Type: agg}},
+			Defs:      []Ref{{Kind: RefTemp, ID: 4}},
+		},
 		RetAgg:            agg,
 		RetValues:         true,
 		StackResult:       Ref{Kind: RefTemp, ID: 4},
@@ -493,6 +495,11 @@ func TestInstrRoundTripsEveryField(t *testing.T) {
 	allFieldsSet(t, *in.Asm)
 	allFieldsSet(t, *in.Inl, "Parent") // the innermost site has no parent to set
 	allFieldsSet(t, *in.Intrin)
+	// InstrExtra carries the fields only OCall and OAsm populate. It is behind a
+	// pointer to keep them off the other ~90% of instructions, which puts it in
+	// exactly the position this file exists to guard: a field added to it is a
+	// field the encoder can silently drop.
+	allFieldsSet(t, *in.Extra)
 
 	got := roundTripInstr(t, in)
 
@@ -502,11 +509,11 @@ func TestInstrRoundTripsEveryField(t *testing.T) {
 	in.Blk, got.Blk = nil, nil
 	// AggType likewise round-trips through the module's type table by identity.
 	require.Equal(t, in.RetAgg.Name, got.RetAgg.Name)
-	require.Len(t, got.AggArgs, 1)
-	require.Len(t, got.ArgGroups, 1)
-	require.Equal(t, in.ArgGroups[0].Type.Name, got.ArgGroups[0].Type.Name)
-	in.ArgGroups[0].Type, got.ArgGroups[0].Type = nil, nil
-	in.AggArgs, got.AggArgs, in.RetAgg, got.RetAgg = nil, nil, nil, nil
+	require.Len(t, got.AggArgs(), 1)
+	require.Len(t, got.ArgGroups(), 1)
+	require.Equal(t, in.ArgGroups()[0].Type.Name, got.ArgGroups()[0].Type.Name)
+	in.Extra.ArgGroups[0].Type, got.Extra.ArgGroups[0].Type = nil, nil
+	in.Extra.AggArgs, got.Extra.AggArgs, in.RetAgg, got.RetAgg = nil, nil, nil, nil
 
 	require.Equal(t, in, got)
 }

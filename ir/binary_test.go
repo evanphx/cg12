@@ -91,7 +91,7 @@ func richModule() *Module {
 	caller := m.NewFunc("calltail", ClsP)
 	callParts := caller.Entry().CallAggregate(slice, []Cls{ClsP, ClsL, ClsL}, caller.Sym("tail", 0), caller.ConstInt(ClsP, 0), caller.Long(2), caller.Long(2))
 	call := &caller.Entry().Instrs[0]
-	call.ArgGroups = []ValueGroup{{Index: 0, Count: 3, Type: slice}}
+	call.SetArgGroups([]ValueGroup{{Index: 0, Count: 3, Type: slice}})
 	caller.RetAgg = slice
 	caller.RetValues = true
 	caller.Entry().RetAggregate(callParts...)
@@ -159,8 +159,8 @@ func TestBinaryRoundTrip(t *testing.T) {
 	require.Len(t, caller.Entry().Instrs, 1)
 	call := &caller.Entry().Instrs[0]
 	assert.True(t, call.RetValues)
-	require.Len(t, call.ArgGroups, 1)
-	assert.Equal(t, ValueGroup{Index: 0, Count: 3, Type: m2.Types[1]}, call.ArgGroups[0])
+	require.Len(t, call.ArgGroups(), 1)
+	assert.Equal(t, ValueGroup{Index: 0, Count: 3, Type: m2.Types[1]}, call.ArgGroups()[0])
 }
 
 func TestBinaryDeterministic(t *testing.T) {

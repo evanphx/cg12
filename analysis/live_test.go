@@ -92,10 +92,10 @@ func TestLivenessMultiRegisterCallAndReturn(t *testing.T) {
 	t2 := f.NewTemp("t2", ir.ClsL)
 	e := f.Entry()
 	e.Instrs = []ir.Instr{{
-		Op:   ir.OCall,
-		To:   t1,
-		Defs: []ir.Ref{t2},
-		Args: []ir.Ref{f.Sym("g", 0)},
+		Op:    ir.OCall,
+		To:    t1,
+		Extra: &ir.InstrExtra{Defs: []ir.Ref{t2}},
+		Args:  []ir.Ref{f.Sym("g", 0)},
 	}}
 	e.Jmp = ir.Jmp{Kind: ir.JmpRet, Arg: t1, Args: []ir.Ref{t2}}
 

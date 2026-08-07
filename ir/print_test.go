@@ -73,7 +73,7 @@ func TestPrintAggregates(t *testing.T) {
 	// a call with an aggregate argument and an aggregate result
 	r := e.Call(ClsL, f.Sym("g", 0), pr)
 	ci := &e.Instrs[len(e.Instrs)-1]
-	ci.AggArgs = []*AggType{pair}
+	ci.SetAggArgs([]*AggType{pair})
 	ci.RetAgg = pair
 	_ = r
 	e.RetVoid()
