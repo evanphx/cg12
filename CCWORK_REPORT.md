@@ -8131,3 +8131,5 @@ program's identity in the key (which makes the cache per-program and gives up
 sharing), or making the emission of interned artifacts independent of declaration
 order so that every delta that references one also defines it. That is a design
 decision for stage 3, and it should be made before this lands rather than after.
+
+*Gate branch pushed as `integration/stage2-gate` at `f2da728`.*
