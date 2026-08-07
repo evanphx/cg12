@@ -21,7 +21,6 @@ import (
 	"github.com/evanphx/cg12/internal/runtimepack"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
-	"github.com/evanphx/cg12/opt"
 )
 
 // Options are the compilation settings both halves of a split must agree on.
@@ -52,7 +51,7 @@ func BuildRuntime(target goc.Target, options Options) (*runtimepack.Pack, error)
 	}
 	sort.Strings(assemblyFiles)
 	if options.Optimize {
-		opt.OptimizeModule(runtimeModule.Module)
+		goc.OptimizeModule(runtimeModule.Module, target)
 	}
 	object, assembly, err := arm64.CompileToObjectAndAssembly(runtimeModule.Module)
 	if err != nil {
@@ -138,7 +137,7 @@ func CompileProgram(target goc.Target, name string, source []byte, manifests []*
 		return nil, err
 	}
 	if options.Optimize {
-		opt.OptimizeModule(program.Module)
+		goc.OptimizeModule(program.Module, target)
 	}
 	object, assembly, err := arm64.CompileToObjectAndAssembly(program.Module)
 	if err != nil {
