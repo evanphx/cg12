@@ -20,6 +20,13 @@ import (
 )
 
 func main() {
+	// The per-function cache is on for the compiler binary and off for the
+	// library, and this is the whole of that decision. See
+	// goc.UseFunctionCacheByDefault for why it cannot simply be on everywhere:
+	// the compiler binary's hash is a clause of the key, and `go test` builds a
+	// new one per package under test.
+	goc.UseFunctionCacheByDefault()
+
 	if len(os.Args) > 1 && os.Args[1] == "test" {
 		os.Exit(testCommand(os.Args[2:]))
 	}

@@ -167,9 +167,86 @@ type artifactEvent struct {
 type internJournal struct {
 	notes  []internNote
 	events []artifactEvent
+	// files are the module file indices lowering resolved a source position
+	// against, in the order it first reached each. See [internJournal.file] for
+	// why the list is of touches rather than of appends.
+	files []uint32
+	// filesFloor is where the declaration being lowered starts in that list.
+	// Deduplication stops there: see [internJournal.beginFileScope].
+	filesFloor int
 	// dependent counts the times lowering consulted a whole-program fact. See
 	// [gen.wholeProgramLowering].
 	dependent int
+}
+
+// file records that lowering resolved a position in one source file.
+//
+// Every file, not only the ones this declaration was the first in the PROGRAM to
+// reach. That distinction is the whole reason this exists. Module.Files is
+// append-on-first-use, so "the files a declaration added" is a fact about which
+// declarations ran before it, and a delta that stored it carried one program's
+// ordering into another: a declaration that added [a, c] in the program that
+// filled the cache adds [a, b, c] in a program that had not seen b, and replaying
+// the stored answer puts b at the end instead of the middle. The module still
+// contains every file either way -- remapFilePositions appends whatever the unit
+// references -- so nothing dangles; the file TABLE comes out in a different
+// order, and that is DWARF's file numbering.
+//
+// The files a declaration touched, in first-touch order, is a fact about the
+// declaration. Replaying it through Module.File appends exactly the ones the
+// receiving module lacks, in that order, which is what the cold compile did.
+//
+// The deduplication is per declaration and never reaches past
+// [internJournal.filesFloor], because a list that collapsed a declaration's first
+// touch into the previous declaration's last one would be program-dependent in
+// exactly the way this is here to prevent -- and was, on the first attempt: 37
+// declarations recorded an empty file list in one program and a one-file list in
+// the other, according to whether the declaration lowered before them happened to
+// be in the same file.
+//
+// The scan is backwards from the end because g.at is called for essentially every
+// AST node and consecutive nodes are almost always in one file, so the first
+// comparison answers nearly every call. What it walks otherwise is the distinct
+// files of one declaration, which is one plus whatever it inlined.
+func (j *internJournal) file(index uint32) {
+	if j == nil {
+		return
+	}
+	for position := len(j.files) - 1; position >= j.filesFloor; position-- {
+		if j.files[position] == index {
+			return
+		}
+	}
+	j.files = append(j.files, index)
+}
+
+// beginFileScope says that a new declaration's lowering starts here, so that its
+// first file touch is recorded even when the declaration before it ended in the
+// same file.
+func (j *internJournal) beginFileScope() {
+	if j == nil {
+		return
+	}
+	j.filesFloor = len(j.files)
+}
+
+// touchedFileNames is the distinct files a declaration reached, in first-touch
+// order, named rather than numbered so that the receiving module can resolve them
+// against its own table.
+func touchedFileNames(module *ir.Module, touches []uint32) []string {
+	if len(touches) == 0 {
+		return nil
+	}
+	seen := make(map[uint32]bool, len(touches))
+	names := make([]string, 0, len(touches))
+	for _, index := range touches {
+		if index == 0 || seen[index] {
+			continue
+		}
+		seen[index] = true
+		names = append(names, module.FileName(index))
+	}
+	return names
 }
 
 func (j *internJournal) note(kind internKind, key, value string) {
@@ -210,11 +287,11 @@ func (j *internJournal) mark(module *ir.Module) declarationMark {
 		funcs: len(module.Funcs),
 		data:  len(module.Data),
 		types: len(module.Types),
-		files: len(module.Files),
 	}
 	if j != nil {
 		mark.notes = len(j.notes)
 		mark.events = len(j.events)
+		mark.files = len(j.files)
 		mark.dependent = j.dependent
 	}
 	return mark
@@ -340,11 +417,13 @@ type cachedDeclaration struct {
 	// keys on it; it is here so that a diagnostic about a cached unit can name a
 	// function rather than a file and a line.
 	Symbol string
-	// NewFiles are the source file names the declaration appended to
-	// Module.Files, in the order it appended them. Replaying them in order is what
-	// keeps the warm module's file table identical to the cold one's, rather than
-	// merely equivalent.
-	NewFiles []string
+	// Files are the source files the declaration's lowering resolved a position
+	// in, in first-touch order. Replaying them in order through Module.File --
+	// which appends only what is not already there -- is what keeps the warm
+	// module's file table identical to the cold one's rather than merely
+	// equivalent. See [internJournal.file] for why it is the touches and not the
+	// appends.
+	Files []string
 	cachedSequence
 }
 
@@ -426,30 +505,80 @@ func packageCacheKeyDigest(entry *FunctionCacheEntry) string {
 	return hex.EncodeToString(digest.Sum(nil))
 }
 
-// functionCacheDirectory is where per-package units live: the directory
-// CG12_FUNC_CACHE names, or the default location when it is set to "auto".
-// CG12_NOCACHE=1 turns it off whatever else is set, which is the switch the merge
-// gates depend on and the same one the pack cache and the shared source world
-// answer to.
+// functionCacheBudget is how much disk a function cache directory may hold
+// before the least recently used units are evicted. See [cachefile.Trim].
 //
-// Off unless asked for, which is the opposite of the pack cache's default and is
-// deliberate. The compiler binary's own hash is a clause of the key -- clause 9,
-// and the one that covers every compiler change without anyone having to
-// remember a version -- and `go test` builds a fresh test binary for every
-// package under test. A cache on by default would therefore, in a test run, write
-// a complete set of package units per test binary and read none of them back: all
-// of the cost of filling a cache and none of the benefit. `goc` on the command
-// line does not have that problem, and neither does any build that reuses one
-// compiler, which is what CG12_FUNC_CACHE=auto is for.
+// Sized from the corpus. One program's units are 16.9 MB in 45 files for
+// fmt_sprintf and 55 MB in 156 files for the http/tls program; a package's key
+// does not mention the program, so compiling the whole 406-program corpus with
+// one compiler converges on the union of their closures rather than on the sum,
+// which is the http/tls figure plus the packages nothing else reaches -- call it
+// 60 MB for a full corpus fill against one compiler.
+//
+// A gibibyte is therefore about sixteen full corpus fills, which is the number
+// that matters: what multiplies the cache is not how much a user builds but how
+// often the compiler binary changes, because its hash is a clause of the key. Six
+// GB of stale generations on a shared box was the failure this bound exists to
+// prevent, and sixteen is a comfortable margin for anyone whose working set is
+// one compiler.
+const functionCacheBudget = 1 << 30
+
+// functionCacheDefaultOn is whether a compile that has been told nothing uses the
+// cache. It is off in the library and turned on by cmd/goc, and that asymmetry is
+// the design decision this cache's default rests on. See
+// [UseFunctionCacheByDefault].
+var functionCacheDefaultOn bool
+
+// UseFunctionCacheByDefault turns the per-function cache on for compiles that
+// name no cache directory. cmd/goc calls it; nothing else should.
+//
+// The default has to differ by caller, and the reason is clause 9 of the key: the
+// compiler binary's own hash, which is what covers every compiler change without
+// anyone having to remember a version number. It is exactly right for a released
+// binary compiling a user's program -- the binary does not move, so the cache
+// hits -- and exactly wrong inside `go test`, which builds a fresh test binary
+// for every package under test. A cache on by default there would write a
+// complete set of package units per test binary and read none of them back: all
+// of the cost of filling a cache and none of the benefit, on the tree's own
+// suite, forever.
+//
+// So the compiler turns it on and the library does not. `goc file.go` gets a
+// cache; goc.Compile called in process gets one only if it asks, with
+// CG12_FUNC_CACHE. A gate that wants the old behaviour from the binary has
+// CG12_NOCACHE=1, which still turns off everything.
+func UseFunctionCacheByDefault() { functionCacheDefaultOn = true }
+
+// functionCacheDirectory is where per-package units live.
+//
+//	CG12_NOCACHE=1        nothing is read and nothing is written, whatever else
+//	                      is set. The switch the merge gates depend on, checked
+//	                      in internal/cachefile so no cache can forget it.
+//	CG12_FUNC_CACHE=off   this cache off, the others untouched.
+//	CG12_FUNC_CACHE=auto  the default location, whatever the caller's default is.
+//	CG12_FUNC_CACHE=<dir> that directory.
+//	unset                 the default location if the caller turned the cache on
+//	                      (see [UseFunctionCacheByDefault]), otherwise off.
+//
+// The default location is os.UserCacheDir()/cg12/function-cache, which is the
+// shape cmd/goc/packcache.go's packCacheDirectory already had; a box with no user
+// cache directory gets no cache rather than an error.
 func functionCacheDirectory() string {
-	setting := os.Getenv("CG12_FUNC_CACHE")
-	if setting == "" || cachefile.Disabled() {
+	if cachefile.Disabled() {
 		return ""
 	}
-	if setting == "auto" {
+	switch setting := os.Getenv("CG12_FUNC_CACHE"); {
+	case setting == "off":
+		return ""
+	case setting == "":
+		if !functionCacheDefaultOn {
+			return ""
+		}
 		return cachefile.Directory("", "function-cache")
+	case setting == "auto":
+		return cachefile.Directory("", "function-cache")
+	default:
+		return cachefile.Directory("CG12_FUNC_CACHE", "function-cache")
 	}
-	return cachefile.Directory("CG12_FUNC_CACHE", "function-cache")
 }
 
 // readPackageCacheUnit returns the stored unit for an entry's key, if there is
@@ -508,8 +637,8 @@ func (u *packageCacheUnit) encode() []byte {
 		declaration := u.Decls[symbol]
 		body.str(declaration.Decl)
 		body.str(declaration.Symbol)
-		body.varint(uint64(len(declaration.NewFiles)))
-		for _, file := range declaration.NewFiles {
+		body.varint(uint64(len(declaration.Files)))
+		for _, file := range declaration.Files {
 			body.str(file)
 		}
 		body.sequence(declaration.cachedSequence)
@@ -561,7 +690,7 @@ func decodePackageCacheUnit(data []byte) (*packageCacheUnit, error) {
 	for count := reader.varint(); count > 0; count-- {
 		declaration := &cachedDeclaration{Decl: reader.str(), Symbol: reader.str()}
 		for files := reader.varint(); files > 0; files-- {
-			declaration.NewFiles = append(declaration.NewFiles, reader.str())
+			declaration.Files = append(declaration.Files, reader.str())
 		}
 		declaration.cachedSequence = reader.sequence()
 		unit.add(declaration)

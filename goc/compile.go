@@ -6281,6 +6281,10 @@ func (g *gen) at(n ast.Node) {
 	// position in the module and therefore into every content key derived from
 	// it. See goc/trimpath.go.
 	file := g.mod.File(TrimPath(p.Filename))
+	// Journalled as a touch, not as an append: which declaration was the first in
+	// the PROGRAM to reach a file is not a fact about the declaration. See
+	// internJournal.file.
+	g.interns.file(file)
 	g.cur.At(ir.SrcPos{File: file, Line: uint32(p.Line), Col: uint32(p.Column)})
 }
 
@@ -8610,7 +8614,7 @@ func (g *gen) ensureTypeTag(valueType types.Type) string {
 			// g.runtimeTypes write above: the two tables are written together and read
 			// together, so the note belongs with the definition and travels when a unit
 			// carries it.
-			g.interns.note(internRuntimeType, key, runtimeTypeKey(g.fset, types.NewPointer(valueType)))
+			g.interns.note(internRuntimeType, key, runtimePointerTypeKey(g.fset, valueType))
 		}
 		g.typeTags[key] = name
 		g.interns.note(internTypeTag, key, name)
@@ -9022,16 +9026,47 @@ func runtimeTypeIsNamed(valueType types.Type) bool {
 }
 
 func runtimeTypeKey(fset *token.FileSet, valueType types.Type) string {
-	valueType = canonicalAliasType(valueType)
-	if signature, ok := valueType.(*types.Signature); ok {
-		parameters := runtimeAnonymousTuple(signature.Params())
-		results := runtimeAnonymousTuple(signature.Results())
-		valueType = types.NewSignatureType(nil, nil, nil, parameters, results, signature.Variadic())
-	}
+	valueType = canonicalRuntimeType(valueType)
 	key := types.TypeString(valueType, func(pkg *types.Package) string {
 		return pkg.Path()
 	})
 	return appendLocalTypeIdentities(fset, key, valueType)
+}
+
+// canonicalRuntimeType is the spelling a type's key is taken from: aliases
+// resolved, and a signature stripped of its parameter names, because Go's spec
+// spells a function type without them and two syntactic occurrences of one
+// function type need one descriptor rather than two.
+func canonicalRuntimeType(valueType types.Type) types.Type {
+	valueType = canonicalAliasType(valueType)
+	if signature, ok := valueType.(*types.Signature); ok {
+		parameters := runtimeAnonymousTuple(signature.Params())
+		results := runtimeAnonymousTuple(signature.Results())
+		return types.NewSignatureType(nil, nil, nil, parameters, results, signature.Variadic())
+	}
+	return valueType
+}
+
+// runtimePointerTypeKey is the key of the pointer to a type -- the one thing
+// populateRuntimePointerTypes wants out of gen.runtimeTypes, and therefore the
+// one thing a cached unit records about it.
+//
+// The canonicalisation is applied to the element BEFORE the pointer is taken, and
+// that is the whole point of the function existing. runtimeTypeKey strips a
+// signature's parameter names only when the signature is the top level, so
+// types.NewPointer of one keeps them: `*func(p []byte)` from one declaration and
+// `*func([]byte)` from another are then two spellings of one type, and which one
+// a compile records is decided by which declaration reached the type first --
+// a fact about the program, in a per-declaration delta. A replayed spelling
+// overwrites the compile's own and PtrToThis is left unset.
+//
+// Measured before the change, on fmt_sprintf, hello and the http/tls program: of
+// 1170, 499 and 4191 entries, 289, 86 and 1068 carried a named-parameter spelling
+// and NOT ONE of them resolved to a pointer descriptor, under either spelling. So
+// this costs no PtrToThis field that was being filled; what it removes is the
+// program-dependence.
+func runtimePointerTypeKey(fset *token.FileSet, valueType types.Type) string {
+	return runtimeTypeKey(fset, types.NewPointer(canonicalRuntimeType(valueType)))
 }
 
 func runtimeAnonymousTuple(tuple *types.Tuple) *types.Tuple {

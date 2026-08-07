@@ -335,8 +335,8 @@ func TestPackageUnitRoundTrip(t *testing.T) {
 	}
 	unit := newPackageCacheUnit(entry)
 	unit.add(&cachedDeclaration{
-		Symbol:   "strconv.Itoa",
-		NewFiles: []string{"strconv/itoa.go"},
+		Symbol: "strconv.Itoa",
+		Files:  []string{"strconv/itoa.go"},
 		cachedSequence: cachedSequence{
 			Unit:    []byte{1, 2, 3, 4},
 			Refs:    []artifactReferenceRecord{{Symbol: ".goc.type.int.aa", Funcs: 1, Data: 2, Types: 0}},

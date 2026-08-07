@@ -113,6 +113,8 @@ func writeCachedPack(directory, key string, contents []byte) error {
 	// The one moment a pack build is guaranteed to be slow anyway, and so the one
 	// moment it is worth walking the directory to evict. Trim rate-limits itself
 	// to once a day per directory.
-	cachefile.Trim(directory)
+	// Age-only: a pack cache holds a handful of large files rather than a
+	// generation of small ones, and nothing has measured what a budget should be.
+	cachefile.Trim(directory, 0)
 	return cachefile.Write(directory, key, ".gocrt", contents)
 }

@@ -220,8 +220,23 @@ func MarkUsed(path string) {
 	os.Chtimes(path, now, now)
 }
 
-// Trim removes entries nothing has read in trimCutoff, at most once per
-// trimInterval per directory.
+// Trim removes entries nothing has read in trimCutoff, and then, if budget is
+// positive, the least recently used of what is left until the directory fits in
+// budget bytes. At most once per trimInterval per directory.
+//
+// Two bounds rather than one, because they answer different questions. The age
+// cutoff is "nobody wants this any more" and is what keeps a developer's cache
+// from carrying last month's branches. The size budget is "this disk is not
+// yours" and is what a cache on by default needs: the compiler binary's hash is a
+// clause of the per-function key, so a box that rebuilds the compiler -- a gate,
+// a bisection, anyone working on cg12 itself -- mints a whole new generation of
+// units every time, and five days of that is unbounded in exactly the way the age
+// cutoff cannot see. A budget of zero is age-only, which is the pack cache's
+// policy and was this one's.
+//
+// Least recently used is by modification time, which MarkUsed refreshes on every
+// read. A unit a build is using is therefore younger than the cutoff and near the
+// top of the budget's ordering, so the working set is the last thing to go.
 //
 // The last-trim time is a file in the directory rather than process state,
 // because the processes that use these caches are compilers: they start, compile
@@ -231,7 +246,7 @@ func MarkUsed(path string) {
 // Errors are swallowed by design. A cache that cannot be trimmed is a cache that
 // grows; a build that fails because a cache could not be trimmed is a broken
 // build.
-func Trim(directory string) {
+func Trim(directory string, budget int64) {
 	if directory == "" {
 		return
 	}
@@ -258,6 +273,13 @@ func Trim(directory string) {
 	if err != nil {
 		return
 	}
+	type survivor struct {
+		path string
+		used time.Time
+		size int64
+	}
+	var survivors []survivor
+	var total int64
 	for _, entry := range entries {
 		if !entry.IsDir() || len(entry.Name()) != 2 {
 			continue
@@ -272,9 +294,36 @@ func Trim(directory string) {
 			if err != nil || info.IsDir() {
 				continue
 			}
+			path := filepath.Join(subdirectory, file.Name())
 			if info.ModTime().Before(cutoff) {
-				os.Remove(filepath.Join(subdirectory, file.Name()))
+				os.Remove(path)
+				continue
 			}
+			if budget <= 0 {
+				continue
+			}
+			survivors = append(survivors, survivor{path: path, used: info.ModTime(), size: info.Size()})
+			total += info.Size()
+		}
+	}
+	if budget <= 0 || total <= budget {
+		return
+	}
+	// Oldest first, and by path within one timestamp: MarkUsed writes at hourly
+	// granularity, so ties are the rule rather than the exception and an arbitrary
+	// order would make two boxes with the same cache evict differently.
+	sort.Slice(survivors, func(i, j int) bool {
+		if !survivors[i].used.Equal(survivors[j].used) {
+			return survivors[i].used.Before(survivors[j].used)
+		}
+		return survivors[i].path < survivors[j].path
+	})
+	for _, entry := range survivors {
+		if total <= budget {
+			return
+		}
+		if os.Remove(entry.path) == nil {
+			total -= entry.size
 		}
 	}
 }

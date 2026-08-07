@@ -277,7 +277,9 @@ type declarationMark struct {
 }
 
 func markDeclaration(module *ir.Module, journal *internJournal) declarationMark {
-	return journal.mark(module)
+	mark := journal.mark(module)
+	journal.beginFileScope()
+	return mark
 }
 
 // loweringScope is one artifact's extent, or one declaration's, reconstructed
@@ -525,7 +527,7 @@ func (c *functionCache) record(module *ir.Module, journal *internJournal, functi
 	c.unitBeingWritten(path, entry).add(&cachedDeclaration{
 		Decl:           key,
 		Symbol:         collected.funcs[0].Name,
-		NewFiles:       append([]string(nil), module.Files[mark.files:]...),
+		Files:          touchedFileNames(module, journal.files[mark.files:]),
 		cachedSequence: sequence,
 	})
 }
@@ -631,7 +633,7 @@ func (c *functionCache) flush() {
 	// The one moment the cache is guaranteed to have done its work, and so the one
 	// moment it is worth walking the directory to evict. Trim rate-limits itself to
 	// once a day per directory.
-	cachefile.Trim(c.directory)
+	cachefile.Trim(c.directory, functionCacheBudget)
 	c.carryForward()
 	paths := make([]string, 0, len(c.writing))
 	for path := range c.writing {
@@ -674,7 +676,7 @@ func (c *functionCache) flush() {
 func (c *functionCache) replay(g *gen, hit *cachedHit) error {
 	started := time.Now()
 	defer func() { c.stats.Replay += time.Since(started) }()
-	for _, name := range hit.declaration.NewFiles {
+	for _, name := range hit.declaration.Files {
 		g.mod.File(name)
 	}
 	if err := c.replaySequence(g, hit.unit, hit.declaration.Symbol, hit.declaration.cachedSequence); err != nil {
@@ -1118,7 +1120,7 @@ func (c *functionCache) finishLowering(module *ir.Module, started time.Time) {
 func (c *functionCache) pointerTypeKeys(fset *token.FileSet, runtimeTypes map[string]types.Type) map[string]string {
 	keys := make(map[string]string, len(runtimeTypes)+len(c.pointerKeys))
 	for key, value := range runtimeTypes {
-		keys[key] = runtimeTypeKey(fset, types.NewPointer(value))
+		keys[key] = runtimePointerTypeKey(fset, value)
 	}
 	for key, pointerKey := range c.pointerKeys {
 		keys[key] = pointerKey
