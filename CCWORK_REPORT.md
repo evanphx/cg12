@@ -7105,3 +7105,73 @@ inliner can splice an instantiated body into a non-generic caller and make that
 caller's final form program-dependent again. That needs the treatment
 `opt.Session.Freeze` and `opt.InlineDeps` already give the memoised compile, and
 it needs proving. It is the first question Stage 3 has to answer.
+
+---
+
+# Stage 2 of per-package caching: the on-disk unit and the merge
+
+Branch `ccwork/cache-store-and-merge`, off `main` (`4ad59d2`).
+
+## 1. Does a cached function survive the optimiser? No — and the two reasons are different sizes
+
+This is the question Stage 1's follow-up flagged and did not answer, and it had
+to be answered before a byte of storage was written, because a "yes" would have
+moved the cache boundary from the front end to the whole compile.
+
+`goc/functionoptimiser_test.go` takes the same two boundary programs the lowering
+proof uses (`programCleanupTracked` / `programCleanupPayload`, which make
+`runtime` carry disjoint instantiation sets over types declared in their own
+`main`), runs the *full* pipeline on each — `CompileExecutableFor` then
+`opt.OptimizeModule` — and compares the post-optimiser digest of every function
+the cache would have held.
+
+```
+2453 cacheable functions lowered by both programs
+1935 survive optimisation in both modules (518 were eliminated in at least one)
+1933 of the survivors are byte-identical after the optimiser, 2 differ (99.9%)
+1416 of the survivors had something inlined into them
+```
+
+Two findings, and the small one is not the important one.
+
+**The 2 that differ** are `runtime.printpanicval` and `runtime.sysMemStat.add`,
+both in `runtime`, out of 1627 of `runtime`'s that survive. Every other package
+is identical throughout. So the *body* of a cached function is very nearly
+program-independent even after inlining.
+
+**The 518 that do not survive** are the finding that decides the design.
+Whether a function exists at all in the finished module is a whole-program fact:
+`opt.DeadFunc` deletes what the assembled program cannot reach, and the two
+programs reach different things. 21% of the cacheable set is in that state. A
+cache of post-optimiser IR would therefore have to key each entry on the whole
+program's reachability, which is the thing a per-package key exists to avoid.
+
+**The mechanism, from `opt`'s own recorder** rather than inferred from the
+finished IR. `opt.Record` around `OptimizeModule` on the first program:
+
+```
+inliner spliced a NON-cacheable body into a cacheable one   25 times
+inliner spliced across package boundaries                 4172 times
+```
+
+and the 25 are exactly the hazard that was predicted —
+`runtime.spanSet.pop <- internal/runtime/atomic.Pointer.Load[runtime.spanSetBlock]`,
+`runtime.findRunnable <- internal/runtime/atomic.Pointer.CompareAndSwapNoWB[runtime.g]`,
+`internal/runtime/gc/scan.ScanSpanPackedGo <- ...newUnsafeBuf[uintptr]` — an
+instantiation, which is *not* a cache unit because which instantiations exist is
+a whole-program fact, spliced bodily into a function that *is* a cache unit. The
+cross-package figure of 4172 says the same thing at scale: the optimiser reads
+the whole module.
+
+**Verdict, held knowingly.** The cache stores **pre-optimiser IR** — the lowered
+function, as it comes out of the front end and before `opt.OptimizeModule` — and
+the warm compile re-optimises the assembled module in full. That is the design
+Stage 1 described and it is the right one: the optimiser is not in the cached
+stage, so the ceiling stays at the measured 17.2% / 19.0% rather than rising to
+BUILD_CACHE.md §3.4's Option C figure. The alternative — caching post-optimiser
+bodies — would need the program's reachability and its whole-module inline
+decisions in the key, and would miss on 21% of entries for reachability alone.
+
+The 99.9% body identity is recorded because it bounds what a *future* Option C
+could recover if someone ever pays for the reachability key: the bodies are
+there; it is the survival that is program-dependent.
