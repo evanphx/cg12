@@ -7628,3 +7628,62 @@ evidence. That test is one program pair.
 **This gate attacks it at corpus scale**: fill one shared directory from the
 largest program in the corpus, then compile every other program warm out of it
 and compare each against its own `CG12_NOCACHE=1` build. Results in section 3.
+
+### 0.4 One behaviour change outside the function cache, found by reading the diff
+
+`cmd/goc/packcache.go`'s move onto `internal/cachefile` is not a pure
+refactor. The pack cache's path went from `<dir>/<key>.gocrt` to
+`cachefile.Path`'s `<dir>/<key[:2]>/<key>.gocrt`. Two consequences, neither of
+them a correctness problem and both worth stating because the branch does not:
+
+- Every pack already sitting in a developer's or CI box's `CG12_PACK_CACHE`
+  becomes a miss. That is one rebuild -- the branch's own comment prices a pack
+  at 154 s -- and then it is over.
+- `cachefile.Trim` only descends into subdirectories whose name is exactly two
+  characters, so the entries written under the old flat layout are never
+  evicted. The eviction this branch adds does not reach the files that existed
+  before it. A pack is tens of megabytes, so a long-lived box keeps whatever it
+  had at the moment of the upgrade, forever.
+
+### 0.5 The key's clauses, checked one at a time
+
+`goc/gatekey_test.go` (written by this gate, not by the branch, and living only
+in the gate's scratch worktree) moves each clause of a compile identity and
+requires two things of each: `FunctionCacheEntry.Valid` refuses **and names that
+clause**, and `packageCacheKeyDigest` moves so the two keys never name one file.
+
+```
+TestGateEveryKeyClauseInvalidates              PASS
+  target             -> "target moved"                            + digest moved
+  -O                 -> "-O moved"                                + digest moved
+  text layout        -> "text layout policy moved"                + digest moved
+  pipeline           -> "optimiser pipeline moved"                + digest moved
+  compiler binary    -> "compiler binary moved"                   + digest moved
+  package source     -> "package example/mid source moved"        + digest moved
+  dependency source  -> "dependency example/leaf moved"           + digest moved
+  import set added   -> "package example/mid changed its import set"
+  dependency left    -> "package example/mid changed its import set"
+TestGateUnitVersionAndPackagePathAreInTheKey   PASS
+  key version and package path are both in the digest; a unit written under a
+  foreign FILE-layout version does not decode.
+TestGateHalfWrittenUnitIsNeverReadable         PASS
+  truncated at every one of its lengths: never decodes (203 truncations).
+  one bit flipped at every body offset: never decodes.
+  the atomic write leaves no file in the fanout directory but the finished one.
+TestGateNoCacheDisablesTheDirectory            PASS
+```
+
+Two of those deserve a note rather than a tick.
+
+**`-O` invalidates the key and never moves.** `Valid` refuses on it and the
+digest moves, so the clause works; but `openFunctionCache` passes `false` for it
+on every compile, so no real build ever sees it move. That is the deliberate
+design of §0.1, and it means a `-O` build and a plain build share one file. The
+end-to-end consequence is checked in section 4 rather than assumed.
+
+**"compiler binary moved" is unreachable in practice.** Because the compiler
+digest is a clause of the *content address*, a moved compiler produces a
+different path, so the observed symptom is "no stored unit" for every package
+and `Valid`'s clause never runs. That is the stronger of the two behaviours --
+the entry is not merely refused, it is not even found -- but a reader of the
+statistics should expect the wrong reason string.
