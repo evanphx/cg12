@@ -7686,3 +7686,21 @@ created a scratch function, lowered into it, and removed it from `Module.Funcs`
 at the end. A function that appears in the middle of a declaration and disappears
 again shifts every index recorded after it. It is now taken off the list at once,
 which is what it was going to be either way.
+
+## 5. The corpus result
+
+`scripts/function-cache-corpus-check.sh` fills one directory from a single
+program, gives every corpus program its own copy of it, and requires each to link
+and to match its own `CG12_NOCACHE=1` image.
+
+| filled by | programs | identical | different | failed to link |
+|---|---|---|---|---|
+| `fmt_sprintf.go`, before the fix (the gate) | 408 | — | — | **357** |
+| `fmt_sprintf.go`, carrying definitions only | 406 | 317 | 89 | 0 |
+| `fmt_sprintf.go`, final | 406 | **406** | **0** | **0** |
+
+The middle row is worth keeping. Carrying the definitions removed every link
+failure at once and left 89 programs with the *wrong* definitions — the itabs of
+whatever had filled the cache, from
+`materialiseInterfaceImplementations` walking a whole-program set inside a
+declaration's delta. A fix that had stopped at "it links" would have shipped that.

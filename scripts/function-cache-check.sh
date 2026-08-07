@@ -19,6 +19,22 @@
 # The nocache arm is what makes this a test of the cache rather than a test of
 # determinism: if all three agree, a cached compile produced the image an
 # uncached compile would have.
+#
+# Then a fourth build per ORDERED PAIR of programs: fill a directory with A, and
+# compile B against it. That is the arm the same-program pair cannot stand in for.
+# A program compiled warm against its own cache contains, by construction,
+# whichever declaration minted every interned artifact it references; a program
+# compiled against a cache another program filled does not. Before the artifact
+# journal in goc/functionstore.go the reduced form of that was two commands:
+#
+#   CG12_FUNC_CACHE=/tmp/c goc -o a goc/testdata/fmt_sprintf.go   # fills
+#   CG12_FUNC_CACHE=/tmp/c goc -o b goc/testdata/hello.go         # undefined _goc_type_time_Time_...
+#
+# Both orders are run, because the two fail differently: one way the reference
+# dangles and the program does not link, and the other way it links and produces a
+# different image, since Module.Data order is the order data is laid out in.
+#
+# scripts/function-cache-corpus-check.sh is the same property at corpus scale.
 set -u
 
 rounds=1
@@ -94,6 +110,46 @@ for program in "${programs[@]}"; do
 			printf '%-44s %-4s %-9s %-9s %-9s %s\n' \
 				"$program" "${arm:--}" "$nocacheTime" "$coldTime" "$warmTime" "$verdict"
 		done
+	done
+done
+
+# The cross-program arm: every ordered pair, filled by one and used by the other.
+printf '\n%-24s %-24s %-9s %s\n' filled-by compiled verdict note
+for filler in "${programs[@]}"; do
+	fillerSource="goc/testdata/$filler"
+	[ -f "$fillerSource" ] || continue
+	for subject in "${programs[@]}"; do
+		[ "$subject" = "$filler" ] && continue
+		subjectSource="goc/testdata/$subject"
+		[ -f "$subjectSource" ] || continue
+
+		cache="$work/cross.$filler.$subject"
+		rm -rf "$cache"
+		mkdir -p "$cache"
+		if ! CG12_FUNC_CACHE="$cache" "$work/goc" -o "$work/filler" "$fillerSource" >/dev/null 2>&1; then
+			printf '%-24s %-24s %s\n' "$filler" "$subject" "FILL-BUILD-FAILED"
+			failures=$((failures + 1))
+			continue
+		fi
+		if ! CG12_NOCACHE=1 "$work/goc" -o "$work/crosscold" "$subjectSource" >/dev/null 2>&1; then
+			printf '%-24s %-24s %s\n' "$filler" "$subject" "COLD-BUILD-FAILED"
+			failures=$((failures + 1))
+			continue
+		fi
+		if ! CG12_FUNC_CACHE="$cache" "$work/goc" -o "$work/crosswarm" "$subjectSource" >/dev/null 2>&1; then
+			printf '%-24s %-24s %-9s %s\n' "$filler" "$subject" "FAILED" "did not link against another program's cache"
+			failures=$((failures + 1))
+			continue
+		fi
+		c=$(sha256sum "$work/crosscold" | cut -c1-16)
+		w=$(sha256sum "$work/crosswarm" | cut -c1-16)
+		if [ "$c" = "$w" ]; then
+			printf '%-24s %-24s %-9s %s\n' "$filler" "$subject" identical "$c"
+		else
+			printf '%-24s %-24s %-9s %s\n' "$filler" "$subject" DIFFERENT "cold=$c warm=$w"
+			failures=$((failures + 1))
+		fi
+		rm -rf "$cache"
 	done
 done
 
