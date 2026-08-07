@@ -495,6 +495,30 @@ package sets is a few GB of dead files in `~/.cache/cg12/runtime-pack`. gc's
 > classification and the key are `goc/functioncache.go`; the measurement is in
 > CCWORK_REPORT.md, "Stage 2 of per-package caching". Everything below about
 > *where the line falls in the pipeline*, and every clause of §3.2, still holds.
+>
+> **Built, and measured.** The store is `goc/functionstore.go`, the merge is
+> `goc/functionmerge.go`, the shared disk mechanics and the eviction policy this
+> document asked for in item 3 are `internal/cachefile`, and `goc/compile.go`'s
+> lowering loop consults it per declaration. `CG12_FUNC_CACHE=<dir>` turns it on
+> and `CG12_NOCACHE=1` turns it off.
+>
+> Storage is one file per package, content-addressed by the key's digest with one
+> fanout level; validation is per function. A cold and a warm compile in separate
+> processes produce byte-identical executables on four programs and both `-O` arms
+> (`scripts/function-cache-check.sh`), and so does a program compiled entirely
+> from units a *different* program wrote.
+>
+> Two corrections to what this document projected. First, the line does NOT fall
+> after `mem2reg`+`clean` as §3.1 recommends and item 5 repeats: what is stored is
+> the front end's output, before any optimiser pass. `goc/functionoptimiser_test.go`
+> is why — 518 of 2453 shared cacheable functions do not survive
+> `opt.OptimizeModule` in both of two programs, because `DeadFunc`'s answer is a
+> whole-program fact, so anything downstream of the merge has to be redone anyway.
+> Second, the delivered saving is 9.7% and 8.8% of a `-O` compile against §3.4's
+> 18–21% ceiling — not because the cache underperformed (it removes 69–79% of the
+> stage it covers) but because `opt.OptimizeModule` grew after that ceiling was
+> measured, so the fraction has a larger denominator than it did. Without `-O` the
+> same absolute saving is 21.8% and 17.0%.
 
 **The unit is: goc's IR for every function and global of one package, after
 `funcDecl`/`globalDecl` and after the per-function prefix of the optimiser
