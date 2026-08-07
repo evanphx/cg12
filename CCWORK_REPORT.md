@@ -507,7 +507,10 @@ the 1.41 GB, in miniature and in about a minute instead of 45.
 
 Scaled to the real bound: the gate's workload -- 24 generations at ~55 MB --
 settles at **1 GiB and stays there** instead of reaching 1,407,765,443 bytes and
-continuing. `TestEvictionRunsAfterTheWritesNotBefore` pins the ordering
+continuing. That last sentence is an extrapolation and is labelled as one: the
+45-minute gate was not re-run. What was measured directly is the mechanism at a
+budget a test can reach, plus the same mechanism against the real 8 GiB pack
+bound on the real 39 GB directory, below. `TestEvictionRunsAfterTheWritesNotBefore` pins the ordering
 separately: at a one-generation budget, trim-then-write leaves two generations on
 disk and write-then-trim leaves one.
 

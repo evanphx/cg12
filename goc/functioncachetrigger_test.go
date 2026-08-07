@@ -27,7 +27,9 @@ import (
 // and functionCacheDefaultOn, which are process globals. t.Setenv already forbids
 // it, and the ordering is what makes that safe -- go test runs the serial tests
 // to completion before it resumes the parallel ones, so the cache tests that do
-// run in parallel never see a budget somebody shrank.
+// run in parallel never see a budget somebody shrank. All three are in
+// goc/sequential_tests.txt under `setenv`, which is where this package records
+// that and what TestEveryTestIsParallelOrListedAsSequential checks.
 
 // directorySize is every byte in a cache directory, by the same walk Trim uses
 // but without Trim: both layouts, no exclusions, no policy. If this number is
