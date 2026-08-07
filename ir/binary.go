@@ -63,6 +63,17 @@ const (
 func (m *Module) MarshalBinary() ([]byte, error) {
 	types, typeIdx := collectTypes(m)
 	e := &enc{typeIdx: typeIdx}
+	// Encoding appends into a buffer that started at nil, so every module paid
+	// for the doubling: a body of any size reallocates a dozen times and copies
+	// what it had written so far each time. One module hardly notices. The
+	// per-function memo marshals every function in the program separately, which
+	// made this the single largest allocation site in a warm compile at 860MB of
+	// 2833MB -- all of it intermediate buffers, none of it retained.
+	//
+	// The estimate does not have to be right. Too small and append grows it as
+	// before; too large and the excess is freed with the buffer. It only has to
+	// be close enough that the common case stops copying.
+	e.buf = make([]byte, 0, estimateEncodedSize(m))
 	e.buf = append(e.buf, binMagic...)
 	e.u8(binVersion)
 	// Reserve the digest; it is filled in at the end, over everything after it.
@@ -384,6 +395,32 @@ func sortedOffsets(m map[int]bool) []int {
 }
 
 // --- encoder --------------------------------------------------------------
+
+// estimateEncodedSize guesses how many bytes MarshalBinary is about to write,
+// so the buffer is allocated once rather than grown into. The weights are the
+// rough per-record cost of the encoding below -- an instruction is an opcode, a
+// handful of varints and its arguments -- and are deliberately generous, since
+// overshooting costs one buffer and undershooting costs the doubling this
+// exists to avoid.
+func estimateEncodedSize(m *Module) int {
+	size := 1024
+	for _, function := range m.Funcs {
+		size += 256 + len(function.Name)
+		size += len(function.Temps) * 16
+		size += len(function.PlacedAllocs) * 48
+		for _, block := range function.Blocks {
+			size += 48
+			for _, instr := range block.Instrs {
+				size += 32 + len(instr.Args)*8
+			}
+		}
+	}
+	for _, data := range m.Data {
+		size += 64 + len(data.Name)
+		size += len(data.Items) * 24
+	}
+	return size
+}
 
 type enc struct {
 	buf     []byte
