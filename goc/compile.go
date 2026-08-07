@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
@@ -463,6 +464,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	// spelling: a wrapper created while lowering the program's own code belongs to
 	// the program even when its name says otherwise.
 	var rootPackageFunctions []string
+	loweringStarted := time.Now()
 	for i := len(functions) - 1; i >= 0; i-- {
 		function := functions[i]
 		cache.stats.Declarations++
@@ -497,7 +499,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			}
 		}
 	}
-	cache.finishLowering(mod)
+	cache.finishLowering(mod, loweringStarted)
 	addInterfaceMethodWrappers(g, functions)
 	redirectedCallWrappers := redirectUnavailableInterfaceCallWrappers(mod)
 	if compileRuntime {

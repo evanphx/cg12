@@ -7175,3 +7175,123 @@ decisions in the key, and would miss on 21% of entries for reachability alone.
 The 99.9% body identity is recorded because it bounds what a *future* Option C
 could recover if someone ever pays for the reachability key: the bodies are
 there; it is the survival that is program-dependent.
+
+## 2. The store
+
+`goc/functionstore.go` is the on-disk unit and `goc/functionmerge.go` is the
+merge. `internal/cachefile` is the disk mechanics both of them and the pack cache
+now share.
+
+**Two granularities, as specified.** Validation is per function
+(`FunctionCacheEntry.Valid`, which names the clause that moved); storage is per
+package, one file holding every cacheable declaration of that package.
+
+**Naming.** A file is content-addressed by the sha256 of its key -- unit format
+version, key version, package path, the package's own source digest, target, -O,
+text layout, pipeline identity, compiler binary digest, and every direct import's
+transitive source digest -- with one two-hex-character fanout level, so no
+directory holds more than a few hundred entries. `packageCacheKeyDigest` writes
+each clause with its length so no two different keys can spell one byte string.
+
+**What the key does NOT hash** is the vendored standard library tree.
+`cmd/goc/packcache.go` hashes all 73 MB of it, which is right for a cache whose
+unit *is* the tree and is a 100% miss rate for a per-package one: any edit
+anywhere in `stdlib/` would invalidate every package. The per-package key hashes
+each package's own files (`unitSourceDigest`, already present from Stage 1) and
+folds in its imports' transitive identities. `cachefile.HashTreeInto` carries that
+warning at its definition so the next caller does not inherit the policy along
+with the function.
+
+**The unit's contents are not "a function".** A declaration's lowering appends to
+five things at once -- `Module.Funcs` (the function plus any closure, defer
+wrapper or method value), `Module.Data`, `Module.Types`, `Module.Files`, and seven
+content-keyed intern tables on the generator -- so the stored unit is the whole
+delta. Replaying only the functions leaves the next declaration that wants the
+same string literal minting a second copy of a symbol that is already in the
+module.
+
+The intern tables had to be journalled rather than diffed, because diffing seven
+maps per declaration on a module with 8102 of them is quadratic. Eight one-line
+`g.interns.note(...)` calls at the eight sites that write to those tables record
+insertion order; the journal is nil and costs one pointer comparison when nothing
+is recording.
+
+**The one write that is not an append.** `ensureRuntimeTypeEqual` generates a
+type's equality routine and then walks `Module.Data` to point *that type's
+descriptor* at it -- and the descriptor generally belongs to whichever earlier
+declaration first needed the type. A delta that records only what its own
+declaration added cannot express that. It is journalled as an operation
+(`internTypeEqualTarget`) and replayed against the module rather than the unit,
+which is correct in all four combinations of the two declarations being cached or
+lowered.
+
+Finding it is the reason this section exists rather than being a footnote: three
+of the four check programs were byte-identical from the first working build, and
+`stdlib_http_tls_client_server.go` differed in exactly one of 42130 data
+definitions -- `crypto/x509.UnknownAuthorityError`'s type descriptor, whose Equal
+field was a function pointer cold and nil warm. Nothing but a whole-program
+comparison would have found it, and nothing about the symptom pointed at the
+cause.
+
+**Write cost scales with the package, not the change.** One changed function in
+`runtime` rewrites `runtime`'s whole file. Measured: the cold `net/http` compile
+spends 418 ms encoding deltas and writes 159 files. That is the right trade -- the
+write happens on the compile that was slow anyway -- and a package whose stored
+unit already holds everything this compile lowered is not rewritten at all.
+
+**Eviction.** `internal/cachefile` has one policy for the tree, and it is cmd/go's:
+mtime-on-use at hourly granularity so a warm build does not write a timestamp per
+hit, a trim at most once a day per directory guarded by a `trim.txt` stamp, and a
+five-day cutoff since last use. The pack cache now calls it too, so the tree's two
+directory-shaped caches are bounded where before neither was. (`memo`'s store is a
+single file at a path its caller chooses, so there is no directory to trim; it is
+the caller's file to delete.)
+
+**CG12_NOCACHE=1 bypasses it**, checked in `cachefile.Disabled` so that a cache
+added later cannot forget it. `TestNoCacheBypassesTheStore` holds it: no read, no
+write, and an empty directory afterwards.
+
+**Off unless asked for**, which is the opposite of the pack cache's default and is
+deliberate. The compiler binary's own hash is clause 9 of the key, and `go test`
+builds a fresh test binary per package under test -- so a default-on cache would,
+in a test run, write a complete set of package units per test binary and read none
+of them back. `CG12_FUNC_CACHE=<dir>` names a directory; `CG12_FUNC_CACHE=auto`
+uses the default location under the user cache directory.
+
+## 3. The merge, and the three hazards it was warned about
+
+1. **`SrcPos.File` is an index into `Module.Files`.** Each unit is encoded against
+   a private file table built in first-use order, and the merge remaps it. The file
+   names a declaration *appended* are stored separately and replayed first, in
+   order, so the warm module's file table comes out index for index identical to
+   the cold one's rather than merely equivalent. `encodeDeclarationDelta` renumbers
+   the live functions, encodes, and undoes the renumbering -- a bijection, so
+   undoing it is exact, and copying every function to encode it would double the
+   cost of the side that is already the slow one.
+
+2. **`AggType` interning across units.** Interned structurally, which reproduces
+   exactly the pointer sharing `gen.goABITypes` produces cold: an aggregate's name
+   is content-derived from the same key that table is keyed on, so two aggregates
+   share a name if and only if a cold compile would have shared the pointer.
+
+   The nested `Field.Type` pointers have to be canonicalised too, and that is not a
+   refinement. `ir/binary.go`'s `collectTypes` walks `Field.Type` as well as the
+   top-level references, so an aggregate whose *field* type is a second copy of a
+   type the module already has encodes one more entry in the type table. That was
+   the first divergence found: two collected types cold against three warm, on
+   functions whose printed IL was identical in every line.
+
+3. **`ir.Data` type descriptors collide by name.** A second definition of a name
+   is accepted only if it is the same definition, field by field including
+   `RelativeTo` and `Off`, and a mismatch is an error naming the symbol --
+   `runtimepack.Manifest.DataDigests`' check moved to the IR level. With the intern
+   tables replayed it should be unreachable, which is why it is an error rather
+   than a silent preference for one side.
+
+**Stage 0's losslessness, verified on a real merged module rather than trusted.**
+The `net/http` warm module carries 42130 data definitions and 14974 functions and
+is byte-identical to the cold one under `Module.MarshalBinary`, which encodes
+`DataItem.RelativeTo`, `Off`, `PointerWords`, `GoTypeLink`, aggregate parameter
+types, call conventions and source positions. A field the format dropped would
+show up as a difference, and the one field that did differ -- `Items[3]` of one
+descriptor -- was a compiler bug in the delta model, not a format loss.

@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/evanphx/cg12/internal/cachefile"
 	"github.com/evanphx/cg12/ir"
@@ -559,6 +560,21 @@ type FunctionCacheStats struct {
 	Reasons map[string]int
 	// Wrote is how many package files this compile stored.
 	Wrote int
+
+	// Lowering is the wall time of the declaration loop -- lowering the misses and
+	// splicing the hits. It is the stage the cache is about, and the only stage a
+	// hit can shorten.
+	Lowering time.Duration
+	// Replay is the part of Lowering spent decoding units and merging them, and
+	// Encode is the part spent serialising deltas for the units this compile will
+	// write. The two are what separates the achieved saving from the projected one:
+	// the projection priced a hit at zero, and a hit costs a decode.
+	Replay time.Duration
+	Encode time.Duration
+	// Key is the wall time spent computing the compile identity: hashing every
+	// source file of the closure and the compiler binary. It is paid whether or not
+	// anything hits, so a cache that never hits is this much slower than none.
+	Key time.Duration
 }
 
 func (s *FunctionCacheStats) reason(text string) {
@@ -574,8 +590,10 @@ func (s FunctionCacheStats) String() string {
 	if s.TotalInstructions > 0 {
 		share = 100 * float64(s.Instructions) / float64(s.TotalInstructions)
 	}
-	summary := fmt.Sprintf("function cache: %d/%d packages, %d/%d declarations, %d functions, %.1f%% of lowered IR, %d files written",
-		s.PackagesHit, s.Packages, s.Hits, s.Declarations, s.Functions, share, s.Wrote)
+	summary := fmt.Sprintf("function cache: %d/%d packages, %d/%d declarations, %d functions, %.1f%% of lowered IR, %d files written; lowering %s (replay %s, encode %s), key %s",
+		s.PackagesHit, s.Packages, s.Hits, s.Declarations, s.Functions, share, s.Wrote,
+		s.Lowering.Round(time.Millisecond), s.Replay.Round(time.Millisecond),
+		s.Encode.Round(time.Millisecond), s.Key.Round(time.Millisecond))
 	if len(s.Reasons) == 0 {
 		return summary
 	}
@@ -655,12 +673,16 @@ func openFunctionCache(target Target, options compileOptions, loader *sourceLoad
 	if !usable || functionCacheDirectory() == "" {
 		return newFunctionCache(nil, "", fset), nil
 	}
+	started := time.Now()
 	identity, err := loadedCompileIdentity(string(target), false, loader, fset, pkg, name, src)
+	elapsed := time.Since(started)
 	if err != nil {
 		// A key that cannot be computed is a compile without a cache, not a failed
 		// compile. The commonest cause is a source file edited between the parse and
 		// the hash, which is a race the compile should survive.
 		return newFunctionCache(nil, "", fset), nil
 	}
-	return newFunctionCache(identity, pkg.Path(), fset), &internJournal{}
+	cache := newFunctionCache(identity, pkg.Path(), fset)
+	cache.stats.Key = elapsed
+	return cache, &internJournal{}
 }

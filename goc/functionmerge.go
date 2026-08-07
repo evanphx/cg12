@@ -6,6 +6,7 @@ import (
 	"go/types"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/evanphx/cg12/internal/cachefile"
 	"github.com/evanphx/cg12/ir"
@@ -281,7 +282,9 @@ func (c *functionCache) record(module *ir.Module, journal *internJournal, functi
 		// effect the lowering had that this stage has not accounted for.
 		return
 	}
+	started := time.Now()
 	encoded, err := encodeDeclarationDelta(module, funcs, module.Data[mark.data:], module.Types[mark.types:])
+	c.stats.Encode += time.Since(started)
 	if err != nil {
 		return
 	}
@@ -373,6 +376,8 @@ func (c *functionCache) flush() {
 // order the declaration appended them, so the module's three tables come out
 // index for index the same as a cold compile's.
 func (c *functionCache) replay(g *gen, declaration *cachedDeclaration) error {
+	started := time.Now()
+	defer func() { c.stats.Replay += time.Since(started) }()
 	decoded, err := ir.DecodeModuleUnverified(declaration.Unit)
 	if err != nil {
 		return fmt.Errorf("goc: cached unit for %s: %w", declaration.Symbol, err)
@@ -664,7 +669,8 @@ func sameDataItem(left, right ir.DataItem) bool {
 // what comes after the loop -- the interface-method dispatchers, the init tasks,
 // the memory helpers -- is generated from the assembled program and is not part
 // of what a cache could ever hold.
-func (c *functionCache) finishLowering(module *ir.Module) {
+func (c *functionCache) finishLowering(module *ir.Module, started time.Time) {
+	c.stats.Lowering = time.Since(started)
 	if c.directory == "" {
 		return
 	}
