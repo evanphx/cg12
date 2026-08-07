@@ -7515,3 +7515,116 @@ the numerator held and the denominator moved — the lowering loop is 11.8% of a
 `opt.OptimizeModule` is now 9.97 s of a 16.2 s `fmt_sprintf` compile. 11.8% ×
 79.2% = 9.3% against 9.7% measured; 11.7% × 68.8% = 8.0% against 8.8% measured.
 The arithmetic closes.
+
+---
+
+# Stage 2 gate: verifying `ccwork/cache-store-and-merge`
+
+Gate branch `ccwork/stage2-gate`, at the branch under test (`235c54c`), off `main`
+(`4ad59d2`). Host: aarch64 Linux, 64 cores, 250 GiB, go1.26.1, exclusive.
+
+This section is written as the run proceeds. Anything not yet watched to
+completion is marked UNVERIFIED and stays that way unless a number below it says
+otherwise.
+
+## 0. What was read before anything was run
+
+Two inspection questions were asked ahead of the measurements because they decide
+what the measurements have to be pointed at.
+
+### 0.1 `-O` is not a clause of this key, and that is load-bearing
+
+`openFunctionCache` computes the key with `Optimize` false unconditionally
+(`goc/functionstore.go:677`), so `packageCacheKeyDigest`'s optimize clause is a
+constant and a `-O` build and a plain one **share one file**. The branch says so
+and gives one cross-arm build as evidence.
+
+The structural reason it is sound is stronger than that one build, and is worth
+recording because the gate's concurrency item deliberately mixes the two arms in
+one directory: **`goc`'s lowering has no `-O` knob at all.** `compileOptions`
+(`goc/compile.go:137`) carries target, executable, test packages, runtime split
+and coverage -- and no optimize field; `grep -n 'optimize' goc/*.go` outside
+`functioncache.go`/`functionstore.go` finds only comments. `-O` is `cmd/goc`
+calling `opt.OptimizeModule` on the module `goc` returns. So a unit written by a
+`-O` compile and one written without it cannot differ: they are the same function
+of the same inputs.
+
+### 0.2 `SrcPos.File` remapping, and what a decoded function resolves against
+
+Confirmed, and confirmed to be complete rather than merely present.
+
+`ir/binary.go` encodes exactly three `SrcPos` values -- `InlineSite.Call`
+(line 580), `Block.Pos` (641), `Instr.Pos` (714). `encodeDeclarationDelta`'s
+`visit` walks exactly those three, and `functionmerge.go`'s `replay` applies the
+inverse to the same three. The other four `SrcPos`-bearing fields in `ir`
+(`AllocDecision.Pos/.Use`, `PlacedAlloc.Pos/.Use`, `ir/alloc.go`) are diagnostic
+records the binary format deliberately does not carry, and the `-m` builds that
+fill them are declined by the cache outright.
+
+The ownership half: `replay` calls `module.Adopt(function)` (step 5), and
+`ir.Module.Adopt` sets `f.mod = m` before appending, so `Func.Module()` -- which
+is what `ir.Func.String` and the verifier ask for a file name -- resolves against
+the **merged** module and not the scratch module `ir.DecodeModuleUnverified`
+produced. The remap in step 2 runs *before* the adopt, so the indices are already
+the merged module's when the back-pointer changes. The file names the declaration
+itself appended are replayed first (step 1) from `cachedDeclaration.NewFiles`, so
+the merged file table is index-for-index the cold one's, which is what makes the
+whole-module byte comparison a meaningful check rather than a lucky one.
+
+### 0.3 The append-only audit, done again and by a different route
+
+The branch found one non-append write (`ensureRuntimeTypeEqual`) by whole-program
+diff and journalled it. This gate looked for a second one by asking a different
+question: *what state outside the delta can a declaration's lowering read or
+write?*
+
+**Module-scope tables the delta does not carry.** `ir.Module` has three tables
+`MarshalBinary` encodes and `encodeDeclarationDelta`'s scratch module
+(`&ir.Module{Funcs, Data, Types, Files}`) leaves out: `SymAlign`, `SymAttrs` and
+`Aliases`. A write to any of them during lowering would be lost by the delta
+model exactly as `ensureRuntimeTypeEqual`'s write was. None happens:
+`NoteSymAlign` has no caller in `goc` (it is written by the backends), nothing in
+`goc` appends to `Module.Aliases`, and the only `SymAttrs` writer is
+`registerSymAttrs`, called at `goc/compile.go:533` -- **after** the lowering loop
+closes at line 501 -- from the `functions` list rather than from anything a delta
+holds. So the three are safe, and the reason is structural rather than empirical.
+
+**Backward writes into `Module.Data`.** `markDataPointerCell` and
+`markDataPointerWords` (`goc/compile.go:16317`, `16326`) scan `g.mod.Data`
+backwards by name and overwrite `PointerWords` -- the same shape as the write the
+branch found. Both are called only from `globalDecl`, and both `globalDecl` call
+sites (lines 385 and 409) are in the pre-loop global-emission pass, before
+`openFunctionCache` is reached at line 454. Not a second instance.
+
+**Removal from `Module.Funcs`.** `staticFunctionLiteral` (`goc/compile.go:5950`)
+deletes a temporary function from `g.mod.Funcs` mid-lowering. It is append-only
+in effect: the temporary is created and removed inside one declaration, so the
+`module.Funcs[mark.funcs:]` slice `record` takes at the end of that declaration
+never contains it and no earlier declaration's functions move index.
+
+**The residual, and it is not an interning table.** What the audit did find is a
+different shape from the one the brief named, and it is the one the measurements
+below are pointed at. Two symbols are emitted once per module under a guard that
+is a **scan of `g.mod.Funcs`**, not an intern map:
+`emitRuntimeTypeHasher` (`goc/compile.go:9137`) and `ensureRuntimeTypeEqual`
+(`goc/compile.go:9169`). Nothing journals them, because there is no table to
+journal -- the module itself is the table.
+
+That makes a delta's contents depend on which declarations were lowered *before*
+it, which is the invariant the whole delta model rests on:
+
+> in program P, declaration A is lowered first and emits `T.equal`; declaration D
+> asks for it later, the scan finds it, and D's stored delta contains nothing
+> about it. In program Q, D is reachable and A is not. Warm Q replays D and
+> nothing emits `T.equal`.
+
+The same argument applies to `g.typeTags` and every other intern table -- those
+*are* journalled, so the warm compile restores the map, but the artifact the map
+points at still lives in the first emitter's delta and is lost if that emitter is
+absent. The branch says as much in its section 7 ("the assumption a future stage
+should attack first"), and names `TestCacheFilledByAnotherProgramIsUsable` as the
+evidence. That test is one program pair.
+
+**This gate attacks it at corpus scale**: fill one shared directory from the
+largest program in the corpus, then compile every other program warm out of it
+and compare each against its own `CG12_NOCACHE=1` build. Results in section 3.
