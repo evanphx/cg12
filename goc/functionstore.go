@@ -105,10 +105,68 @@ type internNote struct {
 	Value string
 }
 
-// internJournal records those entries in insertion order. A nil journal is the
-// off state and costs one pointer comparison at each of the eight sites that
-// write to it.
-type internJournal struct{ notes []internNote }
+// ---------------------------------------------------------------------------
+// The artifact journal
+// ---------------------------------------------------------------------------
+
+// An interned artifact is a definition that belongs to no declaration. The first
+// declaration to want `.goc.type.time.Time.<sha8>` mints it; every later one gets
+// a table hit and appends nothing. Recording only what a declaration APPENDED
+// therefore records the reference and not the definition, and a unit written that
+// way is usable only by a program that happens to contain whichever declaration
+// minted it first. Across programs it is not: 357 of 408 corpus programs failed
+// to link against a cache one program had filled.
+//
+// So a unit has to carry the definitions of the artifacts it references. It also
+// has to carry the POSITION of each reference, and that is the part that is easy
+// to miss. A cold compile mints an artifact at the point of first reference, in
+// the middle of some declaration's delta -- and Module.Data order is the order
+// arm64/assembly.go emits data in, so it is the image's layout. Carrying the
+// definitions but not their positions gives a program that links and is still a
+// different binary: measured, filling from hello.go and compiling fmt_sprintf.go
+// against it produced exactly the same symbols with 1874 of them at different
+// addresses.
+//
+// The journal therefore records, alongside the table entries, the extent of every
+// artifact minted and the position of every artifact merely referenced. From that
+// a declaration's stored delta is the sequence its lowering WOULD have produced
+// had the intern tables been empty when it started: its own items, and at the
+// exact point of first reference the whole definition of each artifact it
+// touched. Replay walks that sequence and appends only what the module does not
+// already define -- which is what a cold compile does too, so the warm module
+// comes out index for index the same.
+
+type artifactEventKind uint8
+
+const (
+	// artifactBegin and artifactEnd bracket one artifact's definition. Everything
+	// appended between them belongs to that artifact rather than to the
+	// declaration that happened to reach it first.
+	artifactBegin artifactEventKind = iota
+	artifactEnd
+	// artifactReference is a table hit: the artifact was already interned, so
+	// nothing was appended, and all that is recorded is where the reference fell.
+	artifactReference
+)
+
+// artifactEvent is one such mark, with the module's three tables and the note
+// list measured at the moment it was made.
+type artifactEvent struct {
+	Kind   artifactEventKind
+	Symbol string
+	Funcs  int
+	Data   int
+	Types  int
+	Notes  int
+}
+
+// internJournal records the table entries in insertion order and the artifact
+// events interleaved with them. A nil journal is the off state and costs one
+// pointer comparison at each site that writes to it.
+type internJournal struct {
+	notes  []internNote
+	events []artifactEvent
+}
 
 func (j *internJournal) note(kind internKind, key, value string) {
 	if j == nil {
@@ -117,18 +175,59 @@ func (j *internJournal) note(kind internKind, key, value string) {
 	j.notes = append(j.notes, internNote{Kind: kind, Key: key, Value: value})
 }
 
-func (j *internJournal) mark() int {
+func (j *internJournal) event(kind artifactEventKind, symbol string, module *ir.Module) {
 	if j == nil {
-		return 0
+		return
 	}
-	return len(j.notes)
+	j.events = append(j.events, artifactEvent{
+		Kind:   kind,
+		Symbol: symbol,
+		Funcs:  len(module.Funcs),
+		Data:   len(module.Data),
+		Types:  len(module.Types),
+		Notes:  len(j.notes),
+	})
 }
 
-func (j *internJournal) since(mark int) []internNote {
-	if j == nil || mark > len(j.notes) {
-		return nil
+// here is where the module and the journal stand now, in the shape the scope
+// reconstruction wants for the end of a declaration.
+func (j *internJournal) here(module *ir.Module) artifactEvent {
+	event := artifactEvent{Funcs: len(module.Funcs), Data: len(module.Data), Types: len(module.Types)}
+	if j != nil {
+		event.Notes = len(j.notes)
 	}
-	return j.notes[mark:]
+	return event
+}
+
+func (j *internJournal) mark(module *ir.Module) declarationMark {
+	mark := declarationMark{
+		funcs: len(module.Funcs),
+		data:  len(module.Data),
+		types: len(module.Types),
+		files: len(module.Files),
+	}
+	if j != nil {
+		mark.notes = len(j.notes)
+		mark.events = len(j.events)
+	}
+	return mark
+}
+
+// mintArtifact opens the recording scope of one interned artifact and returns the
+// call that closes it, for `defer g.mintArtifact(symbol)()` at each of the sites
+// that mint one. Everything appended between the two belongs to the artifact
+// rather than to whichever declaration happened to reach it first.
+func (g *gen) mintArtifact(symbol string) func() {
+	g.interns.event(artifactBegin, symbol, g.mod)
+	return func() { g.interns.event(artifactEnd, symbol, g.mod) }
+}
+
+// useArtifact records that lowering reached an artifact that was already
+// interned. Nothing was appended, so the position is the whole record: a cold
+// compile of a program that did not already have it would have minted the
+// definition right here, and that is where a replay has to put it.
+func (g *gen) useArtifact(symbol string) {
+	g.interns.event(artifactReference, symbol, g.mod)
 }
 
 // ---------------------------------------------------------------------------
@@ -139,9 +238,54 @@ func (j *internJournal) since(mark int) []internNote {
 // [FunctionCacheUnitVersion], which versions the meaning of a key. Either one
 // moving is a miss; they move for different reasons and a reader should be able
 // to tell which.
-const packageUnitVersion = 2
+const packageUnitVersion = 3
 
 const packageUnitMagic = "gocfn1"
+
+// artifactReferenceRecord is one reference to an interned artifact, placed within
+// the sequence of items its referrer appended itself.
+//
+// The three counts are how many of the referrer's OWN functions, data and
+// aggregate types precede the reference. They are the positions the merge splices
+// the artifact's definition in at, and they are what makes a replayed module
+// index for index a cold one rather than merely equivalent to it.
+type artifactReferenceRecord struct {
+	Symbol string
+	Funcs  uint32
+	Data   uint32
+	Types  uint32
+}
+
+// cachedSequence is what one declaration or one interned artifact contributed to
+// a module: the items it appended itself, the artifacts it referenced and where,
+// and the intern-table entries it made directly.
+//
+// The same shape serves both because an artifact's definition is a delta in
+// exactly the sense a declaration's is -- minting an itab mints the type
+// descriptors and the call wrappers it names -- so an artifact's own references
+// nest, and the merge resolves them by the same walk.
+type cachedSequence struct {
+	// Unit is an ir.Module encoding of the own items: the functions, the data and
+	// the aggregate types, with a file table private to the unit. SrcPos.File
+	// inside it indexes that private table and means nothing until the merge
+	// remaps it.
+	Unit []byte
+	// Refs are the artifact references, in the order they were made.
+	Refs []artifactReferenceRecord
+	// Interns are the intern-table entries made directly here -- not the ones made
+	// inside a referenced artifact, which travel with that artifact so that
+	// skipping a definition the module already has skips its table entry too.
+	Interns []internNote
+}
+
+// cachedArtifact is one interned artifact's definition, stored once per package
+// file however many of the file's declarations name it.
+type cachedArtifact struct {
+	// Symbol is the artifact's head symbol -- the name a referrer names it by, and
+	// the name whose presence in the module means the whole definition is present.
+	Symbol string
+	cachedSequence
+}
 
 // cachedDeclaration is one source declaration's whole lowering delta.
 type cachedDeclaration struct {
@@ -169,12 +313,7 @@ type cachedDeclaration struct {
 	// keeps the warm module's file table identical to the cold one's, rather than
 	// merely equivalent.
 	NewFiles []string
-	// Unit is an ir.Module encoding of the delta: the functions, the data and the
-	// aggregate types, with a file table private to the unit. SrcPos.File inside
-	// it indexes that private table and means nothing until the merge remaps it.
-	Unit []byte
-	// Interns are the intern-table entries the declaration added, in order.
-	Interns []internNote
+	cachedSequence
 }
 
 // packageCacheUnit is one package's file: its key, and every cacheable
@@ -189,12 +328,22 @@ type packageCacheUnit struct {
 	Entry *FunctionCacheEntry
 	// Decls are the declarations, keyed by [cachedDeclaration.Decl].
 	Decls map[string]*cachedDeclaration
-	// order is those keys in write order, so the file is byte-deterministic.
+	// Artifacts are the interned artifacts those declarations reference,
+	// transitively, keyed by head symbol. One copy per file however many
+	// declarations of the file name it: the duplication this design pays is across
+	// package files, not across the declarations inside one.
+	Artifacts map[string]*cachedArtifact
+	// order is the declaration keys in write order, so the file is
+	// byte-deterministic.
 	order []string
 }
 
 func newPackageCacheUnit(entry *FunctionCacheEntry) *packageCacheUnit {
-	return &packageCacheUnit{Entry: entry, Decls: map[string]*cachedDeclaration{}}
+	return &packageCacheUnit{
+		Entry:     entry,
+		Decls:     map[string]*cachedDeclaration{},
+		Artifacts: map[string]*cachedArtifact{},
+	}
 }
 
 func (u *packageCacheUnit) add(declaration *cachedDeclaration) {
@@ -202,6 +351,16 @@ func (u *packageCacheUnit) add(declaration *cachedDeclaration) {
 		u.order = append(u.order, declaration.Decl)
 	}
 	u.Decls[declaration.Decl] = declaration
+}
+
+// artifactNames is the file's artifacts in a deterministic order.
+func (u *packageCacheUnit) artifactNames() []string {
+	names := make([]string, 0, len(u.Artifacts))
+	for symbol := range u.Artifacts {
+		names = append(names, symbol)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // ---------------------------------------------------------------------------
@@ -321,13 +480,13 @@ func (u *packageCacheUnit) encode() []byte {
 		for _, file := range declaration.NewFiles {
 			body.str(file)
 		}
-		body.blob(declaration.Unit)
-		body.varint(uint64(len(declaration.Interns)))
-		for _, note := range declaration.Interns {
-			body.buf = append(body.buf, byte(note.Kind))
-			body.str(note.Key)
-			body.str(note.Value)
-		}
+		body.sequence(declaration.cachedSequence)
+	}
+	names := u.artifactNames()
+	body.varint(uint64(len(names)))
+	for _, symbol := range names {
+		body.str(symbol)
+		body.sequence(u.Artifacts[symbol].cachedSequence)
 	}
 
 	out := make([]byte, 0, len(packageUnitMagic)+1+sha256.Size+len(body.buf))
@@ -372,12 +531,13 @@ func decodePackageCacheUnit(data []byte) (*packageCacheUnit, error) {
 		for files := reader.varint(); files > 0; files-- {
 			declaration.NewFiles = append(declaration.NewFiles, reader.str())
 		}
-		declaration.Unit = reader.blob()
-		for notes := reader.varint(); notes > 0; notes-- {
-			kind := internKind(reader.byte())
-			declaration.Interns = append(declaration.Interns, internNote{Kind: kind, Key: reader.str(), Value: reader.str()})
-		}
+		declaration.cachedSequence = reader.sequence()
 		unit.add(declaration)
+	}
+	for count := reader.varint(); count > 0; count-- {
+		artifact := &cachedArtifact{Symbol: reader.str()}
+		artifact.cachedSequence = reader.sequence()
+		unit.Artifacts[artifact.Symbol] = artifact
 	}
 	if reader.err != nil {
 		return nil, reader.err
@@ -386,6 +546,23 @@ func decodePackageCacheUnit(data []byte) (*packageCacheUnit, error) {
 }
 
 type unitWriter struct{ buf []byte }
+
+func (w *unitWriter) sequence(sequence cachedSequence) {
+	w.blob(sequence.Unit)
+	w.varint(uint64(len(sequence.Refs)))
+	for _, reference := range sequence.Refs {
+		w.str(reference.Symbol)
+		w.varint(uint64(reference.Funcs))
+		w.varint(uint64(reference.Data))
+		w.varint(uint64(reference.Types))
+	}
+	w.varint(uint64(len(sequence.Interns)))
+	for _, note := range sequence.Interns {
+		w.buf = append(w.buf, byte(note.Kind))
+		w.str(note.Key)
+		w.str(note.Value)
+	}
+}
 
 func (w *unitWriter) varint(value uint64) {
 	w.buf = binary.AppendUvarint(w.buf, value)
@@ -463,6 +640,23 @@ func (r *unitReader) digest() CacheDigest {
 	var out CacheDigest
 	copy(out[:], r.take(len(out)))
 	return out
+}
+
+func (r *unitReader) sequence() cachedSequence {
+	sequence := cachedSequence{Unit: r.blob()}
+	for count := r.varint(); count > 0; count-- {
+		sequence.Refs = append(sequence.Refs, artifactReferenceRecord{
+			Symbol: r.str(),
+			Funcs:  uint32(r.varint()),
+			Data:   uint32(r.varint()),
+			Types:  uint32(r.varint()),
+		})
+	}
+	for count := r.varint(); count > 0; count-- {
+		kind := internKind(r.byte())
+		sequence.Interns = append(sequence.Interns, internNote{Kind: kind, Key: r.str(), Value: r.str()})
+	}
+	return sequence
 }
 
 // ---------------------------------------------------------------------------
@@ -550,6 +744,12 @@ type FunctionCacheStats struct {
 	Misses       int
 	// Functions is how many ir.Funcs came out of cached units.
 	Functions int
+	// Artifacts is how many interned artifact definitions this compile recorded,
+	// and ArtifactsReplayed how many it spliced out of units. The first is the
+	// duplication design (a) pays; the second is the work the old scheme was
+	// silently leaving to whatever program happened to mint them.
+	Artifacts         int
+	ArtifactsReplayed int
 	// Instructions is those functions' weight in IR instructions, which is the
 	// denominator BUILD_CACHE.md's projection is quoted against.
 	Instructions int
@@ -590,8 +790,8 @@ func (s FunctionCacheStats) String() string {
 	if s.TotalInstructions > 0 {
 		share = 100 * float64(s.Instructions) / float64(s.TotalInstructions)
 	}
-	summary := fmt.Sprintf("function cache: %d/%d packages, %d/%d declarations, %d functions, %.1f%% of lowered IR, %d files written; lowering %s (replay %s, encode %s), key %s",
-		s.PackagesHit, s.Packages, s.Hits, s.Declarations, s.Functions, share, s.Wrote,
+	summary := fmt.Sprintf("function cache: %d/%d packages, %d/%d declarations, %d functions, %d/%d artifacts recorded/replayed, %.1f%% of lowered IR, %d files written; lowering %s (replay %s, encode %s), key %s",
+		s.PackagesHit, s.Packages, s.Hits, s.Declarations, s.Functions, s.Artifacts, s.ArtifactsReplayed, share, s.Wrote,
 		s.Lowering.Round(time.Millisecond), s.Replay.Round(time.Millisecond),
 		s.Encode.Round(time.Millisecond), s.Key.Round(time.Millisecond))
 	if len(s.Reasons) == 0 {
@@ -663,15 +863,9 @@ func debugFunctionCache(stats FunctionCacheStats) {
 // a -O build and one written without it are the same bytes. A cache of
 // post-optimiser IR would need the clause, and would need a great deal more
 // besides.
-func openFunctionCache(target Target, options compileOptions, loader *sourceLoader, fset *token.FileSet, pkg *types.Package, name string, src []byte) (*functionCache, *internJournal) {
-	usable := options.executable &&
-		len(options.testPackages) == 0 &&
-		len(options.externalTestPackages) == 0 &&
-		options.runtimeSplit == nil &&
-		options.runtimeCoverage == nil &&
-		opt.EscapeDiagLevel() < 1
-	if !usable || functionCacheDirectory() == "" {
-		return newFunctionCache(nil, "", fset), nil
+func openFunctionCache(target Target, options compileOptions, loader *sourceLoader, fset *token.FileSet, pkg *types.Package, name string, src []byte, journal *internJournal) *functionCache {
+	if journal == nil {
+		return newFunctionCache(nil, "", fset)
 	}
 	started := time.Now()
 	identity, err := loadedCompileIdentity(string(target), false, loader, fset, pkg, name, src)
@@ -680,9 +874,35 @@ func openFunctionCache(target Target, options compileOptions, loader *sourceLoad
 		// A key that cannot be computed is a compile without a cache, not a failed
 		// compile. The commonest cause is a source file edited between the parse and
 		// the hash, which is a race the compile should survive.
-		return newFunctionCache(nil, "", fset), nil
+		return newFunctionCache(nil, "", fset)
 	}
 	cache := newFunctionCache(identity, pkg.Path(), fset)
 	cache.stats.Key = elapsed
-	return cache, &internJournal{}
+	return cache
+}
+
+// newInternJournal decides, from the compile's shape alone, whether lowering
+// should be journalled at all.
+//
+// It is separate from [openFunctionCache] and answered much earlier because of
+// where interned artifacts come from. Global initializers are lowered before the
+// declaration loop starts, and they mint the descriptors of every global's type --
+// which are exactly the artifacts the loop's declarations then reference. A
+// journal that started at the loop would see those references as hits with no
+// definition anywhere, and every declaration making one would have to be refused.
+// So the journal starts before the first thing that can lower, and the cache
+// attaches to it once the closure is loaded and its key is knowable.
+//
+// The clauses are [openFunctionCache]'s, minus the ones that need the loader.
+func newInternJournal(options compileOptions) *internJournal {
+	usable := options.executable &&
+		len(options.testPackages) == 0 &&
+		len(options.externalTestPackages) == 0 &&
+		options.runtimeSplit == nil &&
+		options.runtimeCoverage == nil &&
+		opt.EscapeDiagLevel() < 1
+	if !usable || functionCacheDirectory() == "" {
+		return nil
+	}
+	return &internJournal{}
 }

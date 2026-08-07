@@ -42,9 +42,12 @@ import (
 //     check. runtimepack.Manifest.DataDigests does exactly this at the object
 //     level and is the model: a second definition of a name is accepted only if it
 //     is byte-identical to the first, and a mismatch is a hard error naming the
-//     symbol. It should be unreachable -- the intern tables are replayed, so
-//     nothing should re-mint what a unit already supplied -- which is why it is an
-//     error rather than a silent preference for one side.
+//     symbol. With interned artifacts carried by the units that reference them
+//     (see the artifact journal in goc/functionstore.go) this is no longer an
+//     unreachable check but the working half of the merge: two units that both
+//     name `.goc.type.time.Time.<sha8>` agree byte for byte, the second copy is
+//     dropped, and a disagreement is a bug that names its symbol rather than one
+//     side silently winning.
 
 // functionCache is one compile's use of the per-function cache: which units it
 // read, what it replayed, and what it will write back.
@@ -81,9 +84,25 @@ type functionCache struct {
 	// itself. goc does not build one, and a compiler that starts to should get a
 	// duplicated type rather than a hang.
 	interning map[*ir.AggType]bool
-	// data indexes the module's definitions by name for the collision check.
-	data        map[string]*ir.Data
-	dataScanned int
+	// data indexes the module's definitions by name for the collision check, and
+	// functions and aggregateNames do the same for the other two tables. Together
+	// they answer "does this module already define that symbol", which is what
+	// decides whether a referenced artifact is spliced or skipped.
+	data              map[string]*ir.Data
+	dataScanned       int
+	functions         map[string]bool
+	functionsScanned  int
+	aggregateNames    map[string]bool
+	aggregateNamesRun int
+
+	// artifacts are the interned artifacts this compile knows a definition of, by
+	// head symbol: the ones its own lowering minted and the ones it read out of a
+	// unit. A declaration may only be recorded if every artifact it references is
+	// in here, which is what makes a written unit self-sufficient.
+	artifacts map[string]*cachedArtifact
+	// replaying guards the artifact graph against a cycle. goc does not build one;
+	// a unit that claims otherwise should be refused rather than hang.
+	replaying map[string]bool
 
 	// pointerKeys is the gen.runtimeTypes information a unit can carry: for each
 	// type a cached declaration asked for a descriptor of, the key of the pointer
@@ -120,6 +139,10 @@ func newFunctionCache(identity *CompileIdentity, root string, fset *token.FileSe
 		declaredAggregates: map[*ir.AggType]bool{},
 		interning:          map[*ir.AggType]bool{},
 		data:               map[string]*ir.Data{},
+		functions:          map[string]bool{},
+		aggregateNames:     map[string]bool{},
+		artifacts:          map[string]*cachedArtifact{},
+		replaying:          map[string]bool{},
 		pointerKeys:        map[string]string{},
 	}
 }
@@ -180,12 +203,29 @@ func (c *functionCache) unitFor(path string) *packageCacheUnit {
 	}
 	c.units[path] = stored
 	c.stats.PackagesHit++
+	// Every artifact this file carries is a definition this compile now knows,
+	// whether or not a declaration of this package turns out to need it. A
+	// declaration read from here and carried forward unreplayed into the file this
+	// compile writes still names them, so they have to be resolvable then.
+	for symbol, artifact := range stored.Artifacts {
+		if c.artifacts[symbol] == nil {
+			c.artifacts[symbol] = artifact
+		}
+	}
 	return stored
+}
+
+// cachedHit is one usable stored declaration and the file it came out of. The
+// file travels with it because replaying a declaration means resolving the
+// artifacts it references, and those live in the same file.
+type cachedHit struct {
+	unit        *packageCacheUnit
+	declaration *cachedDeclaration
 }
 
 // lookup returns the stored delta for one declaration, if the cache has one it
 // may use.
-func (c *functionCache) lookup(function functionDecl) *cachedDeclaration {
+func (c *functionCache) lookup(function functionDecl) *cachedHit {
 	if c.directory == "" || !cacheableDeclaration(function) {
 		return nil
 	}
@@ -198,7 +238,7 @@ func (c *functionCache) lookup(function functionDecl) *cachedDeclaration {
 	if declaration == nil || c.replayed[key] || c.recorded[key] {
 		return nil
 	}
-	return declaration
+	return &cachedHit{unit: unit, declaration: declaration}
 }
 
 // declarationKey identifies one declaration within its package. See
@@ -231,30 +271,204 @@ func cacheableDeclaration(function functionDecl) bool {
 // was lowered. Everything after it is that declaration's delta.
 type declarationMark struct {
 	funcs, data, types, files int
-	interns                   int
+	notes                     int
+	events                    int
 }
 
 func markDeclaration(module *ir.Module, journal *internJournal) declarationMark {
-	return declarationMark{
-		funcs:   len(module.Funcs),
-		data:    len(module.Data),
-		types:   len(module.Types),
-		files:   len(module.Files),
-		interns: journal.mark(),
+	return journal.mark(module)
+}
+
+// loweringScope is one artifact's extent, or one declaration's, reconstructed
+// from the journal's events. The children are in the order the scope touched
+// them; a child that minted its artifact carries the artifact's own scope, and a
+// child that only referenced one carries nothing but the position.
+type loweringScope struct {
+	symbol   string
+	begin    artifactEvent
+	end      artifactEvent
+	children []loweringChild
+}
+
+type loweringChild struct {
+	at     artifactEvent
+	minted *loweringScope
+}
+
+// buildLoweringScope turns the flat event list into the tree the calls made. It
+// returns nil for an unbalanced list, which would mean a mint site opened a scope
+// and returned without closing it; a scope that cannot be read is a declaration
+// that is not recorded, not a compile that fails.
+func buildLoweringScope(events []artifactEvent, begin, end artifactEvent) *loweringScope {
+	root := &loweringScope{begin: begin, end: end}
+	stack := []*loweringScope{root}
+	for _, event := range events {
+		top := stack[len(stack)-1]
+		switch event.Kind {
+		case artifactBegin:
+			minted := &loweringScope{symbol: event.Symbol, begin: event}
+			top.children = append(top.children, loweringChild{at: event, minted: minted})
+			stack = append(stack, minted)
+		case artifactEnd:
+			if len(stack) == 1 {
+				return nil
+			}
+			top.end = event
+			stack = stack[:len(stack)-1]
+		case artifactReference:
+			top.children = append(top.children, loweringChild{at: event})
+		}
 	}
+	if len(stack) != 1 {
+		return nil
+	}
+	return root
+}
+
+// collectedScope is one scope's contribution separated from its children's: the
+// items it appended itself, where each referenced artifact fell among them, and
+// the table entries it made directly.
+type collectedScope struct {
+	funcs   []*ir.Func
+	data    []*ir.Data
+	types   []*ir.AggType
+	refs    []artifactReferenceRecord
+	interns []internNote
+	// missing is the first artifact this scope referenced that no definition is
+	// known for. The scope is still walked to the end when one turns up: the
+	// artifacts it goes on to mint are definitions other declarations will need,
+	// and dropping them because this one is unusable would make those unusable too.
+	missing string
+}
+
+// collectScope walks one scope, registering the definition of every artifact it
+// minted and checking that every artifact it merely referenced already has one.
+//
+// The second half is the whole point. A reference with no definition anywhere is
+// a delta that would dangle in any program that does not happen to contain
+// whatever minted it, so it is refused here -- as a lost cache hit -- rather than
+// written out as a unit that fails to link. It happens for artifacts minted before
+// the journal existed at all, which is why [newInternJournal] starts it as early
+// as it does.
+func (c *functionCache) collectScope(module *ir.Module, notes []internNote, scope *loweringScope) collectedScope {
+	var collected collectedScope
+	funcs, data, types, note := scope.begin.Funcs, scope.begin.Data, scope.begin.Types, scope.begin.Notes
+	for _, child := range scope.children {
+		collected.funcs = append(collected.funcs, module.Funcs[funcs:child.at.Funcs]...)
+		collected.data = append(collected.data, module.Data[data:child.at.Data]...)
+		collected.types = append(collected.types, module.Types[types:child.at.Types]...)
+		collected.interns = append(collected.interns, notes[note:child.at.Notes]...)
+		known := true
+		if child.minted == nil {
+			known = c.artifacts[child.at.Symbol] != nil
+			funcs, data, types, note = child.at.Funcs, child.at.Data, child.at.Types, child.at.Notes
+		} else {
+			var missing string
+			known, missing = c.recordArtifact(module, notes, child.minted)
+			if missing != "" && collected.missing == "" {
+				collected.missing = missing
+			}
+			funcs, data, types, note = child.minted.end.Funcs, child.minted.end.Data, child.minted.end.Types, child.minted.end.Notes
+		}
+		if !known {
+			// Either a mint that appended nothing, or a reference to something minted
+			// before this compile journalled anything. The first contributed nothing
+			// for a replay to put back; the second is what missing records. The
+			// reference is dropped either way, so a stored sequence never names a
+			// definition its file will not carry.
+			if child.minted == nil && collected.missing == "" {
+				collected.missing = child.at.Symbol
+			}
+			continue
+		}
+		collected.refs = append(collected.refs, artifactReferenceRecord{
+			Symbol: child.at.Symbol,
+			Funcs:  uint32(len(collected.funcs)),
+			Data:   uint32(len(collected.data)),
+			Types:  uint32(len(collected.types)),
+		})
+	}
+	collected.funcs = append(collected.funcs, module.Funcs[funcs:scope.end.Funcs]...)
+	collected.data = append(collected.data, module.Data[data:scope.end.Data]...)
+	collected.types = append(collected.types, module.Types[types:scope.end.Types]...)
+	collected.interns = append(collected.interns, notes[note:scope.end.Notes]...)
+	return collected
+}
+
+// encodeScope serialises what collectScope separated out.
+func (c *functionCache) encodeScope(module *ir.Module, collected collectedScope) (cachedSequence, error) {
+	started := time.Now()
+	encoded, err := encodeDeclarationDelta(module, collected.funcs, collected.data, collected.types)
+	c.stats.Encode += time.Since(started)
+	if err != nil {
+		return cachedSequence{}, err
+	}
+	return cachedSequence{
+		Unit:    encoded,
+		Refs:    append([]artifactReferenceRecord(nil), collected.refs...),
+		Interns: append([]internNote(nil), collected.interns...),
+	}, nil
+}
+
+// recordArtifact stores one interned artifact's definition, once per compile. It
+// reports whether a definition is now known, and names the first artifact the
+// definition referenced that none is known for.
+//
+// A mint that appended nothing is not stored. Two of the sites open their scope
+// before they know whether they will emit -- goABIAggregate can find the type has
+// no ABI shape, staticInterfacePayload can find the constant will not render --
+// and both leave their intern table untouched when that happens, so the symbol is
+// minted again on the next call. Storing the empty first attempt would make the
+// real definition the one that is dropped.
+func (c *functionCache) recordArtifact(module *ir.Module, notes []internNote, scope *loweringScope) (bool, string) {
+	if c.artifacts[scope.symbol] != nil {
+		return true, ""
+	}
+	collected := c.collectScope(module, notes, scope)
+	if len(collected.funcs)+len(collected.data)+len(collected.types)+len(collected.refs) == 0 {
+		return false, collected.missing
+	}
+	sequence, err := c.encodeScope(module, collected)
+	if err != nil {
+		return false, scope.symbol
+	}
+	c.artifacts[scope.symbol] = &cachedArtifact{Symbol: scope.symbol, cachedSequence: sequence}
+	c.stats.Artifacts++
+	return true, collected.missing
 }
 
 // record stores what one lowered declaration added, if a cache may hold it.
 //
-// The classification runs over the whole delta and not just over the declaration
-// itself. A declaration's lowering can create an interface-call wrapper on demand
-// at a call site, and a wrapper's body is chosen from the assembled program by
-// redirectUnavailableInterfaceCallWrappers -- so a delta containing one is not a
-// unit, whatever the declaration at the head of it is. Refusing the whole delta
-// is the conservative direction: a declaration wrongly excluded is a slower build,
-// and one wrongly included is a wrong binary.
+// The classification runs over everything the declaration itself appended, and
+// not over what its artifacts did. An interface-call wrapper is not a unit --
+// redirectUnavailableInterfaceCallWrappers chooses its body from the assembled
+// program -- but a wrapper reached through an itab is part of that itab's
+// definition, and an itab that did not carry its wrappers would name symbols
+// nothing defines. Carrying them is safe for the reason the classification exists:
+// the redirect is a whole-program pass over the finished module and runs on a warm
+// compile exactly as it does on a cold one.
+//
+// The artifacts are registered even when the declaration is refused. A refused
+// declaration still minted definitions an accepted one may reference, and a
+// reference whose definition this compile has forgotten costs the accepted
+// declaration its unit.
 func (c *functionCache) record(module *ir.Module, journal *internJournal, function functionDecl, mark declarationMark) {
-	if c.directory == "" || !cacheableDeclaration(function) {
+	if c.directory == "" {
+		return
+	}
+	scope := buildLoweringScope(journal.events[mark.events:],
+		artifactEvent{Funcs: mark.funcs, Data: mark.data, Types: mark.types, Notes: mark.notes},
+		journal.here(module))
+	if scope == nil {
+		c.stats.reason("unbalanced artifact journal")
+		return
+	}
+	collected := c.collectScope(module, journal.notes, scope)
+	if !cacheableDeclaration(function) {
+		return
+	}
+	if collected.missing != "" {
+		c.stats.reason("no definition of " + collected.missing)
 		return
 	}
 	path := function.pkg.Path()
@@ -270,32 +484,86 @@ func (c *functionCache) record(module *ir.Module, journal *internJournal, functi
 		delete(c.unitBeingWritten(path, entry).Decls, key)
 		return
 	}
-	funcs := module.Funcs[mark.funcs:]
-	for _, lowered := range funcs {
+	for _, lowered := range collected.funcs {
 		if !ClassifyCacheUnit(lowered).Cacheable() {
 			return
 		}
 	}
-	if len(funcs) == 0 {
+	if len(collected.funcs) == 0 {
 		// A declaration that lowered to nothing at all. There is no delta to store,
 		// and storing an empty one would make the warm compile skip whatever side
 		// effect the lowering had that this stage has not accounted for.
 		return
 	}
-	started := time.Now()
-	encoded, err := encodeDeclarationDelta(module, funcs, module.Data[mark.data:], module.Types[mark.types:])
-	c.stats.Encode += time.Since(started)
+	sequence, err := c.encodeScope(module, collected)
 	if err != nil {
 		return
 	}
 	c.recorded[key] = true
 	c.unitBeingWritten(path, entry).add(&cachedDeclaration{
-		Decl:     key,
-		Symbol:   funcs[0].Name,
-		NewFiles: append([]string(nil), module.Files[mark.files:]...),
-		Unit:     encoded,
-		Interns:  append([]internNote(nil), journal.since(mark.interns)...),
+		Decl:           key,
+		Symbol:         collected.funcs[0].Name,
+		NewFiles:       append([]string(nil), module.Files[mark.files:]...),
+		cachedSequence: sequence,
 	})
+}
+
+// attachArtifacts gives a unit about to be written the definitions its
+// declarations name, transitively.
+//
+// This is where the duplication design (a) pays lands: one copy per package file,
+// however many of the file's declarations reference it. It is sound for the same
+// reason the file's key is: an artifact describes types the package's own source
+// mentions, so every package whose source could change its content is already a
+// clause of the key the file is stored under.
+func (c *functionCache) attachArtifacts(unit *packageCacheUnit) error {
+	pending := make([]string, 0, len(unit.Decls))
+	for _, declaration := range unit.Decls {
+		for _, reference := range declaration.Refs {
+			pending = append(pending, reference.Symbol)
+		}
+	}
+	for len(pending) > 0 {
+		symbol := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if unit.Artifacts[symbol] != nil {
+			continue
+		}
+		artifact := c.artifacts[symbol]
+		if artifact == nil {
+			return fmt.Errorf("goc: no definition of %s for %s", symbol, unit.Entry.Package)
+		}
+		unit.Artifacts[symbol] = artifact
+		for _, reference := range artifact.Refs {
+			pending = append(pending, reference.Symbol)
+		}
+	}
+	return nil
+}
+
+// absorbPrelowering records the artifacts minted before the declaration loop
+// started -- by the globals and by the dynamic initializers -- so that a
+// declaration referencing one of them has a definition to carry.
+//
+// Nothing keeps their own items: those are not any declaration's delta and no
+// cached compile skips producing them. What is kept is the definition of each
+// artifact, which is exactly what a later reference needs.
+func (c *functionCache) absorbPrelowering(module *ir.Module, journal *internJournal) {
+	if c.directory == "" || journal == nil {
+		return
+	}
+	scope := buildLoweringScope(journal.events, artifactEvent{}, journal.here(module))
+	if scope == nil {
+		return
+	}
+	for _, child := range scope.children {
+		if child.minted == nil {
+			continue
+		}
+		if _, missing := c.recordArtifact(module, journal.notes, child.minted); missing != "" {
+			c.stats.reason("no definition of " + missing)
+		}
+	}
 }
 
 func (c *functionCache) unitBeingWritten(path string, entry *FunctionCacheEntry) *packageCacheUnit {
@@ -356,6 +624,14 @@ func (c *functionCache) flush() {
 		if stored := c.units[path]; stored != nil && len(stored.Decls) == len(unit.Decls) {
 			continue
 		}
+		if err := c.attachArtifacts(unit); err != nil {
+			// A unit whose artifacts cannot all be named is not written. record
+			// refuses a declaration whose references it cannot resolve, so this should
+			// be unreachable; dropping the file rather than storing a partial one is
+			// what keeps it from becoming a program that does not link.
+			c.stats.reason(err.Error())
+			continue
+		}
 		sort.Strings(unit.order)
 		if err := writePackageCacheUnit(c.directory, unit); err == nil {
 			c.stats.Wrote++
@@ -370,26 +646,210 @@ func (c *functionCache) flush() {
 // replay splices one cached declaration into the module being compiled and
 // restores the intern-table entries its lowering would have made.
 //
-// The order of the six steps is the order the cold compile produced them in, and
-// that is the point: the file names first, because SrcPos indices resolve against
-// them; then the aggregate types, the data and the functions, each appended in the
-// order the declaration appended them, so the module's three tables come out
-// index for index the same as a cold compile's.
-func (c *functionCache) replay(g *gen, declaration *cachedDeclaration) error {
+// The file names come first, because SrcPos indices resolve against them and
+// replaying them in order is what keeps the warm module's file table identical to
+// the cold one's rather than merely equivalent. The rest is [replaySequence].
+func (c *functionCache) replay(g *gen, hit *cachedHit) error {
 	started := time.Now()
 	defer func() { c.stats.Replay += time.Since(started) }()
-	decoded, err := ir.DecodeModuleUnverified(declaration.Unit)
-	if err != nil {
-		return fmt.Errorf("goc: cached unit for %s: %w", declaration.Symbol, err)
+	for _, name := range hit.declaration.NewFiles {
+		g.mod.File(name)
 	}
-	module := g.mod
+	if err := c.replaySequence(g, hit.unit, hit.declaration.Symbol, hit.declaration.cachedSequence); err != nil {
+		return err
+	}
+	c.replayed[hit.declaration.Decl] = true
+	return nil
+}
 
-	// 1. The file names this declaration appended, in order, so the module's file
-	// table grows exactly as it did cold.
-	for _, name := range declaration.NewFiles {
-		module.File(name)
+// replaySequence splices one declaration's or one artifact's items into the
+// module, resolving the artifacts it references at the positions it referenced
+// them.
+//
+// The walk is the whole correctness argument. A cold compile appends a
+// declaration's own items in order and, at the point of first reference, the
+// definition of each artifact it names; the stored sequence is that same order
+// with nothing left out, because record put the artifacts back at their
+// positions. Filtering it by what the module already defines is exactly what a
+// cold compile of THIS program does, so the two produce the same indices -- which
+// matters because Module.Data order is the image's data layout.
+func (c *functionCache) replaySequence(g *gen, unit *packageCacheUnit, owner string, sequence cachedSequence) error {
+	module := g.mod
+	decoded, err := ir.DecodeModuleUnverified(sequence.Unit)
+	if err != nil {
+		return fmt.Errorf("goc: cached unit for %s: %w", owner, err)
 	}
-	// 2. The remap from the unit's private table to the module's.
+	c.remapFilePositions(module, decoded)
+
+	// The aggregate types are interned structurally before anything is appended,
+	// so that a reference from a function reaches the module's copy rather than a
+	// second one the decode allocated.
+	c.seedAggregates(module)
+	canonical := make(map[string]*ir.AggType, len(decoded.Types))
+	for _, function := range decoded.Funcs {
+		c.internFunctionAggregates(function)
+	}
+	for index, aggregate := range decoded.Types {
+		interned := c.internAggregate(aggregate)
+		decoded.Types[index] = interned
+		canonical[interned.Name] = interned
+	}
+
+	cursor := sequenceCursor{owner: owner}
+	for _, reference := range sequence.Refs {
+		if err := c.emitOwn(module, decoded, &cursor, int(reference.Funcs), int(reference.Data), int(reference.Types)); err != nil {
+			return err
+		}
+		if err := c.ensureArtifact(g, unit, reference.Symbol); err != nil {
+			return err
+		}
+	}
+	if err := c.emitOwn(module, decoded, &cursor, len(decoded.Funcs), len(decoded.Data), len(decoded.Types)); err != nil {
+		return err
+	}
+
+	// The intern tables last, so the next declaration that wants the same literal
+	// finds the symbol this one already put in the module.
+	for _, note := range sequence.Interns {
+		switch note.Kind {
+		case internLiteralData:
+			g.literalData[note.Key] = note.Value
+		case internContentSymbol:
+			g.contentSymbols[note.Key] = note.Value
+		case internFunctionDescriptor:
+			g.functionDescriptors[note.Key] = note.Value
+		case internTypeTag:
+			g.typeTags[note.Key] = note.Value
+		case internRuntimeType:
+			c.pointerKeys[note.Key] = note.Value
+		case internInterfaceItab:
+			g.interfaceItabs[note.Key] = note.Value
+		case internInterfaceCallWrapper:
+			g.interfaceCallWrappers[note.Key] = note.Value
+		case internGoABIType:
+			if aggregate := canonical[note.Value]; aggregate != nil {
+				g.goABITypes[note.Key] = aggregate
+			}
+		case internTypeEqualTarget:
+			// The descriptor is either in this sequence -- appended above -- or in one
+			// an earlier declaration contributed, so the module is what is searched
+			// rather than the unit.
+			setRuntimeTypeEqualDescriptor(module, note.Key, note.Value)
+		}
+	}
+	return nil
+}
+
+// sequenceCursor is how far through a decoded sequence's own items the walk has
+// got. The three counts advance independently because Module.Funcs, Module.Data
+// and Module.Types are three lists, and a reference records a position in each.
+type sequenceCursor struct {
+	owner              string
+	funcs, data, types int
+}
+
+// emitOwn appends the decoded sequence's own items up to the given positions.
+//
+// A datum whose name the module already defines is dropped rather than appended,
+// after being checked against the definition already there. That is the dedupe
+// design (a) needs, and it is the same check runtimepack.Manifest.DataDigests
+// makes at the object level: the name is a content hash, so two units that both
+// carry it agree, and a disagreement names its symbol instead of one side quietly
+// winning.
+func (c *functionCache) emitOwn(module *ir.Module, decoded *ir.Module, cursor *sequenceCursor, funcs, data, types int) error {
+	for ; cursor.types < types; cursor.types++ {
+		aggregate := decoded.Types[cursor.types]
+		if c.declaredAggregates[aggregate] {
+			continue
+		}
+		c.declaredAggregates[aggregate] = true
+		module.AddType(aggregate)
+		c.aggregatesScanned = len(module.Types)
+		c.aggregateNames[aggregate.Name] = true
+		c.aggregateNamesRun = len(module.Types)
+	}
+	c.seedData(module)
+	for ; cursor.data < data; cursor.data++ {
+		datum := decoded.Data[cursor.data]
+		existing := c.data[datum.Name]
+		if existing == nil {
+			c.data[datum.Name] = datum
+			module.Data = append(module.Data, datum)
+			c.dataScanned = len(module.Data)
+			continue
+		}
+		if err := sameDataDefinition(existing, datum); err != nil {
+			return fmt.Errorf("goc: cached unit for %s redefines %s: %w", cursor.owner, datum.Name, err)
+		}
+	}
+	c.seedFunctions(module)
+	for ; cursor.funcs < funcs; cursor.funcs++ {
+		function := decoded.Funcs[cursor.funcs]
+		if c.functions[function.Name] {
+			return fmt.Errorf("goc: cached unit for %s redefines function %s", cursor.owner, function.Name)
+		}
+		c.functions[function.Name] = true
+		module.Adopt(function)
+		c.functionsScanned = len(module.Funcs)
+		c.stats.Functions++
+		for _, block := range function.Blocks {
+			c.stats.Instructions += len(block.Instrs)
+		}
+	}
+	return nil
+}
+
+// ensureArtifact splices one interned artifact's definition into the module, if
+// the module does not already have it.
+//
+// This is ensureTypeTag and its eight siblings, replayed: mint on first
+// reference, return the name on every one after. The difference is only where the
+// definition comes from -- a unit rather than the type checker, because a warm
+// compile has no types.Type for a body it never type-checked.
+func (c *functionCache) ensureArtifact(g *gen, unit *packageCacheUnit, symbol string) error {
+	artifact := unit.Artifacts[symbol]
+	if artifact == nil {
+		if artifact = c.artifacts[symbol]; artifact == nil {
+			return fmt.Errorf("goc: unit for %s carries no definition of %s", unit.Entry.Package, symbol)
+		}
+	}
+	// Registered before the presence test, not after: a declaration this compile
+	// LOWERS may reference the same artifact, and record can only accept it if this
+	// compile can name a definition to carry forward.
+	if c.artifacts[symbol] == nil {
+		c.artifacts[symbol] = artifact
+	}
+	if c.defines(g.mod, symbol) {
+		return nil
+	}
+	if c.replaying[symbol] {
+		return fmt.Errorf("goc: interned artifact %s is defined in terms of itself", symbol)
+	}
+	c.replaying[symbol] = true
+	defer delete(c.replaying, symbol)
+	c.stats.ArtifactsReplayed++
+	return c.replaySequence(g, unit, symbol, artifact.cachedSequence)
+}
+
+// defines reports whether the module already holds the definition an artifact's
+// head symbol names. Presence of the head means presence of the whole run: an
+// artifact's items are appended by one call, so nothing can have half of one.
+func (c *functionCache) defines(module *ir.Module, symbol string) bool {
+	c.seedData(module)
+	if c.data[symbol] != nil {
+		return true
+	}
+	c.seedFunctions(module)
+	if c.functions[symbol] {
+		return true
+	}
+	c.seedAggregateNames(module)
+	return c.aggregateNames[symbol]
+}
+
+// remapFilePositions rewrites a decoded unit's SrcPos file indices, which address
+// the unit's private file table, into the receiving module's.
+func (c *functionCache) remapFilePositions(module *ir.Module, decoded *ir.Module) {
 	remap := make([]uint32, len(decoded.Files)+1)
 	for index, name := range decoded.Files {
 		remap[index+1] = module.File(name)
@@ -415,78 +875,6 @@ func (c *functionCache) replay(g *gen, declaration *cachedDeclaration) error {
 			}
 		}
 	}
-
-	// 3. Intern the aggregate types structurally, then append the ones this
-	// declaration declared.
-	c.seedAggregates(module)
-	canonical := make(map[string]*ir.AggType, len(decoded.Types))
-	for _, function := range decoded.Funcs {
-		c.internFunctionAggregates(function)
-	}
-	for _, aggregate := range decoded.Types {
-		interned := c.internAggregate(aggregate)
-		canonical[interned.Name] = interned
-		if !c.declaredAggregates[interned] {
-			c.declaredAggregates[interned] = true
-			module.AddType(interned)
-			c.aggregatesScanned = len(module.Types)
-		}
-	}
-
-	// 4. The data, with the collision check.
-	c.seedData(module)
-	for _, datum := range decoded.Data {
-		existing := c.data[datum.Name]
-		if existing == nil {
-			c.data[datum.Name] = datum
-			module.Data = append(module.Data, datum)
-			continue
-		}
-		if err := sameDataDefinition(existing, datum); err != nil {
-			return fmt.Errorf("goc: cached unit for %s redefines %s: %w", declaration.Symbol, datum.Name, err)
-		}
-	}
-
-	// 5. The functions.
-	for _, function := range decoded.Funcs {
-		module.Adopt(function)
-		c.stats.Functions++
-		for _, block := range function.Blocks {
-			c.stats.Instructions += len(block.Instrs)
-		}
-	}
-
-	// 6. The intern tables, so the next declaration that wants the same literal
-	// finds the symbol this one already put in the module.
-	for _, note := range declaration.Interns {
-		switch note.Kind {
-		case internLiteralData:
-			g.literalData[note.Key] = note.Value
-		case internContentSymbol:
-			g.contentSymbols[note.Key] = note.Value
-		case internFunctionDescriptor:
-			g.functionDescriptors[note.Key] = note.Value
-		case internTypeTag:
-			g.typeTags[note.Key] = note.Value
-		case internRuntimeType:
-			c.pointerKeys[note.Key] = note.Value
-		case internInterfaceItab:
-			g.interfaceItabs[note.Key] = note.Value
-		case internInterfaceCallWrapper:
-			g.interfaceCallWrappers[note.Key] = note.Value
-		case internGoABIType:
-			if aggregate := canonical[note.Value]; aggregate != nil {
-				g.goABITypes[note.Key] = aggregate
-			}
-		case internTypeEqualTarget:
-			// The descriptor is either in this delta -- appended above -- or in one an
-			// earlier declaration contributed, so the module is what is searched
-			// rather than the unit.
-			setRuntimeTypeEqualDescriptor(module, note.Key, note.Value)
-		}
-	}
-	c.replayed[declaration.Decl] = true
-	return nil
 }
 
 // seedAggregates absorbs the aggregate types the module has gained since the last
@@ -496,6 +884,19 @@ func (c *functionCache) seedAggregates(module *ir.Module) {
 		aggregate := module.Types[c.aggregatesScanned]
 		c.declaredAggregates[aggregate] = true
 		c.internAggregate(aggregate)
+	}
+}
+
+// seedFunctions and seedAggregateNames are seedData for the other two tables.
+func (c *functionCache) seedFunctions(module *ir.Module) {
+	for ; c.functionsScanned < len(module.Funcs); c.functionsScanned++ {
+		c.functions[module.Funcs[c.functionsScanned].Name] = true
+	}
+}
+
+func (c *functionCache) seedAggregateNames(module *ir.Module) {
+	for ; c.aggregateNamesRun < len(module.Types); c.aggregateNamesRun++ {
+		c.aggregateNames[module.Types[c.aggregateNamesRun].Name] = true
 	}
 }
 

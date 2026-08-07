@@ -371,6 +371,14 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		interfaceCandidates:     make(map[interfaceCandidateKey][]interfaceMethodCandidate),
 		escapeDiag:              newEscapeDiagnostics(),
 	}
+	// The journal starts before anything can lower, which is earlier than the cache
+	// it feeds. Global initializers are lowered further down this function, and
+	// they mint the type descriptors that the declaration loop's own declarations
+	// then reference; a journal that started at the loop would see those references
+	// with no definition to carry and would have to refuse every declaration making
+	// one. See newInternJournal.
+	cacheJournal := newInternJournal(options)
+	g.interns = cacheJournal
 	// The dispatcher symbol for each collected method, resolved through the
 	// generator so a //go:linkname on one is honoured exactly as it is at the
 	// call site. See requireInterfaceMethod.
@@ -455,8 +463,11 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	// declaration is lowered, because that is the last point at which its key is
 	// knowable and the first at which it could serve a hit. See
 	// goc/functionstore.go.
-	cache, cacheJournal := openFunctionCache(target, options, loader, fset, pkg, name, src)
-	g.interns = cacheJournal
+	cache := openFunctionCache(target, options, loader, fset, pkg, name, src, cacheJournal)
+	// Everything lowered before this point -- the globals and the dynamic
+	// initializers -- minted artifacts the loop's declarations will reference, so
+	// their definitions are absorbed before the first lookup.
+	cache.absorbPrelowering(mod, cacheJournal)
 
 	// rootPackageFunctions are the functions a prebuilt runtime module must leave
 	// undefined because they belong to whatever program is linked against it. The
@@ -468,8 +479,8 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	for i := len(functions) - 1; i >= 0; i-- {
 		function := functions[i]
 		cache.stats.Declarations++
-		if stored := cache.lookup(function); stored != nil {
-			if err := cache.replay(g, stored); err != nil {
+		if hit := cache.lookup(function); hit != nil {
+			if err := cache.replay(g, hit); err != nil {
 				return nil, err
 			}
 			cache.stats.Hits++
@@ -5903,6 +5914,12 @@ func (g *gen) staticFunctionLiteral(literal *ast.FuncLit) string {
 	}
 	temporaryName, _ := g.internSymbol(".goc.global.literal", literalKey)
 	temporary := g.mod.NewFuncVoid(temporaryName)
+	// Off the module's list at once rather than at the end. It is scratch either
+	// way -- nothing below this ever emits it -- and a function that appears in the
+	// middle of a declaration and disappears again shifts every index the cache's
+	// artifact journal recorded while it was there. Nothing between here and the
+	// removal reads Module.Funcs for a name this one could answer to.
+	g.mod.Funcs = g.mod.Funcs[:len(g.mod.Funcs)-1]
 
 	savedFunction := g.fn
 	savedBlock := g.cur
@@ -5947,12 +5964,6 @@ func (g *gen) staticFunctionLiteral(literal *ast.FuncLit) string {
 	g.currentBody = savedBody
 	g.seq = savedSequence
 
-	for index, function := range g.mod.Funcs {
-		if function == temporary {
-			g.mod.Funcs = append(g.mod.Funcs[:index], g.mod.Funcs[index+1:]...)
-			break
-		}
-	}
 	return descriptor
 }
 
@@ -6339,8 +6350,16 @@ func (g *gen) goABIAggregate(valueType types.Type) *ir.AggType {
 	}
 	cacheKey := goABIAggregateKey(g.fset, valueType)
 	if aggregate := g.goABITypes[cacheKey]; aggregate != nil {
+		g.useArtifact(aggregate.Name)
 		return aggregate
 	}
+	// Opened before the fields are built, not after: goABIField recurses into this
+	// function for a nested type, and the aggregates that recursion mints are part
+	// of this one's definition. ir/binary.go's collectTypes walks Field.Type, so a
+	// unit that carried this aggregate without them would decode into a module
+	// whose type table is short of the cold one's.
+	aggregateName := contentSymbolName(".goc.goabi", cacheKey)
+	defer g.mintArtifact(aggregateName)()
 	var fields []ir.Field
 	switch value := valueType.Underlying().(type) {
 	case *types.Array:
@@ -6415,7 +6434,7 @@ func (g *gen) goABIAggregate(valueType types.Type) *ir.AggType {
 	}
 
 	aggregate := &ir.AggType{
-		Name:   contentSymbolName(".goc.goabi", cacheKey),
+		Name:   aggregateName,
 		Align:  int(typeAlign(valueType)),
 		Fields: fields,
 	}
@@ -7536,9 +7555,13 @@ func (g *gen) staticInterfacePayload(source ast.Node, sourceType types.Type) (st
 	const payloadPrefix = ".goc.ifacedata"
 	key := runtimeTypeKey(g.fset, sourceType) + "=" + constantValue.ExactString()
 	if name := g.contentSymbols[payloadPrefix+":"+key]; name != "" {
+		g.useArtifact(name)
 		return name, true
 	}
 	name := contentSymbolName(payloadPrefix, key)
+	// Opened before staticValueItems, which appends the payload's backing data:
+	// that data is part of this artifact's definition and has to travel with it.
+	defer g.mintArtifact(name)()
 	items, built := g.staticValueItems(name, sourceType, expression)
 	if !built || len(items) == 0 {
 		return "", false
@@ -7763,10 +7786,12 @@ func (g *gen) staticInterfaceTypeWord(sourceType, targetType types.Type) ir.Data
 func (g *gen) ensureInterfaceItab(sourceType, targetType types.Type) string {
 	key := runtimeTypeKey(g.fset, sourceType) + "->" + runtimeTypeKey(g.fset, targetType)
 	if symbol := g.interfaceItabs[key]; symbol != "" {
+		g.useArtifact(symbol)
 		return symbol
 	}
 
 	symbol := contentSymbolName(".goc.itab", key)
+	defer g.mintArtifact(symbol)()
 	g.interfaceItabs[key] = symbol
 	g.interns.note(internInterfaceItab, key, symbol)
 	interfaceType := targetType.Underlying().(*types.Interface)
@@ -7807,10 +7832,12 @@ func (g *gen) ensureInterfaceCallWrapperFor(sourceType types.Type, method *types
 	methodSymbol := g.functionSymbol(method)
 	key := runtimeTypeKey(g.fset, sourceType) + "|" + methodSymbol + "|" + indexPathKey(indexes)
 	if symbol := g.interfaceCallWrappers[key]; symbol != "" {
+		g.useArtifact(symbol)
 		return symbol
 	}
 
 	wrapperSymbol := contentSymbolName(methodSymbol+".interfacecall.promoted", key)
+	defer g.mintArtifact(wrapperSymbol)()
 	g.interfaceCallWrappers[key] = wrapperSymbol
 	g.interns.note(internInterfaceCallWrapper, key, wrapperSymbol)
 
@@ -7893,6 +7920,7 @@ func (g *gen) ensureInterfaceCallWrapper(method *types.Func) string {
 		return pkg.Path()
 	})
 	if symbol := g.interfaceCallWrappers[signatureKey]; symbol != "" {
+		g.useArtifact(symbol)
 		return symbol
 	}
 
@@ -7907,6 +7935,7 @@ func (g *gen) ensureInterfaceCallWrapper(method *types.Func) string {
 	// which is invisible in a monolithic build and fatal to a separately compiled
 	// one, where the two copies must be interchangeable.
 	wrapperSymbol := contentSymbolName(methodSymbol+".interfacecall", signatureKey)
+	defer g.mintArtifact(wrapperSymbol)()
 	g.interfaceCallWrappers[signatureKey] = wrapperSymbol
 	g.interns.note(internInterfaceCallWrapper, signatureKey, wrapperSymbol)
 
@@ -8556,12 +8585,6 @@ func (g *gen) ensureTypeTag(valueType types.Type) string {
 	valueType = canonicalAliasType(valueType)
 	key := runtimeTypeKey(g.fset, valueType)
 	if g.runtimeTypes != nil {
-		if _, known := g.runtimeTypes[key]; !known {
-			// The pointer-type key rather than the type: populateRuntimePointerTypes
-			// is the only reader, it only ever asks for *T's key, and a types.Type is
-			// not something a cached unit can carry.
-			g.interns.note(internRuntimeType, key, runtimeTypeKey(g.fset, types.NewPointer(valueType)))
-		}
 		g.runtimeTypes[key] = valueType
 	}
 	name := g.typeTags[key]
@@ -8571,6 +8594,18 @@ func (g *gen) ensureTypeTag(valueType types.Type) string {
 		// came from map traversal, so the same source produced differently
 		// named symbols on every build.
 		name = runtimeTypeSymbolName(key)
+		defer g.mintArtifact(name)()
+		if g.runtimeTypes != nil {
+			// The pointer-type key rather than the type: populateRuntimePointerTypes
+			// is the only reader, it only ever asks for *T's key, and a types.Type is
+			// not something a cached unit can carry.
+			//
+			// Noted here, inside the descriptor's scope, rather than beside the
+			// g.runtimeTypes write above: the two tables are written together and read
+			// together, so the note belongs with the definition and travels when a unit
+			// carries it.
+			g.interns.note(internRuntimeType, key, runtimeTypeKey(g.fset, types.NewPointer(valueType)))
+		}
 		g.typeTags[key] = name
 		g.interns.note(internTypeTag, key, name)
 		gcDataName := name + ".gcdata"
@@ -8775,6 +8810,8 @@ func (g *gen) ensureTypeTag(valueType types.Type) string {
 			// to read. See ir.Data.GoTypeLink.
 			GoTypeLink: g.emitRuntimeTables,
 		})
+	} else {
+		g.useArtifact(name)
 	}
 	return name
 }
@@ -9136,9 +9173,11 @@ func (g *gen) emitRuntimeTypeHasher(valueType types.Type, typeTag string) string
 	symbol := typeTag + ".hash"
 	for _, existing := range g.mod.Funcs {
 		if existing.Name == symbol {
+			g.useArtifact(symbol)
 			return symbol
 		}
 	}
+	defer g.mintArtifact(symbol)()
 	function := g.mod.NewFunc(symbol, ir.ClsL)
 	value := function.Param("value", ir.ClsP)
 	seed := function.Param("seed", ir.ClsL)
@@ -9168,10 +9207,12 @@ func (g *gen) ensureRuntimeTypeEqual(valueType types.Type, typeTag string) strin
 	symbol := typeTag + ".equal"
 	for _, function := range g.mod.Funcs {
 		if function.Name == symbol {
+			g.useArtifact(symbol)
 			return symbol
 		}
 	}
 
+	defer g.mintArtifact(symbol)()
 	g.emitRuntimeTypeEqual(valueType, symbol)
 	descriptor := g.staticFunctionDescriptor(symbol)
 	// This writes into a datum some EARLIER declaration emitted, which is the one
@@ -14861,7 +14902,8 @@ func (g *gen) goInternalCallAdapter(
 	if receiverType != nil {
 		adapterKey += "|" + types.TypeString(receiverType, nil)
 	}
-	adapterName, fresh := g.internSymbol(symbol+".gointernal.funcvalue", adapterKey)
+	adapterName, fresh, doneAdapter := g.internArtifactSymbol(symbol+".gointernal.funcvalue", adapterKey)
+	defer doneAdapter()
 	if !fresh {
 		return adapterName
 	}
@@ -14931,9 +14973,11 @@ func (g *gen) staticFunctionDescriptor(symbol string) string {
 	// different binary on every build. Deriving the name from the content also
 	// means one descriptor per function instead of one per reference.
 	if name := g.functionDescriptors[symbol]; name != "" {
+		g.useArtifact(name)
 		return name
 	}
 	name := ".goc.funcval." + symbol
+	defer g.mintArtifact(name)()
 	g.functionDescriptors[symbol] = name
 	g.interns.note(internFunctionDescriptor, symbol, name)
 	g.mod.Data = append(g.mod.Data, &ir.Data{
@@ -16266,7 +16310,8 @@ func (g *gen) appendCall(call *ast.CallExpr) ir.Ref {
 func (g *gen) channelType(channel *types.Chan) ir.Ref {
 	element := channel.Elem()
 	elementName := g.runtimeTypeSymbol(element)
-	channelName, fresh := g.internSymbol(".goc.channel.type", goTypeKey(g.fset, element))
+	channelName, fresh, done := g.internArtifactSymbol(".goc.channel.type", goTypeKey(g.fset, element))
+	defer done()
 	if !fresh {
 		return g.fn.Sym(channelName, 0)
 	}
@@ -16289,7 +16334,8 @@ func (g *gen) runtimeType(valueType types.Type) ir.Ref {
 // separate from runtimeType so that a descriptor can be referenced from another
 // datum rather than only loaded as an address.
 func (g *gen) runtimeTypeSymbol(valueType types.Type) string {
-	name, fresh := g.internSymbol(".goc.runtime.type", goTypeKey(g.fset, valueType))
+	name, fresh, done := g.internArtifactSymbol(".goc.runtime.type", goTypeKey(g.fset, valueType))
+	defer done()
 	if !fresh {
 		return name
 	}
@@ -18250,9 +18296,11 @@ func (g *gen) literalDataSymbol(prefix string, align int, values []int64) string
 	}
 	key := prefix + ":" + string(contents)
 	if name := g.literalData[key]; name != "" {
+		g.useArtifact(name)
 		return name
 	}
 	name := contentSymbolName(prefix, string(contents))
+	defer g.mintArtifact(name)()
 	g.literalData[key] = name
 	g.interns.note(internLiteralData, key, name)
 	g.mod.Data = append(g.mod.Data, &ir.Data{
@@ -18276,4 +18324,25 @@ func (g *gen) internSymbol(prefix, key string) (string, bool) {
 	g.contentSymbols[full] = name
 	g.interns.note(internContentSymbol, full, name)
 	return name, true
+}
+
+// internArtifactSymbol is internSymbol for the callers whose symbol names an
+// interned ARTIFACT -- a definition that belongs to no declaration and is minted
+// by whichever one reaches it first -- rather than merely a content-derived name.
+//
+// It brackets the emission for the per-function cache, so that what the caller
+// appends is recorded against the artifact and travels with it. The third result
+// closes the scope and must be deferred; it is a no-op when the symbol was already
+// interned, in which case only the position of the reference is recorded.
+func (g *gen) internArtifactSymbol(prefix, key string) (string, bool, func()) {
+	full := prefix + ":" + key
+	if name := g.contentSymbols[full]; name != "" {
+		g.useArtifact(name)
+		return name, false, func() {}
+	}
+	name := contentSymbolName(prefix, key)
+	closeScope := g.mintArtifact(name)
+	g.contentSymbols[full] = name
+	g.interns.note(internContentSymbol, full, name)
+	return name, true, closeScope
 }
