@@ -555,6 +555,50 @@ package sets is a few GB of dead files in `~/.cache/cg12/runtime-pack`. gc's
 > non-`-O` compile, `fmt_sprintf` from 21.2% to 19.7% — and it is recoverable by
 > hoisting `materialiseInterfaceImplementations` into a whole-program pass, which
 > is a change to the cold path and so a separate one.
+>
+> **It is now on by default, and the default is per caller.** `cmd/goc` calls
+> `goc.UseFunctionCacheByDefault`; `goc.Compile` called in process does not have a
+> cache unless it asks for one. The asymmetry is forced by clause 9 of §3.2, the
+> compiler binary's own hash: right for a released binary, whose bytes do not move
+> between compiles, and wrong inside `go test`, which builds a fresh test binary
+> per package under test and would therefore fill a complete set of units and read
+> none of them back. `CG12_NOCACHE=1` still turns off everything;
+> `CG12_FUNC_CACHE=off` turns off this cache alone; `auto` and `<dir>` are
+> unchanged. The default location is `os.UserCacheDir()/cg12/function-cache`.
+>
+> **The first compile is slower, and that is what a user meets first.** A cold fill
+> pays for the key (hashing every source file of the closure and the compiler
+> binary) and for encoding every unit it stores, and gets nothing back. Measured in
+> separate processes against a `CG12_NOCACHE=1` control, median of three:
+>
+> | | cold fill | warm |
+> |---|---|---|
+> | MEASUREMENT PENDING | | |
+>
+> **Eviction is two bounds, not one.** Five days since last use, and least recently
+> used beyond a 1 GiB budget, both in `internal/cachefile.Trim` and both tested in
+> `internal/cachefile/cachefile_test.go`. The age cutoff alone is not enough for a
+> cache on by default for the same reason the key needs clause 9: a box that
+> rebuilds the compiler mints a whole new generation of units every time, and five
+> days of that is unbounded. A read refreshes an entry's mtime (hourly
+> granularity), so a unit a build is using is the last thing to go.
+>
+> **A broken cache never fails a compile.** A read that fails is a miss, a unit
+> that does not decode is a miss — the format carries a sha256 of its own body — and
+> a write that fails is counted and dropped. `goc/functioncachedefault_test.go`
+> holds it against nine ways of breaking the store, including a read-only directory
+> that already has units in it, which still serves 84% of the lowered IR.
+>
+> **A stored delta must be a function of its package, and there is now an
+> instrument for that.** `goc/functioncachedelta_test.go` compares the deltas two
+> programs stored under the same unit key: the key is a content address of the
+> package source, the dependency identities, the target and the compiler, so a
+> disagreement about what one declaration contributed came from the program. It
+> found two latent leaks of the same shape as the `internTypeEqualTarget` one —
+> `NewFiles` recorded which files a declaration was first *in the program* to
+> touch, and the pointer key journalled with a runtime type was spelled by
+> whichever declaration reached the type first — neither of which had yet produced
+> a wrong image. Both are fixed; see CCWORK_REPORT.md, "Stage 3".
 
 **The unit is: goc's IR for every function and global of one package, after
 `funcDecl`/`globalDecl` and after the per-function prefix of the optimiser

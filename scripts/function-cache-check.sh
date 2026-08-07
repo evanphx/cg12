@@ -13,12 +13,20 @@
 # Three builds per program per -O arm:
 #
 #   nocache  CG12_NOCACHE=1, the control: no function cache and no pack cache.
+#   funcoff  CG12_FUNC_CACHE=off: no function cache, every other cache as it
+#            would be. It is the honest denominator for the saving, because
+#            nocache also turns the pack cache off and would otherwise credit
+#            this cache with that one's work.
 #   cold     an empty CG12_FUNC_CACHE directory. Fills it. Must equal nocache.
 #   warm     the same directory, now full. Must equal cold.
 #
 # The nocache arm is what makes this a test of the cache rather than a test of
-# determinism: if all three agree, a cached compile produced the image an
+# determinism: if all four agree, a cached compile produced the image an
 # uncached compile would have.
+#
+# The cold column is the number a user meets first and the one worth quoting
+# plainly: a cold fill pays for the key and for encoding every unit it stores and
+# gets nothing back, so it is SLOWER than no cache at all.
 #
 # Then a fourth build per ORDERED PAIR of programs: fill a directory with A, and
 # compile B against it. That is the arm the same-program pair cannot stand in for.
@@ -68,7 +76,7 @@ trap 'rm -rf "$work"' EXIT
 go build -o "$work/goc" ./cmd/goc || exit 1
 
 failures=0
-printf '%-44s %-4s %-9s %-9s %-9s %s\n' program -O nocache cold warm verdict
+printf '%-44s %-4s %-9s %-9s %-9s %-9s %s\n' program -O nocache funcoff cold warm verdict
 
 elapsed() { # command...; prints seconds with two decimals
 	local start end
@@ -93,22 +101,25 @@ for program in "${programs[@]}"; do
 
 			nocacheTime=$(CG12_NOCACHE=1 CG12_FUNC_CACHE="$cache" elapsed "$work/goc" ${arm:+$arm} -o "$work/nocache" "$source") ||
 				{ printf '%-44s %-4s NOCACHE-BUILD-FAILED\n' "$program" "${arm:--}"; failures=$((failures + 1)); continue; }
+			funcoffTime=$(CG12_FUNC_CACHE=off elapsed "$work/goc" ${arm:+$arm} -o "$work/funcoff" "$source") ||
+				{ printf '%-44s %-4s FUNCOFF-BUILD-FAILED\n' "$program" "${arm:--}"; failures=$((failures + 1)); continue; }
 			coldTime=$(CG12_FUNC_CACHE="$cache" elapsed "$work/goc" ${arm:+$arm} -o "$work/cold" "$source") ||
 				{ printf '%-44s %-4s COLD-BUILD-FAILED\n' "$program" "${arm:--}"; failures=$((failures + 1)); continue; }
 			warmTime=$(CG12_FUNC_CACHE="$cache" elapsed "$work/goc" ${arm:+$arm} -o "$work/warm" "$source") ||
 				{ printf '%-44s %-4s WARM-BUILD-FAILED\n' "$program" "${arm:--}"; failures=$((failures + 1)); continue; }
 
 			n=$(sha256sum "$work/nocache" | cut -c1-16)
+			f=$(sha256sum "$work/funcoff" | cut -c1-16)
 			c=$(sha256sum "$work/cold" | cut -c1-16)
 			w=$(sha256sum "$work/warm" | cut -c1-16)
-			if [ "$n" = "$c" ] && [ "$c" = "$w" ]; then
+			if [ "$n" = "$f" ] && [ "$f" = "$c" ] && [ "$c" = "$w" ]; then
 				verdict="identical($n)"
 			else
-				verdict="DIFFERENT nocache=$n cold=$c warm=$w"
+				verdict="DIFFERENT nocache=$n funcoff=$f cold=$c warm=$w"
 				failures=$((failures + 1))
 			fi
-			printf '%-44s %-4s %-9s %-9s %-9s %s\n' \
-				"$program" "${arm:--}" "$nocacheTime" "$coldTime" "$warmTime" "$verdict"
+			printf '%-44s %-4s %-9s %-9s %-9s %-9s %s\n' \
+				"$program" "${arm:--}" "$nocacheTime" "$funcoffTime" "$coldTime" "$warmTime" "$verdict"
 		done
 	done
 done
