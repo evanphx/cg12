@@ -623,3 +623,29 @@ is a cold fill — the 1.4% to 5.0% first-compile cost measured in the previous
 section, once. The stale units are not orphaned in the way the 33.7 GB was: they
 age out in five days, and the budget reaches them before that if anything else
 needs the room.
+
+### Guard results
+
+`make verify-fast`: **PASS in 5m48s** — build, vet, gofmt, unit, the corpus
+(parallel and three sequential shards), one capability-matrix shard on each `-O`
+arm, and the reducers.
+
+The first run failed one item, and it is worth recording because it is the kind
+of thing a scoped-down guard set hides. `TestEveryTestIsParallelOrListedAsSequential`
+rejected the three new trigger tests: this package requires every top-level test
+to call `t.Parallel` first or to be listed in `goc/sequential_tests.txt` with a
+reason tag. These cannot be parallel — they call `t.Setenv` and move
+`functionCacheBudget`, which is a process global — so they are listed under
+`setenv`, which is the same tag the seven existing function-cache tests carry.
+Nothing else in the run failed; the trigger tests themselves passed inside the
+real suite on the first attempt.
+
+Also run: `internal/cachefile` (five new eviction tests plus `BenchmarkTrimWalk`)
+and the three trigger tests directly, each also against `fb32a6d` to confirm they
+fail there. Not run, as briefed: the corpus suite and capability matrix beyond
+what `verify-fast` includes, `make test-unit`, the audits and the crash loops.
+
+**Disk on this box after the two verify runs:** `runtime-pack` 8,535,287,415 B
+(under its 8,589,934,592 B bound), `function-cache` 194,734,389 B (under its
+gibibyte), 44 flat packs left and ageing out. The filesystem the gate saw hit
+100% is at 93% with 64 GB free.
