@@ -7860,3 +7860,136 @@ not watch a process produce)_
 ## 0. `make verify-full`
 
 _(running; matrix and corpus arms already in)_
+
+## 0. `make verify-full` — result
+
+**23 of 24 items PASS.** 2320 s wall on the 64-core worker.
+
+```
+build 0 | vet 3s | gofmt 0s | unit 13s
+corpus-parallel 271s | corpus-sequential-0/1/2 314/109/123s
+goc-cmd 379s  FAIL
+ruby 52s
+matrix-default-0..3  78/73/39/46s      matrix-opt-0..3  132/126/120/44s
+determinism 438s     determinism-opt 1087s
+reducers 199s
+control-corpus / control-matrix-default / control-matrix-opt  REUSE
+```
+
+The determinism sweeps are the corpus ones: **406 reproducible, 0 varying,
+0 failed, over 4 rounds** on each arm.
+
+The three `main` controls were REUSED from a recording made earlier the same day
+under the same key (`4c3d72451d73`), which pins the `main` commit, the CPU model,
+core count, total RAM, arch, kernel, `go version`, `cc` banner and a hash of
+`scripts/verify.sh`. `main` has not moved since (`4ad59d2`), so the reuse is
+valid; it is a reused measurement rather than one this gate watched, and is
+marked as such.
+
+**The one failure is not this branch's.** `goc-cmd` fails only on
+`TestCheckedRuntimeCoverageBaselineDenominator`:
+
+```
+capability "gc-invariants/promoted-local-root" is in neither the accepted
+baseline nor testdata/runtime_coverage_baseline_pending.json
+```
+
+Checked directly: `main` at `4ad59d2`, built and run from the same absolute path,
+produces the identical failure and the identical message. Confirmed, not assumed.
+
+## 1. The cross-program property, re-established independently
+
+Not `scripts/function-cache-corpus-check.sh`. `$TMPDIR/run/cold.sh` builds every
+corpus program's own `CG12_NOCACHE=1` image once — **406 built, 0 that do not
+compile cold** — and `$TMPDIR/run/xprog.sh` then fills one directory from one
+program, gives every corpus program a private copy of it, and requires each to
+link AND to be byte-identical to that reference.
+
+The fillers were chosen by *measuring* import closures, not by reading import
+lists: each candidate filled a cache, and `TestGate2ListCachePackages` dumped the
+packages it holds a unit for. Every program shares a 20-package floor
+(`runtime`, `internal/abi`, `internal/bytealg`, `internal/runtime/*`, `math/bits`,
+…) — `hello` is exactly that floor — so "disjoint" can only mean disjoint above
+it.
+
+| filler | packages | beyond the floor | units | size |
+|---|---:|---:|---:|---:|
+| `stdlib_netpoll_tcp_echo` | 47 | 27 | 47 | 20 MB |
+| `stdlib_regexp_find_replace` | 35 | 15 | 35 | 13 MB |
+| `stdlib_http_tls_client_server` | 156 | 136 | 156 | 54 MB |
+
+The first two share **9 packages above the floor** (`errors`,
+`internal/reflectlite`, `internal/sync`, `io`, `slices`, `strconv`, `sync`,
+`sync/atomic`, `unicode/utf8`) out of 27 and 15 — the most disjoint substantial
+pair among ten candidates measured. `netpoll` brings `net`, `syscall`,
+`internal/poll`, `os`, `time`, `context`, `unique`, `dnsmessage`; `regexp` brings
+`regexp`, `regexp/syntax`, `bytes`, `strings`, `sort`, `unicode`. Neither
+contains a byte of the other's exclusive closure. The third filler is the
+corpus's largest closure, included because it maximises the opportunity to carry
+a foreign definition into any subject.
+
+| filler | programs | identical | different | failed to link |
+|---|---:|---:|---:|---:|
+| the gate's regression number | 408 | — | — | **357** |
+| `stdlib_netpoll_tcp_echo` | 406 | **406** | **0** | **0** |
+| `stdlib_regexp_find_replace` | 406 | **406** | **0** | **0** |
+| `stdlib_http_tls_client_server` | 406 | **406** | **0** | **0** |
+
+**1218 of 1218 subjects link and match their own cold image against a cache
+filled by a different program**, from three fillers, two of which have genuinely
+disjoint closures. The previous gate's 357 failures of 408 are zero.
+
+The comparison is stronger than a link check by some margin: the linked images
+carry `.debug_info`, `.debug_abbrev`, `.debug_line` and `.debug_loc` (checked with
+`readelf -S`), so the module's source-file table — order included — is inside the
+bytes being compared, as are pclntab and every data address.
+
+## 2. Trying to break it the way the last gate did
+
+The corpus is the author's set. This is a set chosen for the shapes the branch's
+own tests do not name, compiled as **every ordered pair**: 24 programs, fill from
+one, compile the other warm against a private copy, compare with the subject's own
+`CG12_NOCACHE=1` image. Link failure and image difference are counted separately,
+because one order of the original defect linked cleanly and produced a different
+binary.
+
+Twenty-one were written for this gate; three corpus programs (`fmt_sprintf`,
+`stdlib_http_tls_client_server`, `stdlib_regexp_find_replace`) are in the set as
+heavyweight fillers. All 24 compile cold and all 24 fill a cache.
+
+The shapes, and what each is aimed at:
+
+| program | the shape |
+|---|---|
+| `a_iface_only_sha256` | **the only use of a package is through an interface** — `hash.Hash`, no concrete `*sha256.digest` in any declaration |
+| `b_concrete_sha256` | its mirror: `sha256.Sum256`, never as `hash.Hash` |
+| `c_error_impls_one` / `d_error_impls_many` | 1 vs 4 implementations of `error`, so `materialiseInterfaceImplementations` walks a different program set for the same conversion |
+| `e_map_artifact_early` / `f_map_artifact_late` | **the same interned artifacts minted from different declarations** — `map[string][]int` and `[]time.Duration` from the program's first declaration, and from its last, after other data has been appended |
+| `g_type_declared_not_instantiated` | **a type the filler declared but never instantiated** — `time.Month`, `time.Weekday` |
+| `h_time_no_month` | its mirror: `time` for durations only |
+| `i_reflect_only_use` | a concrete type reached only by reflection — the shape that made the itab side effect load-bearing |
+| `j_sort_iface` | `sort.Interface` implemented locally |
+| `k_strconv_parse` / `l_strconv_format` | disjoint reachable subsets of one multi-file package |
+| `m_generic_shapes` / `n_generic_other_shapes` | the same generic instantiated at different type sets |
+| `o_empty_iface_boxing` | ten concrete types boxed into `any` |
+| `p_stringer_impls` | two `fmt.Stringer` implementations |
+| `q_iowriter_impls` | two local `io.Writer` implementations |
+| `r_any_assert` | stdlib types round-tripped through `any` with no static conversion |
+| `s_global_init_only` | a package reached only from a global initializer — the pre-lowering phase refusal 1 exists for |
+| `t_ptrfunc_named` / `u_ptrfunc_unnamed` | **written after the probe found leak 4**: one Go function type spelled with and without parameter names, each also forcing the `*func(...)` descriptor |
+
+```
+PAIRS ok=552 differ=0 failbuild=0 setup=0
+```
+
+**552 of 552 ordered pairs: every subject links and is byte-identical to its own
+cold image. No silent image difference was found — not one, in 552 pairs plus the
+1218 corpus subjects of §1.**
+
+`t_ptrfunc_named`/`u_ptrfunc_unnamed` deserve a separate note, because they are the
+one place this gate went hunting for a difference it had already proved was in the
+stored data. The probe (§3b) shows the two programs journal *different* pointer
+keys for the same artifact. Both orders still came out byte-identical to their own
+cold builds, and their two cold images differ from each other as they should. The
+divergence is in the unit and does not reach the image here; nothing in the design
+makes that a guarantee.
