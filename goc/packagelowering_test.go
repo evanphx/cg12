@@ -232,7 +232,8 @@ func loadedImportPaths(modules ...*ir.Module) []string {
 
 // generatedAfterLowering reports that a function was synthesized from the
 // assembled module rather than lowered from a package's source, so it is
-// program-dependent by construction and a per-package cache would not hold it.
+// program-dependent by construction and no cache -- per package or per function
+// -- would hold it.
 //
 // Two families qualify, and both are generated after compile's funcDecl loop
 // has finished:
@@ -241,7 +242,7 @@ func loadedImportPaths(modules ...*ir.Module) []string {
 //     every concrete type in the program that implements the interface. It ends
 //     by calling runtime_gocInterfaceDispatchFailure -- or abort, in the
 //     freestanding subset -- and halting, and it is synthesized rather than
-//     lowered, so it carries no source position at all. Both are required here:
+//     lowered, so it carries no source position at all. Both are required:
 //     runtime.goroutineReady is an ordinary function that also ends in that
 //     shape, because a failed type assertion lowers to it, and excluding it
 //     would hide exactly the kind of difference this test looks for.
@@ -250,35 +251,15 @@ func loadedImportPaths(modules ...*ir.Module) []string {
 //     runtime.unreachableMethod when the program did not lower the method it
 //     wraps. interfaceCallWrapperMethodSymbol is the compiler's own predicate
 //     for the name.
+//
+// Both predicates live in goc/functioncache.go now, because the function-granular
+// cache has to answer the same question about the same two families and the
+// answer must not be allowed to drift into two versions.
 func generatedAfterLowering(f *ir.Func) bool {
 	if _, isCallWrapper := interfaceCallWrapperMethodSymbol(f.Name); isCallWrapper {
 		return true
 	}
-	halts := false
-	for _, block := range f.Blocks {
-		if block.Pos.Valid() {
-			return false
-		}
-		for index := range block.Instrs {
-			instruction := &block.Instrs[index]
-			if instruction.Pos.Valid() {
-				return false
-			}
-			if instruction.Op != ir.OCall || len(instruction.Args) == 0 || block.Jmp.Kind != ir.JmpHlt {
-				continue
-			}
-			callee := instruction.Arg(0)
-			if callee.Kind != ir.RefConst {
-				continue
-			}
-			constant := f.Consts[callee.ID]
-			if constant.Kind == ir.ConstSym &&
-				(constant.Sym == "runtime_gocInterfaceDispatchFailure" || constant.Sym == "abort") {
-				halts = true
-			}
-		}
-	}
-	return halts
+	return synthesizedInterfaceDispatcher(f)
 }
 
 type packageComparison struct {

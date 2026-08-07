@@ -6753,3 +6753,33 @@ GOC_OPT_FUNCTIME=1 go test ./goc/ -run TestGenericShapeCensus -count=1 \
   -generic-shape-census-program=fmt_sprintf.go
 python3 scripts/analyse_census.py /tmp/census/fmt_sprintf.census.json <binary>
 ```
+
+---
+
+# Stage 2 of per-package caching: the cache unit is a function, not a package
+
+## Item 2 first, because it decides whether the rest is worth building
+
+**Yes. A single function lowers identically across two programs independently of
+the rest of its package, including when the package is `runtime` and the two
+programs make `runtime` carry different generic instantiations.**
+
+First evidence, from the pair Stage 1 already had (`programSmall`, strconv only;
+`programWide`, fmt/sort/errors/strings/strconv):
+
+| | small | wide |
+|---|---:|---:|
+| lowered functions | 2872 | 5223 |
+| functions that are an instantiation (symbol carries `[...]`) | 20 | 111 |
+| **instantiations belonging to `runtime`** | **0** | **3** |
+| `runtime` functions that are not instantiations, shared by both | 2091 | 2091 |
+| **of those, byte-identical between the two programs** | **2091 (100%)** | |
+
+The three that differ are `runtime.AddCleanup[internal/poll.splicePipe,
+internal/poll.splicePipeFields]`, `runtime.callCleanup[
+internal/poll.splicePipeFields]` and a `funcvalue` derived from the second. So
+the instantiation set of `runtime` genuinely differs between these two programs
+-- the comparison is not vacuous -- and every one of the other 2091 `runtime`
+functions still encodes to the same bytes.
+
+A purpose-built pair, and the rest of the measurement, follow below.
