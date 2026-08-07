@@ -8,6 +8,7 @@ import (
 	"go/parser"
 	"go/token"
 	"go/types"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -401,7 +402,7 @@ func ModuleImportPaths(modules ...*ir.Module) []string {
 		paths = append(paths, candidate)
 	}
 	sort.Strings(paths)
-	shortest := paths[:0:0]
+	shortest := make([]string, 0, len(paths))
 	for _, candidate := range paths {
 		covered := false
 		for _, kept := range shortest {
@@ -656,14 +657,18 @@ func ProgramCompileIdentity(target Target, optimize bool, name string, src []byt
 	}
 	// The program's own package is a unit like any other; a cache would never get
 	// a hit on it, but the key has to exist for the functions it declares.
-	if err := rootPackageIdentity(pkg, name, src, identity.Packages); err != nil {
+	rootPackageIdentity(pkg, name, src, identity.Packages)
+	// Once, over the finished map: the transitive clause has to see every package
+	// the compile loaded, including the root, or the root's own key would fold a
+	// zero in place of something it imports.
+	if err := closeTransitiveIdentities(identity.Packages); err != nil {
 		return nil, err
 	}
 	return identity, nil
 }
 
-// loaderPackageIdentities fills in one identity per source-loaded package, then
-// closes the transitive clause over the import graph.
+// loaderPackageIdentities fills in one identity per source-loaded package. The
+// transitive clause is closed by the caller, once, over the whole map.
 func loaderPackageIdentities(loader *sourceLoader, fset *token.FileSet, into map[string]PackageIdentity) error {
 	for path, unit := range loader.units {
 		if unit == nil {
@@ -684,8 +689,16 @@ func loaderPackageIdentities(loader *sourceLoader, fset *token.FileSet, into map
 	// files here, but its importers' keys still have to name it. Give it an
 	// identity derived from its path alone and record that it did not come from
 	// source, so a reader can see the difference rather than guess at it.
-	for _, identity := range copyIdentities(into) {
-		for _, path := range identity.Imports {
+	//
+	// The import lists are copied out first because the loop writes into the same
+	// map it is reading, and adding a key while ranging is not something to leave
+	// to the runtime's discretion.
+	var pending [][]string
+	for _, identity := range into {
+		pending = append(pending, identity.Imports)
+	}
+	for _, imports := range pending {
+		for _, path := range imports {
 			if _, known := into[path]; known {
 				continue
 			}
@@ -695,7 +708,7 @@ func loaderPackageIdentities(loader *sourceLoader, fset *token.FileSet, into map
 			}
 		}
 	}
-	return closeTransitiveIdentities(into)
+	return nil
 }
 
 // rootPackageIdentity gives the program's own package the same treatment.
@@ -704,7 +717,7 @@ func loaderPackageIdentities(loader *sourceLoader, fset *token.FileSet, into map
 // from the named file, because the program being compiled need not be a file at
 // all -- goc's library entry points take a name and a []byte, and every test in
 // this package passes a string literal.
-func rootPackageIdentity(pkg *types.Package, name string, src []byte, into map[string]PackageIdentity) error {
+func rootPackageIdentity(pkg *types.Package, name string, src []byte, into map[string]PackageIdentity) {
 	digest := sha256.New()
 	fmt.Fprintf(digest, "package\x00%s\x00", pkg.Path())
 	fmt.Fprintf(digest, "file\x00%s\x00%x\x00", TrimPath(name), sha256.Sum256(src))
@@ -716,7 +729,6 @@ func rootPackageIdentity(pkg *types.Package, name string, src []byte, into map[s
 		Imports:    importPathsOf(pkg),
 		FromSource: true,
 	}
-	return closeTransitiveIdentities(into)
 }
 
 // unitSourceDigest is clause 3 of BUILD_CACHE.md §3.2 for one package: every
@@ -762,7 +774,7 @@ func unitSourceDigest(path string, unit *sourceUnit, fset *token.FileSet) (Cache
 // ever save. A file edited between the parse and this read would be hashed in its
 // new form, which makes the key too *new* rather than too old: the entry written
 // under it is refused by the next compile, which is the safe direction.
-func hashParsedFiles(digest interface{ Write([]byte) (int, error) }, fset *token.FileSet, files []*ast.File) error {
+func hashParsedFiles(digest io.Writer, fset *token.FileSet, files []*ast.File) error {
 	for _, file := range files {
 		position := fset.Position(file.Package)
 		content, err := os.ReadFile(position.Filename)
@@ -837,14 +849,6 @@ func importPathsOf(pkg *types.Package) []string {
 	}
 	sort.Strings(paths)
 	return paths
-}
-
-func copyIdentities(from map[string]PackageIdentity) []PackageIdentity {
-	out := make([]PackageIdentity, 0, len(from))
-	for _, identity := range from {
-		out = append(out, identity)
-	}
-	return out
 }
 
 func digestOf(text string) CacheDigest {
