@@ -7866,3 +7866,116 @@ It produces a wrong binary. The measurement that stood in for the proof —
 differ in their *generic instantiations* while agreeing almost exactly in their
 import closure and their reachable set. That is the one axis along which the
 scheme is sound. Two programs with different closures break it immediately.
+
+### 3.4 What still works: the same program, its own directory
+
+The branch's own script, extended from four programs to eight (adding the
+disjoint-instantiation boundary pair the brief asked for, plus `reflect_methods`
+and `context_cancel`), each program in its own cache directory, three separate
+processes per arm:
+
+```
+program                            -O   nocache   cold      warm      verdict
+hello.go                           -    3.17      3.28      2.26      identical(2de0b7f76aa3c648)
+hello.go                           -O   7.73      7.86      6.70      identical(ffc2306eba52f5bd)
+fmt_sprintf.go                     -    6.68      6.87      5.23      identical(463df9fb813a58d7)
+fmt_sprintf.go                     -O   16.92     17.16     15.32     identical(7dc1f7267b8ffccd)
+gc_struct.go                       -    3.20      3.34      2.26      identical(3e9d56fbb7da3f5c)
+gc_struct.go                       -O   7.77      7.83      6.70      identical(c5004515ad331ec0)
+stdlib_http_tls_client_server.go   -    32.84     33.54     27.12     identical(2bdd921edb943112)
+stdlib_http_tls_client_server.go   -O   74.22     75.26     67.45     identical(88b6ef0d9bae1be4)
+cleanup_tracked.go                 -    3.38      3.53      2.42      identical(f8683c68d95b61c9)
+cleanup_tracked.go                 -O   8.21      8.37      7.15      identical(c06e698fda6150f5)
+cleanup_payload.go                 -    3.84      4.00      2.89      identical(a6454910cd821521)
+cleanup_payload.go                 -O   9.89      10.05     8.75      identical(7e421c202f1a9350)
+reflect_methods.go                 -    4.87      5.02      3.76      identical(aadc5f9cc200f10d)
+reflect_methods.go                 -O   12.21     12.25     10.89     identical(135c0ead80691025)
+context_cancel.go                  -    4.10      4.24      2.99      identical(a72734e345507839)
+context_cancel.go                  -O   9.44      9.57      8.22      identical(abdd8798260def06)
+function-cache-check: all builds identical
+```
+
+**16 of 16 identical**, and the eight hashes the branch reported come back
+unchanged, so nothing in this gate's harness moved what the branch measured. The
+boundary pair — which is what `TestCacheFilledByAnotherProgramIsUsable` is built
+on — is identical in its own directory, which is the point: the pair is not what
+breaks. The pair is the one shape that works.
+
+## 4. Concurrency: the cache directory itself is not the problem
+
+With the cross-program confound removed — 24 concurrent `goc` processes
+compiling the **same** program into **one** shared cache directory, three rounds
+(cold, warm, and warm again):
+
+```
+reference (no cache): 463df9fb813a58d7
+cold:  24 concurrent compiles -> identical=24 different=0 failed=0; units=45 size=16M strays=0
+warm:  24 concurrent compiles -> identical=24 different=0 failed=0; units=45 size=16M strays=0
+third: 24 concurrent compiles -> identical=24 different=0 failed=0; units=45 size=16M strays=0
+```
+
+**72 of 72 byte-identical to the uncached control.** No torn read, no corrupted
+unit, and no temporary file left behind in the fanout directories — 24 processes
+racing to write the same 45 keys all ended with whole files, which is what
+`cachefile.WriteFileAtomically`'s create-temp-then-rename is for. The disk
+mechanics are sound.
+
+The 408-program corpus run in section 3.1 was concurrent, but concurrency is not
+why it failed: the same failure reproduces with one process at a time, and with
+two programs.
+
+## 5. Cache poisoning and staleness
+
+`staleness.sh` (this gate's), `fmt_sprintf.go`, one cache directory carried
+through every case. Every case checks the image against a `CG12_NOCACHE=1` build
+of the same tree in the same configuration, and reads the cache's own report.
+
+| # | case | image | what the cache did |
+|---|---|---|---|
+| 1 | cold, then warm, clean tree | identical | cold 0/45 packages, 45 files written; warm **45/45 packages, 3080/3204 declarations, 90.3% of lowered IR, 0 files written** |
+| 2 | one comment appended to `internal/byteorder` | identical | **22/45 hit, 23 missed**, 23 files rewritten |
+| 3 | tree restored, warm again | identical | 45/45 hit, 0 written |
+| 4 | `-O` served from a cache filled without `-O` | identical | 45/45 hit — the deliberate non-clause of §0.1 |
+| 5 | `GOC_TEXT_PAD=64` (text layout identity moves) | identical | **0/45 hit**, `no stored unit x45` |
+| 6 | `GOC_OPT_SKIP=gvn` (pipeline identity moves) | identical | **0/45 hit**, `no stored unit x45` |
+| 7 | compiler binary moves | identical | **0/45 hit**, `no stored unit x45` |
+| 8 | `CG12_NOCACHE=1` over a full cache | identical | `0/0 packages, 0 files written, key 0s`; directory listing hash unchanged, 204 files before and after |
+| 9 | a unit truncated to half its length | identical | 45/45 hit — the damaged unit is a miss and the compile refills it |
+| 10 | one bit flipped in a unit's body | identical | 45/45 hit — the content digest catches it |
+
+Cases 5, 6 and 7 report `no stored unit` rather than the clause name for the
+reason given in §0.5: those clauses are in the content address, so the entry is
+not found rather than found-and-refused. Case 8 is worth stating plainly because
+the gate's own script called it a failure on a too-strict grep: with
+`CG12_NOCACHE=1` and `GOC_DEBUG_FUNCCACHE=1` together, `goc` does print a
+report — an all-zeros one. Nothing was read and nothing was written.
+
+### 5.1 The partial-invalidation claim, checked against the import graph
+
+Case 2 is the one the brief asks to be exact about, so it was measured rather
+than eyeballed. Every stored unit carries its owning package path in its header;
+after the whole run the directory held 203 units over 45 distinct packages, and a
+package that got **five** units is one whose key moved on the leaf edit (five
+configurations were exercised), while one that got **four** is one whose key did
+not.
+
+Against `gateclosure`, which computes reverse reachability from
+`ProgramCompileIdentity`'s import graph and knows nothing about the cache:
+
+```
+distinct packages with a unit:              45
+key moved on the byteorder edit:            23
+key did not move:                           22
+packages that can reach internal/byteorder: 27  (from the import graph)
+
+moved but cannot reach internal/byteorder:  (none)
+can reach internal/byteorder but did not move:
+    main, internal/oserror, internal/syscall/execenv, iter
+```
+
+The four are exactly the packages that have **no unit at all**: `main` is the
+root package, which is never cacheable by construction, and the other three
+contribute no lowered declaration to this program, so the cache is never asked
+about them. Set aside those four and the invalidated set is **exactly** the
+reverse-reachable set: 23 for 23, in both directions. Invalidation is precise —
+neither over-broad nor under-broad — for the clause that governs it.
