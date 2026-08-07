@@ -7040,3 +7040,68 @@ before doing the work the hit would save.
 declare a generic. It is no longer the cache's rule -- that is the whole point of
 this stage -- but it is still the input to the measurement above, which needs to
 report both accountings on the same program.
+
+## Guards
+
+Nothing in this stage is on the compile path. `goc/functioncache.go` is called by
+tests and by the census; `compile()` does not reference it, and the one edit to
+existing code moved a predicate out of a `_test.go` file into it. That bounds
+what could regress, and the guards were chosen to confirm the bound rather than
+to re-audit the tree.
+
+| guard | result |
+|---|---|
+| `go build ./...`, `go vet ./goc/`, `gofmt` | clean |
+| **`make verify-fast`** | **PASS in 293 s (4m53s)** — build, vet, gofmt, unit, the whole goc corpus suite in four processes, one capability shard on each arm, the reducers |
+| `TestIRVerifyAudit` | PASS — **1 564 724 function verifications across 406 programs, all clean** |
+| `TestAllocationCensus` | PASS — the census did **not** move, so there is nothing to regenerate and nothing to adjudicate |
+| `TestFrameEscapeAudit` | PASS |
+| `scripts/determinism-check.sh` (5 programs, cold and warm, 2 rounds) | all identical, all four hashes equal per program |
+| `scripts/determinism-check.sh -corpus` (406 programs × 4 rounds) | **reproducible=406 varying=0 failed=0**; 0 content differences, 0 layout-only differences |
+| the two-program identity comparison at function granularity | PASS — see item 2 |
+| `TestPackageLoweringIsProgramIndependent` (Stage 1's, after the predicate moved) | PASS — 51 packages, 2496 of 2496 identical, unchanged |
+| `TestEveryTestIsParallelOrListedAsSequential` | PASS |
+
+The one new sequential test is
+`TestGenericInstanceSymbolMatchesTheCompilersOwnAnswer`, listed in
+`goc/sequential_tests.txt` under the existing `census` tag because it installs
+the package-global instantiation sink. It costs one small compile (2.4 s) of
+serial time. The tag's comment previously said everything under it was
+flag-gated; that is no longer true and the comment now says so.
+
+Not run, and deliberately: `make test-unit`, the capability matrix in full, the
+crash loops, the Ruby differential, and any comparison against a `main` control.
+A gate owns those. `verify-fast` runs the corpus suite and one matrix shard per
+arm as part of its own definition, which is why they appear above.
+
+## Verdict
+
+**1. Does a single function lower identically across programs, independent of the
+rest of its package?** Yes. Two programs that make `runtime` carry three
+instantiations each -- disjoint, and parameterised by types declared in the
+importing `main` -- lower all 2453 of their shared cacheable functions to
+identical bytes, 2103 of them `runtime`'s. The comparison asserts its own
+non-vacuity, so it cannot quietly stop testing the thing it is for.
+
+**2. The corrected cacheable share.** 95.4% of the small program's lowered IR and
+90.3% of the http program's, against 21.3% and 53.3% for the package unit. By
+function count, 77.7% and 65.7%. Scaled against BUILD_CACHE.md §3.4's 18-21%
+Option B ceiling: **17.2% and 19.0% of a compile, against 3.8% and 11.2% at
+package granularity.** Generics are no longer the larger half of the problem;
+they are 2.7% and 6.1% of the IR.
+
+**3. What remains excluded.** Generic instantiations (2.7% / 6.1% of the IR),
+because *which* of them exist is a whole-program fact -- though each is a
+well-formed unit of its own, keyed on origin plus type arguments, and shared ones
+were measured to lower identically. Interface-call wrappers (1.1% / 1.8%) and
+interface-method dispatchers (0.8% / 1.9%), because both are synthesized from the
+assembled program after the lowering loop; a cache regenerates them. That
+exclusion is not merely theoretical: of 327 such functions shared by the two
+boundary programs, `runtime.stringer.String` genuinely differs.
+
+And the boundary this stage did **not** cross: everything above is about
+*lowering*. A cached function still has to survive the optimiser, where the
+inliner can splice an instantiated body into a non-generic caller and make that
+caller's final form program-dependent again. That needs the treatment
+`opt.Session.Freeze` and `opt.InlineDeps` already give the memoised compile, and
+it needs proving. It is the first question Stage 3 has to answer.
