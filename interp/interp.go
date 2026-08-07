@@ -237,7 +237,7 @@ func refuseFunc(f *ir.Func) error {
 			if in.Cls == ir.ClsQ {
 				return loadErr(f.Name, b.Name, in.Op, "128-bit quad result")
 			}
-			if len(in.Defs) != 0 {
+			if len(in.Defs()) != 0 {
 				return loadErr(f.Name, b.Name, in.Op, "multi-register (Defs) result — lowering artifact")
 			}
 			if msg, bad := refusedOp(in.Op); bad {

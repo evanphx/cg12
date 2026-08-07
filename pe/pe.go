@@ -1041,8 +1041,8 @@ func (e *engine) residualCall(in *ir.Instr, name string) {
 	args := make([]ir.Ref, 0, len(in.Args)-1)
 	for k, a := range in.Args[1:] {
 		var aggT *ir.AggType
-		if k < len(in.AggArgs) {
-			aggT = in.AggArgs[k]
+		if k < len(in.AggArgs()) {
+			aggT = in.AggArgs()[k]
 		}
 		if aggT == nil {
 			args = append(args, e.materialize(e.valueOf(a)))
@@ -1098,7 +1098,7 @@ func (e *engine) residualCall(in *ir.Instr, name string) {
 func (e *engine) tagCall(in *ir.Instr) {
 	last := &e.cur.Instrs[len(e.cur.Instrs)-1]
 	last.RetAgg = in.RetAgg
-	last.AggArgs = in.AggArgs
+	last.SetAggArgs(in.AggArgs())
 }
 
 // aggCell reads one 8-byte word at offset off of an aggregate value, whether it is

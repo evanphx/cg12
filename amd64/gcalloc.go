@@ -442,7 +442,7 @@ func instrDefs(in *ir.Instr) []int {
 	if in.To.Kind == ir.RefTemp {
 		d = append(d, int(in.To.ID))
 	}
-	for _, x := range in.Defs {
+	for _, x := range in.Defs() {
 		if x.Kind == ir.RefTemp {
 			d = append(d, int(x.ID))
 		}

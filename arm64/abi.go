@@ -138,8 +138,8 @@ func emitMemcpy(f *ir.Func, dst, src ir.Ref, size int, out *[]ir.Instr) {
 // aggArgAt returns the aggregate type of the k-th value argument of a call, or
 // nil for a scalar argument.
 func aggArgAt(in *ir.Instr, k int) *ir.AggType {
-	if k < len(in.AggArgs) {
-		return in.AggArgs[k]
+	if k < len(in.AggArgs()) {
+		return in.AggArgs()[k]
 	}
 	return nil
 }

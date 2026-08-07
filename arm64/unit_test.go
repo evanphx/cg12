@@ -605,7 +605,7 @@ func TestAAPCS64GroupedSliceValuesUseIndirectAggregateResult(t *testing.T) {
 	arguments := []ir.Ref{caller.Sym("buffer", 0), caller.Long(7), caller.Long(9)}
 	results := caller.Entry().CallAggregate(slice, []ir.Cls{ir.ClsP, ir.ClsL, ir.ClsL}, caller.Sym("slice_identity", 0), arguments...)
 	call := &caller.Entry().Instrs[0]
-	call.ArgGroups = []ir.ValueGroup{{Index: 0, Count: 3, Type: slice}}
+	call.SetArgGroups([]ir.ValueGroup{{Index: 0, Count: 3, Type: slice}})
 	caller.Entry().Ret(results[1])
 	assert.Equal(t, 48, aapcsCallStackBytes(caller, call), "outgoing area must include the x8 morestack spill home")
 
@@ -1503,7 +1503,7 @@ func TestGoABIGroupedSliceValuesUseRegistersOrWholeStack(t *testing.T) {
 	)
 	result := entry.Call(ir.ClsL, caller.Sym("consume_slice", 0), arguments...)
 	call := &entry.Instrs[len(entry.Instrs)-1]
-	call.ArgGroups = []ir.ValueGroup{{Index: 14, Count: 3, Type: sliceType}}
+	call.SetArgGroups([]ir.ValueGroup{{Index: 14, Count: 3, Type: sliceType}})
 	entry.Ret(result)
 
 	callerAssembly := disasmModule(t, callerModule)

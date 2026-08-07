@@ -43,7 +43,7 @@ func TestE2EAggregateReturnAndArg(t *testing.T) {
 	res := de.Call(ir.ClsP, dr.Sym("mkpair", 0), da, db)
 	lastInstr(de).RetAgg = pair
 	out := de.Call(ir.ClsW, dr.Sym("sumpair", 0), res)
-	lastInstr(de).AggArgs = []*ir.AggType{pair}
+	lastInstr(de).SetAggArgs([]*ir.AggType{pair})
 	de.Ret(out)
 
 	require.Equal(t, "42", runFunc(t, m, "driver", "20", "22"))

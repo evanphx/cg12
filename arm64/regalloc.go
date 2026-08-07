@@ -134,7 +134,7 @@ func computeSafepointRoots(f *ir.Func, cfg *analysis.CFG, liveness *analysis.Liv
 			if instruction.To.IsTemp() {
 				live.Remove(int(instruction.To.ID))
 			}
-			for _, definition := range instruction.Defs {
+			for _, definition := range instruction.Defs() {
 				if definition.IsTemp() {
 					live.Remove(int(definition.ID))
 				}
@@ -800,7 +800,7 @@ func buildIntervals(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, num 
 			if in.To.Kind == ir.RefTemp {
 				extend(int(in.To.ID), p)
 			}
-			for _, d := range in.Defs {
+			for _, d := range in.Defs() {
 				if d.Kind == ir.RefTemp {
 					extend(int(d.ID), p)
 				}

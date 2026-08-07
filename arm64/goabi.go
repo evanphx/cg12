@@ -815,7 +815,7 @@ func goCallStackBytes(f *ir.Func, call *ir.Instr, resultEnd int) int {
 	var spills []goABISpill
 	arguments := call.Args[1:]
 	for argumentIndex := 0; argumentIndex < len(arguments); {
-		if group, ok := ir.ValueGroupAt(call.ArgGroups, argumentIndex); ok {
+		if group, ok := ir.ValueGroupAt(call.ArgGroups(), argumentIndex); ok {
 			_, onStack, _ := assignGoAggregate(&assigner, group.Type)
 			if !onStack {
 				size, alignment := group.Type.Layout()
@@ -870,7 +870,7 @@ func aapcsCallStackBytes(f *ir.Func, call *ir.Instr) int {
 	var homes []goABISpill
 	arguments := call.Args[1:]
 	for argumentIndex := 0; argumentIndex < len(arguments); {
-		if group, ok := ir.ValueGroupAt(call.ArgGroups, argumentIndex); ok {
+		if group, ok := ir.ValueGroupAt(call.ArgGroups(), argumentIndex); ok {
 			for partIndex := 0; partIndex < group.Count; partIndex++ {
 				class := f.ClassOf(arguments[argumentIndex+partIndex])
 				location := assigner.assign(class)

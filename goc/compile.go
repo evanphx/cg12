@@ -6532,16 +6532,17 @@ func (g *gen) annotateABICall(instruction *ir.Instr, signature *types.Signature,
 		return
 	}
 	argumentCount := len(instruction.Args) - 1
-	instruction.AggArgs = make([]*ir.AggType, argumentCount)
+	aggregateArgs := make([]*ir.AggType, argumentCount)
 	argumentIndex := 0
 	if receiverType != nil && argumentIndex < argumentCount {
-		instruction.AggArgs[argumentIndex] = g.goABIAggregate(receiverType)
+		aggregateArgs[argumentIndex] = g.goABIAggregate(receiverType)
 		argumentIndex++
 	}
 	for parameterIndex := 0; parameterIndex < signature.Params().Len() && argumentIndex < argumentCount; parameterIndex++ {
-		instruction.AggArgs[argumentIndex] = g.goABIAggregate(signature.Params().At(parameterIndex).Type())
+		aggregateArgs[argumentIndex] = g.goABIAggregate(signature.Params().At(parameterIndex).Type())
 		argumentIndex++
 	}
+	instruction.SetAggArgs(aggregateArgs)
 	if signature.Results().Len() > 0 {
 		instruction.RetAgg = g.goABIAggregate(signature.Results().At(0).Type())
 	}
@@ -6738,8 +6739,8 @@ func (g *gen) callWithSignature(resultClass ir.Cls, callee ir.Ref, arguments []i
 		instruction.CallConv = ir.CallConvGoInternal
 		instruction.CallConvSet = true
 	}
-	instruction.ArgGroups = argumentGroups
-	instruction.AggArgs = aggregateArguments
+	instruction.SetArgGroups(argumentGroups)
+	instruction.SetAggArgs(aggregateArguments)
 	if signature.Results().Len() > 0 && instruction.RetAgg == nil {
 		instruction.RetAgg = g.goABIAggregate(signature.Results().At(0).Type())
 	}
@@ -6758,8 +6759,8 @@ func (g *gen) callVoidWithSignature(callee ir.Ref, arguments []ir.Ref, signature
 		instruction.CallConv = ir.CallConvGoInternal
 		instruction.CallConvSet = true
 	}
-	instruction.ArgGroups = argumentGroups
-	instruction.AggArgs = aggregateArguments
+	instruction.SetArgGroups(argumentGroups)
+	instruction.SetAggArgs(aggregateArguments)
 	g.clearTransientInterfaceCallArguments(transientArguments, signature, receiverType)
 }
 

@@ -260,7 +260,7 @@ func lowerCalls(f *ir.Func) error {
 			out = append(out, argSetup...)
 			out = append(out, ir.Instr{
 				Op: ir.OCall, Args: append([]ir.Ref{callee}, pins...),
-				Aux: int64(a.stackBytes()), To: callTo, Cls: callCls, Defs: callDefs,
+				Aux: int64(a.stackBytes()), To: callTo, Cls: callCls, Extra: &ir.InstrExtra{Defs: callDefs},
 				Tail: in.Tail, ClosureCall: in.ClosureCall, ClosureContext: in.ClosureContext,
 				Pos: in.Pos, Inl: in.Inl,
 			})
@@ -273,8 +273,8 @@ func lowerCalls(f *ir.Func) error {
 
 // aggArgAt returns the aggregate type of the k-th value argument, or nil.
 func aggArgAt(in *ir.Instr, k int) *ir.AggType {
-	if k < len(in.AggArgs) {
-		return in.AggArgs[k]
+	if k < len(in.AggArgs()) {
+		return in.AggArgs()[k]
 	}
 	return nil
 }

@@ -62,7 +62,7 @@ func VerifyDominance(f *ir.Func) error {
 			} else {
 				record(in.To, b, i)
 			}
-			for _, d := range in.Defs {
+			for _, d := range in.Defs() {
 				record(d, b, i)
 			}
 		}

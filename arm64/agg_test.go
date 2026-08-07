@@ -56,7 +56,7 @@ func TestCompileAggregateArg(t *testing.T) {
 	ptr := e.Alloc(8, 8)
 	r := e.Call(ir.ClsW, f.Sym("sink", 0), ptr)
 	call := &e.Instrs[len(e.Instrs)-1]
-	call.AggArgs = []*ir.AggType{pair} // the single arg is a by-value aggregate
+	call.SetAggArgs([]*ir.AggType{pair} // the single arg is a by-value aggregate)
 	e.Ret(r)
 
 	asm := disasmModule(t, m)
@@ -74,7 +74,7 @@ func TestCompileAggregateArgHFA(t *testing.T) {
 	ptr := e.Alloc(8, 8)
 	e.CallVoid(f.Sym("sink", 0), ptr)
 	call := &e.Instrs[len(e.Instrs)-1]
-	call.AggArgs = []*ir.AggType{vec}
+	call.SetAggArgs([]*ir.AggType{vec})
 	e.RetVoid()
 
 	asm := disasmModule(t, m)
@@ -94,8 +94,8 @@ func TestCompileAggregateArgMemoryOnStack(t *testing.T) {
 	args := []ir.Ref{f.Word(0), f.Word(1), f.Word(2), f.Word(3), f.Word(4), f.Word(5), f.Word(6), f.Word(7), ptr}
 	e.CallVoid(f.Sym("sink", 0), args...)
 	call := &e.Instrs[len(e.Instrs)-1]
-	call.AggArgs = make([]*ir.AggType, 9)
-	call.AggArgs[8] = big
+	call.SetAggArgs(make([]*ir.AggType, 9))
+	call.AggArgs()[8] = big
 	e.RetVoid()
 
 	asm := disasmModule(t, m)
@@ -114,8 +114,8 @@ func TestCompileAggregateArgOnStack(t *testing.T) {
 	args := []ir.Ref{f.Word(0), f.Word(1), f.Word(2), f.Word(3), f.Word(4), f.Word(5), f.Word(6), f.Word(7), ptr}
 	e.CallVoid(f.Sym("sink", 0), args...)
 	call := &e.Instrs[len(e.Instrs)-1]
-	call.AggArgs = make([]*ir.AggType, 9)
-	call.AggArgs[8] = pair // all x0..x7 used -> the aggregate is stacked
+	call.SetAggArgs(make([]*ir.AggType, 9))
+	call.AggArgs()[8] = pair // all x0..x7 used -> the aggregate is stacked
 	e.RetVoid()
 
 	asm := disasmModule(t, m)

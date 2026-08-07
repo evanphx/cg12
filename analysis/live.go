@@ -63,7 +63,7 @@ func (c *CFG) Liveness() *Liveness {
 				if in.To.IsTemp() {
 					live.Remove(int(in.To.ID)) // def kills
 				}
-				for _, d := range in.Defs {
+				for _, d := range in.Defs() {
 					if d.IsTemp() {
 						live.Remove(int(d.ID)) // extra call-defined registers
 					}

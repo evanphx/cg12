@@ -700,7 +700,7 @@ func (b *Block) Asm(template string, specs []AsmSpec) []Ref {
 				in.Cls = s.Cls
 				in.To = t
 			} else {
-				in.Defs = append(in.Defs, t)
+				in.AddDef(t)
 			}
 		}
 		if s.Kind != AsmRegOut {
@@ -744,7 +744,7 @@ func (b *Block) callAggregate(aggregate *AggType, classes []Cls, callee Ref, con
 		if index == 0 {
 			instruction.To = result
 		} else {
-			instruction.Defs = append(instruction.Defs, result)
+			instruction.AddDef(result)
 		}
 	}
 	markAggregateResultGCRefs(b.fn, aggregate.Fields, results, new(int))

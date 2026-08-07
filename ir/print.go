@@ -239,8 +239,8 @@ func (f *Func) printInstr(sb *strings.Builder, in *Instr) {
 			if i > 0 {
 				sb.WriteString(", ")
 			}
-			if i < len(in.AggArgs) && in.AggArgs[i] != nil {
-				fmt.Fprintf(sb, ":%s %s", in.AggArgs[i].Name, f.refString(a))
+			if i < len(in.AggArgs()) && in.AggArgs()[i] != nil {
+				fmt.Fprintf(sb, ":%s %s", in.AggArgs()[i].Name, f.refString(a))
 			} else {
 				fmt.Fprintf(sb, "%s %s", f.ClassOf(a), f.refString(a))
 			}

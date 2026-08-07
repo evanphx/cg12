@@ -201,8 +201,8 @@ func CoalescePhis(f *ir.Func) {
 				rename(&in.Args[k])
 			}
 			rename(&in.ClosureContext)
-			for k := range in.Defs {
-				rename(&in.Defs[k])
+			for k := range in.Defs() {
+				rename(&in.Defs()[k])
 			}
 		}
 		rename(&b.Jmp.Arg)
@@ -250,7 +250,7 @@ func buildPhiInterference(f *ir.Func, live *analysis.Liveness, nt int, involved 
 				def(int(in.To.ID), liveNow)
 				liveNow.Remove(int(in.To.ID))
 			}
-			for _, dr := range in.Defs {
+			for _, dr := range in.Defs() {
 				if dr.Kind == ir.RefTemp {
 					def(int(dr.ID), liveNow)
 					liveNow.Remove(int(dr.ID))

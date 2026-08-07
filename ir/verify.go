@@ -102,7 +102,7 @@ func verifySSA(f *Func) error {
 			if err := def(in.Op.String(), in.To); err != nil {
 				return err
 			}
-			for _, d := range in.Defs {
+			for _, d := range in.Defs() {
 				if err := def(in.Op.String(), d); err != nil {
 					return err
 				}
@@ -298,7 +298,7 @@ func verifyInstr(f *Func, b *Block, in *Instr) error {
 	if err := verifyRef(f, b, in.Op.String(), in.To); err != nil {
 		return err
 	}
-	for _, d := range in.Defs {
+	for _, d := range in.Defs() {
 		if err := verifyRef(f, b, in.Op.String(), d); err != nil {
 			return err
 		}

@@ -349,10 +349,10 @@ func collectTypes(m *Module) ([]*AggType, map[*AggType]int) {
 			for i := range b.Instrs {
 				in := &b.Instrs[i]
 				add(in.RetAgg)
-				for _, a := range in.AggArgs {
+				for _, a := range in.AggArgs() {
 					add(a)
 				}
-				for _, group := range in.ArgGroups {
+				for _, group := range in.ArgGroups() {
 					add(group.Type)
 				}
 			}
@@ -735,13 +735,13 @@ func (e *enc) encInstr(in *Instr, blockRef func(*Block)) {
 	e.u8(byte(in.CallConv))
 	e.boolean(in.CallConvSet)
 	e.iv(int64(in.Amode))
-	e.uv(uint64(len(in.AggArgs)))
-	for _, t := range in.AggArgs {
+	e.uv(uint64(len(in.AggArgs())))
+	for _, t := range in.AggArgs() {
 		e.typeRef(t)
 	}
-	e.valueGroups(in.ArgGroups)
-	e.uv(uint64(len(in.Defs)))
-	for _, r := range in.Defs {
+	e.valueGroups(in.ArgGroups())
+	e.uv(uint64(len(in.Defs())))
+	for _, r := range in.Defs() {
 		e.ref(r)
 	}
 	e.typeRef(in.RetAgg)
@@ -1178,17 +1178,21 @@ func (d *dec) decInstr(blockRef func() *Block) Instr {
 	in.CallConvSet = d.boolean()
 	in.Amode = int32(d.iv())
 	if n := int(d.uv()); n > 0 {
-		in.AggArgs = make([]*AggType, n)
-		for i := range in.AggArgs {
-			in.AggArgs[i] = d.typeRef()
+		aggArgs := make([]*AggType, n)
+		for i := range aggArgs {
+			aggArgs[i] = d.typeRef()
 		}
+		in.SetAggArgs(aggArgs)
 	}
-	in.ArgGroups = d.valueGroups()
+	if groups := d.valueGroups(); len(groups) > 0 {
+		in.SetArgGroups(groups)
+	}
 	if n := int(d.uv()); n > 0 {
-		in.Defs = make([]Ref, n)
-		for i := range in.Defs {
-			in.Defs[i] = d.ref()
+		defs := make([]Ref, n)
+		for i := range defs {
+			defs[i] = d.ref()
 		}
+		in.SetDefs(defs)
 	}
 	in.RetAgg = d.typeRef()
 	in.RetValues = d.boolean()
