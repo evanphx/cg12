@@ -425,8 +425,16 @@ func (c *functionCache) recordArtifact(module *ir.Module, notes []internNote, sc
 		return true, ""
 	}
 	collected := c.collectScope(module, notes, scope)
-	if len(collected.funcs)+len(collected.data)+len(collected.types)+len(collected.refs) == 0 {
+	if collected.missing != "" {
+		// The definition is incomplete: it names an artifact this compile cannot
+		// carry, and the reference to it was dropped rather than written out
+		// dangling. Storing what is left would be storing a definition that is
+		// short of what a cold compile produces, so it is not stored, and every
+		// declaration that references it is refused for the same reason.
 		return false, collected.missing
+	}
+	if len(collected.funcs)+len(collected.data)+len(collected.types)+len(collected.refs) == 0 {
+		return false, ""
 	}
 	sequence, err := c.encodeScope(module, collected)
 	if err != nil {
