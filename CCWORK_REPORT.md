@@ -398,3 +398,41 @@ slower**.
 
 **812 of 812 corpus programs, on both `-O` arms, compiled with nothing set at all
 are byte-identical to the same program compiled with `CG12_NOCACHE=1`.**
+
+## Cache eviction: making cleanup run
+
+The size bound landed with the cache-on-by-default change and did not work. The
+gate that found it drove 24 compiler generations through in 45 minutes and left
+the function cache at **1,407,765,443 bytes against a 1 GiB bound**, with the
+trim stamp never moving. This section is what was wrong, what the trigger is now,
+and what it measures at.
+
+*(in progress -- findings appended as they are established)*
+
+### What was actually broken
+
+Three separate things, of which the daily rate limit was only the first.
+
+**1. The trigger was a clock, and the thing it was bounding was a disk.**
+`Trim` refused to walk more than once per 24 hours per directory. That is the
+right rate for an age cutoff, which asks "has anyone wanted this in five days"
+and cannot answer differently at 10:00 and at 10:05. It is the wrong rate for a
+size cap: the gate blew through 1 GiB in about two hours at roughly 55 MB per
+compiler generation, and the interval that was supposed to make the walk
+affordable made the bound unreachable for eleven of every twelve hours.
+
+**2. The stamp was written before the walk.** A trim that crashed, was killed,
+or ran on a directory it could not change still claimed the next 24 hours. The
+comment said this was deliberate -- two builds should not both walk -- and it
+bought that at the price of making one failure a day-long outage of the only
+mechanism holding the bound.
+
+**3. And the one nobody was looking for: 33.7 GB of the pack cache is in a
+layout `Trim` cannot see.** `~/.cache/cg12/runtime-pack` on this box is 39.0 GB
+in 1177 packs. Of those, **1079 packs holding 33,669,679,910 bytes sit directly
+in the cache directory**, left by the layout that predates the two-hex fanout.
+`Trim` walks only entries whose name is a two-character directory, so those files
+are not merely un-budgeted, they are unreachable by the age cutoff too: nothing
+has ever been able to delete one. Only 98 packs / 5.3 GB were in the fanout the
+walk descends into. The 37 GB in the brief is mostly not a policy failure at all;
+it is a walk that cannot reach its own cache.

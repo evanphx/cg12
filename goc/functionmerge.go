@@ -630,10 +630,6 @@ func (c *functionCache) flush() {
 	if c.directory == "" {
 		return
 	}
-	// The one moment the cache is guaranteed to have done its work, and so the one
-	// moment it is worth walking the directory to evict. Trim rate-limits itself to
-	// once a day per directory.
-	cachefile.Trim(c.directory, functionCacheBudget)
 	c.carryForward()
 	paths := make([]string, 0, len(c.writing))
 	for path := range c.writing {
@@ -661,6 +657,20 @@ func (c *functionCache) flush() {
 			c.stats.Wrote++
 		}
 	}
+	// Eviction, last: after the writes rather than before them, so that what the
+	// bound is a statement about is the directory this build is leaving behind
+	// rather than the one it found. Trimming first -- which is what this did --
+	// meant every build ended over the budget by its own output even when the
+	// trigger worked, and the trigger did not work.
+	//
+	// Unconditionally, including when this build wrote nothing. A build that wrote
+	// nothing did not grow the directory, so the budget cannot have been crossed
+	// here; but the age cutoff has its own work to do and a box whose builds are
+	// all hits is exactly the box where last month's branches sit undisturbed.
+	// cachefile.Trim is a readdir and a stat per entry -- 14.5 ms at the budget --
+	// which is affordable per compile and is why there is no longer a rate limit
+	// to defeat.
+	cachefile.Trim(c.directory, functionCacheBudget)
 }
 
 // ---------------------------------------------------------------------------

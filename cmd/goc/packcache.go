@@ -38,9 +38,10 @@ import (
 // goc/source_world.go already answers to.
 //
 // The mechanics -- where a key goes on disk, how it is written, how a tree is
-// hashed, and when an entry nobody has read in five days goes away -- are
-// internal/cachefile's, shared with the per-function cache. This file keeps only
-// what is specific to a pack: which clauses go into the key.
+// hashed, and when an entry nobody has read in five days or nobody has room for
+// goes away -- are internal/cachefile's, shared with the per-function cache. This
+// file keeps only what is specific to a pack: which clauses go into the key, and
+// how much disk a pack cache may have. See [packCacheBudget].
 
 // packCacheDirectory is where cached packs live. CG12_PACK_CACHE overrides it,
 // and an empty result means "do not cache".
@@ -106,15 +107,36 @@ func readCachedPack(directory, key, destination string) bool {
 	return cachefile.WriteFileAtomically(destination, contents) == nil
 }
 
+// packCacheBudget is how much disk the pack cache may hold. It was age-only, and
+// age-only was wrong for the same reason it is wrong for the function cache: the
+// goc binary's hash and the whole stdlib tree's hash are both clauses of the key,
+// so every compiler change and every standard library edit mints a fresh
+// generation of every pack, and five days of that is bounded only by how often
+// somebody rebuilds. Measured on a box that does: 39.0 GB in 1177 packs.
+//
+// Sized from what a generation costs. `goc build-runtime` is run over seven
+// capability-matrix pack roots with and without -O, so one compiler's full set is
+// fourteen packs; the packs on that box run 8.7 MB at the smallest, 18.5 MB at
+// the median and 98.8 MB at the largest, which puts a worst-case generation near
+// 1.4 GB and a typical one near 300 MB. Eight gibibytes is therefore between five
+// and twenty-five full generations.
+//
+// Deliberately looser than the function cache's gibibyte, because the two have
+// opposite miss costs. A missed unit is a package lowered again; a missed pack is
+// `goc build-runtime` again, which is 4.6 s for the runtime alone and 154 s for
+// one carrying net/http. Evicting a pack somebody still wants is minutes, so the
+// bound is set where it stops a disk filling rather than where it keeps the cache
+// small.
+const packCacheBudget = 8 << 30
+
 // writeCachedPack stores a pack under its key. A failure to store is not a build
 // failure -- the pack has already been written where the caller asked for it --
 // so it is reported for the caller to mention rather than returned as an error.
 func writeCachedPack(directory, key string, contents []byte) error {
-	// The one moment a pack build is guaranteed to be slow anyway, and so the one
-	// moment it is worth walking the directory to evict. Trim rate-limits itself
-	// to once a day per directory.
-	// Age-only: a pack cache holds a handful of large files rather than a
-	// generation of small ones, and nothing has measured what a budget should be.
-	cachefile.Trim(directory, 0)
-	return cachefile.Write(directory, key, ".gocrt", contents)
+	err := cachefile.Write(directory, key, ".gocrt", contents)
+	// After the write, so that the bound is a statement about the directory this
+	// build leaves behind. A pack build is the slowest thing in the tree, so the
+	// walk is free here by any measure.
+	cachefile.Trim(directory, packCacheBudget)
+	return err
 }

@@ -8,11 +8,13 @@
 // is two chances to get the rename wrong; two eviction policies is one cache that
 // grows without bound while the other does not.
 //
-// The policy here is the Go toolchain's, and deliberately: mtime-on-use at hourly
-// granularity so a warm build does not write a timestamp per hit, a trim no more
-// than once a day, and a cutoff of five days since last use. cmd/go arrived at
-// those constants over a decade of people's disks and there is nothing about
-// cg12 that argues for different ones.
+// The policy here is the Go toolchain's where the Go toolchain's question is the
+// same one: mtime-on-use at hourly granularity so a warm build does not write a
+// timestamp per hit, and a cutoff of five days since last use. cmd/go arrived at
+// those over a decade of people's disks.
+//
+// Its once-a-day rate limit is NOT kept, and the reason is the one thing cg12
+// asks of a cache that cmd/go does not: a size bound. See [Trim].
 package cachefile
 
 import (
@@ -23,7 +25,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -199,8 +200,6 @@ const (
 	// would turn a read-only cache hit into a write per package. An hour is fine
 	// against a five-day cutoff.
 	usedInterval = 1 * time.Hour
-	// trimInterval is how often a process bothers to look for expired entries.
-	trimInterval = 24 * time.Hour
 	// trimCutoff is how long an entry survives without being read.
 	trimCutoff = 5 * 24 * time.Hour
 )
@@ -222,26 +221,67 @@ func MarkUsed(path string) {
 
 // Trim removes entries nothing has read in trimCutoff, and then, if budget is
 // positive, the least recently used of what is left until the directory fits in
-// budget bytes. At most once per trimInterval per directory.
+// budget bytes.
 //
 // Two bounds rather than one, because they answer different questions. The age
 // cutoff is "nobody wants this any more" and is what keeps a developer's cache
 // from carrying last month's branches. The size budget is "this disk is not
 // yours" and is what a cache on by default needs: the compiler binary's hash is a
-// clause of the per-function key, so a box that rebuilds the compiler -- a gate,
-// a bisection, anyone working on cg12 itself -- mints a whole new generation of
-// units every time, and five days of that is unbounded in exactly the way the age
-// cutoff cannot see. A budget of zero is age-only, which is the pack cache's
-// policy and was this one's.
+// clause of both caches' keys, so a box that rebuilds the compiler -- a gate, a
+// bisection, anyone working on cg12 itself -- mints a whole new generation of
+// entries every time, and five days of that is unbounded in exactly the way the
+// age cutoff cannot see.
+//
+// # When this runs, and why there is no rate limit any more
+//
+// There was one: a trim.txt stamp in the directory and a refusal to walk more
+// than once per 24 hours, copied from cmd/go. It is gone, because it was
+// answering the wrong question. A daily interval is right for an age cutoff --
+// nothing can cross a five-day line between 10:00 and 10:05 -- and useless for a
+// size cap, which is a claim about the disk right now. The measured failure was
+// exactly that: 24 compiler generations in 45 minutes took a function cache to
+// 1.41 GB against a 1 GiB bound, at ~55 MB a generation, with the stamp never
+// moving. Anything that can be exceeded in an hour cannot be enforced on a day.
+//
+// The trigger is instead the only event that can make a cache directory grow: a
+// build finishing a write to it. Callers call Trim at the end of a build, after
+// their writes, so the bound holds at the moment the build ends rather than at
+// the moment it started. Between those two points a build may exceed the budget
+// by its own output, which is ~60 MB for the largest program in the corpus.
+//
+// That is affordable because the check is one readdir per fanout directory and
+// one stat per entry, and nothing else -- no read of an entry's contents. At the
+// budget, with the corpus's 355 kB mean unit, a function cache holds about 3000
+// entries in 256 directories, and BenchmarkTrimWalk measures that walk at 14.5 ms
+// -- 0.05% of the 30-second compile the gate ran it inside, and about a
+// four-thousandth of what the cache saves that compile. A cache big enough for
+// the walk to matter is a cache the walk is about to make smaller.
+//
+// The rate limit was also doing a second job -- keeping two builds that start
+// together from both walking -- and that job is done instead by making a
+// concurrent trim harmless. Eviction order is fully determined (oldest first,
+// path within a timestamp), so two processes evicting at once choose the same
+// files in the same order; and a Remove that fails because someone else already
+// did it still counts against the total, so the second process stops at the same
+// place rather than evicting the budget twice over.
+//
+// # What the walk looks at
+//
+// Both layouts. Entries live at directory/xx/key+extension, and that is the only
+// place Write has ever put them since the fanout landed -- but the pack cache
+// predates the fanout, and 33.7 GB of it on the box this was found on is sitting
+// flat in the top of the cache directory where a walk that descends only into
+// two-character directories can never see it. Not merely un-budgeted: unreachable
+// by the age cutoff too, so nothing has ever been able to delete one.
+//
+// A top-level file is treated as an entry only if it is named like one -- a long
+// run of hex before the first dot, which is what a key is -- so that a cache
+// directory somebody pointed at a directory of their own does not lose files that
+// were never ours.
 //
 // Least recently used is by modification time, which MarkUsed refreshes on every
 // read. A unit a build is using is therefore younger than the cutoff and near the
 // top of the budget's ordering, so the working set is the last thing to go.
-//
-// The last-trim time is a file in the directory rather than process state,
-// because the processes that use these caches are compilers: they start, compile
-// one program and exit, so anything remembered in memory is remembered for the
-// length of one build. cmd/go keeps the same stamp for the same reason.
 //
 // Errors are swallowed by design. A cache that cannot be trimmed is a cache that
 // grows; a build that fails because a cache could not be trimmed is a broken
@@ -250,25 +290,7 @@ func Trim(directory string, budget int64) {
 	if directory == "" {
 		return
 	}
-	stamp := filepath.Join(directory, "trim.txt")
-	now := time.Now()
-	if contents, err := os.ReadFile(stamp); err == nil {
-		if seconds, err := strconv.ParseInt(strings.TrimSpace(string(contents)), 10, 64); err == nil {
-			if now.Sub(time.Unix(seconds, 0)) < trimInterval {
-				return
-			}
-		}
-	}
-	// The stamp is written first. Two builds starting together should not both
-	// walk the tree, and a walk that fails halfway should not make every
-	// subsequent build retry it.
-	if err := os.MkdirAll(directory, 0o755); err != nil {
-		return
-	}
-	if err := WriteFileAtomically(stamp, []byte(strconv.FormatInt(now.Unix(), 10)+"\n")); err != nil {
-		return
-	}
-	cutoff := now.Add(-trimCutoff)
+	cutoff := time.Now().Add(-trimCutoff)
 	entries, err := os.ReadDir(directory)
 	if err != nil {
 		return
@@ -280,8 +302,31 @@ func Trim(directory string, budget int64) {
 	}
 	var survivors []survivor
 	var total int64
+	consider := func(path string, info os.FileInfo) {
+		if info.ModTime().Before(cutoff) {
+			os.Remove(path)
+			return
+		}
+		if budget <= 0 {
+			return
+		}
+		survivors = append(survivors, survivor{path: path, used: info.ModTime(), size: info.Size()})
+		total += info.Size()
+	}
 	for _, entry := range entries {
-		if !entry.IsDir() || len(entry.Name()) != 2 {
+		if !entry.IsDir() {
+			// The flat layout that predates the fanout. Only what is named like a key.
+			if !looksLikeKey(entry.Name()) {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil || info.IsDir() {
+				continue
+			}
+			consider(filepath.Join(directory, entry.Name()), info)
+			continue
+		}
+		if len(entry.Name()) != 2 {
 			continue
 		}
 		subdirectory := filepath.Join(directory, entry.Name())
@@ -294,16 +339,7 @@ func Trim(directory string, budget int64) {
 			if err != nil || info.IsDir() {
 				continue
 			}
-			path := filepath.Join(subdirectory, file.Name())
-			if info.ModTime().Before(cutoff) {
-				os.Remove(path)
-				continue
-			}
-			if budget <= 0 {
-				continue
-			}
-			survivors = append(survivors, survivor{path: path, used: info.ModTime(), size: info.Size()})
-			total += info.Size()
+			consider(filepath.Join(subdirectory, file.Name()), info)
 		}
 	}
 	if budget <= 0 || total <= budget {
@@ -311,7 +347,8 @@ func Trim(directory string, budget int64) {
 	}
 	// Oldest first, and by path within one timestamp: MarkUsed writes at hourly
 	// granularity, so ties are the rule rather than the exception and an arbitrary
-	// order would make two boxes with the same cache evict differently.
+	// order would make two boxes with the same cache evict differently -- and would
+	// make two processes trimming one cache at the same moment evict twice.
 	sort.Slice(survivors, func(i, j int) bool {
 		if !survivors[i].used.Equal(survivors[j].used) {
 			return survivors[i].used.Before(survivors[j].used)
@@ -322,8 +359,34 @@ func Trim(directory string, budget int64) {
 		if total <= budget {
 			return
 		}
-		if os.Remove(entry.path) == nil {
+		// A file another process removed first is a file that is gone, and counting
+		// it is what keeps two concurrent trims from evicting the budget twice.
+		if err := os.Remove(entry.path); err == nil || os.IsNotExist(err) {
 			total -= entry.size
 		}
 	}
+}
+
+// looksLikeKey reports whether a file directly in a cache directory is one of
+// ours: a key is hex, so a name that begins with a long run of hex before its
+// first dot is an entry and anything else -- a README, a lock file, a directory
+// somebody keeps their own things in -- is not.
+//
+// Sixteen characters rather than the full sixty-four a key actually has, because
+// the point is to exclude names that were never keys, not to validate a digest,
+// and a shorter key is a change this should survive.
+func looksLikeKey(name string) bool {
+	stem, _, _ := strings.Cut(name, ".")
+	if len(stem) < 16 {
+		return false
+	}
+	for index := 0; index < len(stem); index++ {
+		switch character := stem[index]; {
+		case character >= '0' && character <= '9':
+		case character >= 'a' && character <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
 }

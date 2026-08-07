@@ -425,7 +425,24 @@ func ModuleImportPaths(modules ...*ir.Module) []string {
 // FunctionCacheUnitVersion is BUILD_CACHE.md §3.2 clause 1: the format version
 // of a cached unit, so that changing the shape of what is stored is a miss and
 // not a crash. Bump it whenever the meaning of any clause below changes.
-const FunctionCacheUnitVersion = 1
+//
+// 2 for cachedDeclaration.NewFiles becoming Files. That change moved no byte of
+// the wire format -- a count and that many strings, before and after -- and moved
+// packageUnitVersion not at all, because the layout is the same layout. What
+// changed is what the strings mean: they were the files a declaration APPENDED to
+// Module.Files, which is a fact about which declarations happened to run before
+// it, and they are now the files its lowering resolved a position in, which is a
+// fact about the declaration. A vintage-1 unit decodes cleanly under the new
+// reading and replays the wrong file table.
+//
+// The compiler binary's hash is also a clause of the key, so in practice the two
+// vintages were already apart for anyone who had rebuilt goc -- which is why
+// nothing caught fire. That is a coincidence of how this cache is used and not a
+// property of it: a released binary that shipped before the change and a rebuild
+// of the same source after it hash the same, and this is the clause that exists
+// to keep them apart. A version that is never bumped when the meaning of a field
+// changes is a version that is not doing its job.
+const FunctionCacheUnitVersion = 2
 
 // CacheDigest is a content digest of one clause of a key.
 type CacheDigest [32]byte

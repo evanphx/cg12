@@ -521,7 +521,12 @@ func packageCacheKeyDigest(entry *FunctionCacheEntry) string {
 // GB of stale generations on a shared box was the failure this bound exists to
 // prevent, and sixteen is a comfortable margin for anyone whose working set is
 // one compiler.
-const functionCacheBudget = 1 << 30
+//
+// A variable rather than a constant so that a test can hold the whole trigger --
+// compile, write, evict -- against a budget it can reach in seconds instead of
+// the sixteen corpus fills it would take to reach this one. Nothing but a test
+// assigns to it. See TestTheCacheStaysUnderItsBudgetAcrossGenerations.
+var functionCacheBudget int64 = 1 << 30
 
 // functionCacheDefaultOn is whether a compile that has been told nothing uses the
 // cache. It is off in the library and turned on by cmd/goc, and that asymmetry is
