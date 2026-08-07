@@ -7515,3 +7515,124 @@ the numerator held and the denominator moved — the lowering loop is 11.8% of a
 `opt.OptimizeModule` is now 9.97 s of a 16.2 s `fmt_sprintf` compile. 11.8% ×
 79.2% = 9.3% against 9.7% measured; 11.7% × 68.8% = 8.0% against 8.8% measured.
 The arithmetic closes.
+
+---
+
+# Cross-program correctness: interned artifacts are not carried by the units that reference them
+
+Branch `ccwork/interned-artifact-units`, cut from `ccwork/cache-store-and-merge`
+(`235c54c`). The gate reduced the defect to two commands; everything below is
+measured on this box with `go build -o goc ./cmd/goc` at that commit.
+
+## 1. What is actually broken
+
+```
+CG12_FUNC_CACHE=/tmp/c goc -o a goc/testdata/fmt_sprintf.go   # fills
+CG12_FUNC_CACHE=/tmp/c goc -o b goc/testdata/hello.go         # undefined _goc_type_time_Time_...
+```
+
+Reproduced. The undefined symbols are type descriptors and runtime type
+descriptors, and they are referenced **from `.data`**, not from code.
+
+A cached declaration's delta is `module.Data[mark:]`, `module.Funcs[mark:]`,
+`module.Types[mark:]` — what the declaration *appended*. An interned artifact is
+appended by whichever declaration referenced it **first**; every later reference
+is a table hit that appends nothing. So the delta of a declaration that merely
+*referenced* `.goc.type.time.Time.<sha8>` records the reference and not the
+definition. There are two ways that dangles, and the fix has to answer both:
+
+1. **The IR path.** The delta's own instructions and data name a symbol whose
+   definition lived in another declaration's delta, in another package, which the
+   consuming program never loads.
+2. **The whole-program-table path.** `replay` writes the unit's intern notes
+   straight into `g.typeTags`, `g.interfaceItabs` and the cache's `pointerKeys`.
+   `populateRuntimePointerTypes` and `addInterfaceItabLinks` then read those
+   tables after lowering and emit references from freshly built data to symbols
+   nothing in this program ever defined. That is why the undefined references are
+   in `.data`: the failing edges were written by a whole-program pass out of a
+   table that a replayed note had populated.
+
+## 2. Ordering is load-bearing, and that decides the shape of the fix
+
+The other order links, and produces a different image. Measured:
+
+```
+fill with hello.go, then compile fmt_sprintf.go warm   ca2884d1
+compile fmt_sprintf.go with CG12_NOCACHE=1 (cold)      463df9fb
+
+symbol sets:                    identical (0 lines of diff)
+symbols at a different address: 1874
+```
+
+The two binaries contain **exactly the same symbols** and put 1874 of them at
+**different addresses**. So the cross-program divergence in the direction that
+links is not a content difference at all — it is a *layout* difference.
+`arm64/assembly.go:75` emits data in `Module.Data` order and `ir.DataItem` carries
+`RelativeTo: ".goc.runtime.datastart"` offsets, so the order artifacts are
+appended in is baked into the image.
+
+That rules out the obvious cheap repair — "carry every referenced definition and
+append the missing ones at the front of the delta". It would link and it would
+still produce the wrong image, because a cold compile mints an artifact at the
+point of **first reference**, in the middle of some declaration's delta, not at
+its start. Whatever is carried has to be carried **with its position**.
+
+## 3. The choice: (a), carry the definitions
+
+### Why not (b), interned artifacts as their own cache units
+
+(b)'s premise is that an artifact is "keyed by exactly the content that names it".
+It is not. `.goc.type.<sha8>` is `contentSymbolName(".goc.type", runtimeTypeKey(t))`,
+and `runtimeTypeKey` is `types.TypeString` with package *paths* plus, for
+function-local types only, a declaration position. For a package-level named type
+it is the type's **spelling** — `"time.Time"` — and carries nothing about its
+fields or its method set. Measured, with the same `main.T` and one field's type
+changed from `int` to `int32`:
+
+```
+v1 (b int)     _goc_type_main_T_c050ab9e180e0062   ... _fields at 0x50
+v2 (b int32)   _goc_type_main_T_c050ab9e180e0062   ... _fields at 0x88
+```
+
+Same name, different descriptor. A cache unit keyed on that name alone serves a
+stale descriptor after any edit to the type's definition, and does it *silently* —
+strictly worse than the dangling reference being fixed, which at least fails to
+link. To make (b) sound each artifact would need the source identity of every
+package its type mentions transitively (for `map[string][]time.Time`: `time`, plus
+everything `time.Time`'s fields reach). Nothing in the tree computes that set;
+`FunctionCacheEntry` is per package and comes from the loader's package graph. So
+(b) does not get its key for free from the naming — it needs a *new* per-artifact
+dependency computation, which is more machinery than (a), not less.
+
+The cost side of (b) is also worse than it looks. Distinct interned artifacts per
+program, counted from the linked images:
+
+| program | descriptors | runtime types | literals | total |
+|---|---|---|---|---|
+| hello.go | 499 | 70 | 70 | 639 |
+| fmt_sprintf.go | 1170 | 231 | 79 | 1480 |
+| stdlib_http_tls_client_server.go | 4191 | 1168 | 134 | 5493 |
+
+640–5500 separate cache files per program against the 50–250 package files the
+current scheme reads, each needing its own key digest — the opposite of the
+"one read per package" trade §3.3 of BUILD_CACHE.md was built on.
+
+### What (a) has to be, given §2
+
+A unit carries the definition of every interned artifact it references, **and the
+position at which it references it**. Concretely, a declaration's stored delta
+becomes the sequence its lowering *would* have produced if the intern tables had
+been empty when it started: its own items and, at the exact point of first
+reference, the full definition run of each artifact it touched. Replay walks that
+sequence and appends only what the module does not already define. Because both a
+cold compile and a replay are filtering the *same* full sequence by what is
+already present, the warm module comes out index for index identical to the cold
+one — which is the property the image needs.
+
+Artifact definitions are stored once per package file and referenced by symbol, so
+the duplication (a) pays is across package files, not across the declarations
+inside one. `sameDataDefinition` — already in the merge, already modelled on
+`runtimepack.Manifest.DataDigests` — is what turns "two units disagree about one
+name" into a named error rather than a silent winner.
+
+**Decision: (a).**
