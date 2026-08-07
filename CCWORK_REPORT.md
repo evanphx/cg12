@@ -7460,10 +7460,14 @@ measurement, not proof, and it is the assumption a future stage should attack
 first if a cached build ever produces a wrong binary.
 
 **The delta model assumes lowering is append-only, and it is not quite.** One
-exception was found and journalled (§2). The audit that found the rest was a read
-of every write to `Module.Data`, `Module.Funcs`, `Module.Types` and the generator's
-whole-compilation tables during the lowering loop; `ensureRuntimeTypeEqual` was the
-only one that reaches backwards. A future edit that adds a second such write will
+exception was found and journalled (§2). The search for others was a grep-driven
+audit — every `append` to `Module.Data`/`Funcs`/`Types`, every indexed write to a
+`DataItem`, every scan of `g.mod.Data` or `g.mod.Funcs`, and every write to the
+generator's whole-compilation tables — and `ensureRuntimeTypeEqual` was the only one
+that reaches backwards. That is an audit of the writes those greps name, not a
+reading of all 18 000 lines of `goc/compile.go`; what carries the weight is the
+whole-module comparison, on an http build of 42 130 data definitions and 14 974
+functions. A future edit that adds a second such write will
 not be caught by the type system — it will be caught by
 `TestWarmCompileIsByteIdenticalToCold`, which is in the suite `verify-fast` runs,
 and that is the reason that test compares whole modules rather than a sample.
