@@ -7750,3 +7750,8 @@ That arm is not a formality here. The cache is off by default, but one lowering
 change was needed on the default path anyway — `staticFunctionLiteral` no longer
 leaves its scratch function in `Module.Funcs` while the literal is lowered — and
 this is the check that it changed nothing.
+
+**Determinism.** `scripts/determinism-check.sh`, five programs, cold and warm,
+two rounds each: every hash identical within and across rounds, including
+`runtime_defer_capture_allocs.go`, the standing exception RUNTIME_PLAN.md §5.10
+records.
