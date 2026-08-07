@@ -54,6 +54,11 @@
 #            TestEscapeReason*/TestGocFlagM* entries move opt's diagnostic level
 #            and writer instead; that is measurably placement-neutral, but they
 #            race each other, so they need a tag of their own rather than removal.
+# census     Installs the package-global generic-instantiation sink that
+#            goc/genericshape.go's compile() hook writes into, so a compile
+#            started by any other test in the process would be recorded in this
+#            one's census. Flag-gated (-generic-shape-census), so it skips in a
+#            normal run.
 # setenv     Calls t.Setenv, which mutates process-global state and panics if the
 #            test is parallel.
 # timing     Measures elapsed time on a pinned core and has a pre-flight that
@@ -135,6 +140,7 @@ TestUnsafePointerConvertedToUintptrDoesNotEscapeLocalArray	placement
 TestUnsafePointerStoreKeepsWriteBarrier	placement
 TestValueBoxedIntoAnInterfaceEscapes	placement
 TestZeroCaptureFunctionLiteralUsesStaticDescriptor	placement
+TestGenericShapeCensus	census
 TestLoadExactStandardRuntimeSource	setenv
 TestStdlibOverlayRejectsAssemblyReplacement	setenv
 TestStdlibOverlayRejectsReplacementWithoutUpstreamHash	setenv

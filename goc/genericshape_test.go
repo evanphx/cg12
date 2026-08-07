@@ -34,6 +34,8 @@ var genericShapeCensusProgram = flag.String(
 // TestGCShapeName pins the shape model against gc's rule. It is cheap and runs
 // by default; the census below does not.
 func TestGCShapeName(t *testing.T) {
+	t.Parallel()
+
 	pkg := types.NewPackage("main", "main")
 	field := func(name string, fieldType types.Type) *types.Var {
 		return types.NewField(0, pkg, name, fieldType, false)
