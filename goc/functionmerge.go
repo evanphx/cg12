@@ -273,6 +273,7 @@ type declarationMark struct {
 	funcs, data, types, files int
 	notes                     int
 	events                    int
+	dependent                 int
 }
 
 func markDeclaration(module *ir.Module, journal *internJournal) declarationMark {
@@ -424,6 +425,13 @@ func (c *functionCache) recordArtifact(module *ir.Module, notes []internNote, sc
 	if c.artifacts[scope.symbol] != nil {
 		return true, ""
 	}
+	if scope.end.Dependent != scope.begin.Dependent {
+		// Minting it consulted a whole-program fact, so the definition is this
+		// program's rather than this type's. goc does not do that today -- the one
+		// site that consults one is a conversion, not a mint -- and if it starts to,
+		// the artifact is refused rather than stored wrong.
+		return false, scope.symbol
+	}
 	collected := c.collectScope(module, notes, scope)
 	if collected.missing != "" {
 		// The definition is incomplete: it names an artifact this compile cannot
@@ -473,6 +481,12 @@ func (c *functionCache) record(module *ir.Module, journal *internJournal, functi
 	}
 	collected := c.collectScope(module, journal.notes, scope)
 	if !cacheableDeclaration(function) {
+		return
+	}
+	if journal.dependent != mark.dependent {
+		// The lowering consulted a fact about the whole program, so what it appended
+		// is not a function of its package. See gen.wholeProgramLowering.
+		c.stats.reason("lowering used a whole-program fact")
 		return
 	}
 	if collected.missing != "" {

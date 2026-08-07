@@ -2931,6 +2931,7 @@ func (g *gen) interfaceMethodDoesNotRetainReceiver(
 	checking[key] = true
 	defer delete(checking, key)
 
+	g.wholeProgramLowering()
 	cacheKey := interfaceCandidateKey{method: method, interfaceType: interfaceType.String()}
 	candidates, cached := g.interfaceCandidates[cacheKey]
 	if !cached {
@@ -8015,6 +8016,10 @@ func (g *gen) ensureInterfaceCallWrapper(method *types.Func) string {
 // Module.Data, and touch neither g.cur nor g.fn. The module's data is assembled
 // per program either way -- it already holds the dispatchers and the itab links.
 func materialiseInterfaceImplementations(g *gen, targetType types.Type, target *types.Interface) {
+	// The set walked below is a whole-program fact, so whatever this appends to
+	// Module.Data is not a function of the package being lowered. See
+	// gen.wholeProgramLowering.
+	g.wholeProgramLowering()
 	for _, implementation := range g.interfaceImplementations(target) {
 		g.ensureInterfaceItab(implementation, targetType)
 	}
@@ -8041,6 +8046,7 @@ func (g *gen) interfaceTypeWord(dynamicType ir.Ref, targetType types.Type) ir.Re
 	targetInterface := targetType.Underlying().(*types.Interface)
 	var implementations []types.Type
 	if gocLoweringUsesWholeProgramFacts() {
+		g.wholeProgramLowering()
 		implementations = g.interfaceImplementations(targetInterface)
 	} else {
 		materialiseInterfaceImplementations(g, targetType, targetInterface)
@@ -10131,6 +10137,7 @@ func (g *gen) interfaceTypeMatch(dynamicTag ir.Ref, targetType types.Type) ir.Re
 		// one place gocLoweringUsesWholeProgramFacts therefore cannot switch it
 		// off: a freestanding program is compiled whole or not at all.
 		match := g.fn.Word(0)
+		g.wholeProgramLowering()
 		for _, implementation := range g.interfaceImplementations(target) {
 			matchesImplementation := g.cur.Cmp(ir.CmpEq, ir.ClsP, dynamicTag, g.typeTag(implementation))
 			match = g.cur.Or(ir.ClsW, match, matchesImplementation)
@@ -10140,6 +10147,7 @@ func (g *gen) interfaceTypeMatch(dynamicTag ir.Ref, targetType types.Type) ir.Re
 
 	var implementations []types.Type
 	if gocLoweringUsesWholeProgramFacts() {
+		g.wholeProgramLowering()
 		implementations = g.interfaceImplementations(target)
 	} else {
 		materialiseInterfaceImplementations(g, targetType, target)

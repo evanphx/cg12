@@ -149,15 +149,16 @@ const (
 	artifactReference
 )
 
-// artifactEvent is one such mark, with the module's three tables and the note
-// list measured at the moment it was made.
+// artifactEvent is one such mark, with the module's three tables, the note list
+// and the whole-program counter measured at the moment it was made.
 type artifactEvent struct {
-	Kind   artifactEventKind
-	Symbol string
-	Funcs  int
-	Data   int
-	Types  int
-	Notes  int
+	Kind      artifactEventKind
+	Symbol    string
+	Funcs     int
+	Data      int
+	Types     int
+	Notes     int
+	Dependent int
 }
 
 // internJournal records the table entries in insertion order and the artifact
@@ -166,6 +167,9 @@ type artifactEvent struct {
 type internJournal struct {
 	notes  []internNote
 	events []artifactEvent
+	// dependent counts the times lowering consulted a whole-program fact. See
+	// [gen.wholeProgramLowering].
+	dependent int
 }
 
 func (j *internJournal) note(kind internKind, key, value string) {
@@ -180,12 +184,13 @@ func (j *internJournal) event(kind artifactEventKind, symbol string, module *ir.
 		return
 	}
 	j.events = append(j.events, artifactEvent{
-		Kind:   kind,
-		Symbol: symbol,
-		Funcs:  len(module.Funcs),
-		Data:   len(module.Data),
-		Types:  len(module.Types),
-		Notes:  len(j.notes),
+		Kind:      kind,
+		Symbol:    symbol,
+		Funcs:     len(module.Funcs),
+		Data:      len(module.Data),
+		Types:     len(module.Types),
+		Notes:     len(j.notes),
+		Dependent: j.dependent,
 	})
 }
 
@@ -195,6 +200,7 @@ func (j *internJournal) here(module *ir.Module) artifactEvent {
 	event := artifactEvent{Funcs: len(module.Funcs), Data: len(module.Data), Types: len(module.Types)}
 	if j != nil {
 		event.Notes = len(j.notes)
+		event.Dependent = j.dependent
 	}
 	return event
 }
@@ -209,8 +215,34 @@ func (j *internJournal) mark(module *ir.Module) declarationMark {
 	if j != nil {
 		mark.notes = len(j.notes)
 		mark.events = len(j.events)
+		mark.dependent = j.dependent
 	}
 	return mark
+}
+
+// wholeProgramLowering records that what is being lowered right now consulted a
+// fact about the whole program rather than about its own package.
+//
+// There is one such site that runs by default, and it is not the devirtualisation
+// gocLoweringUsesWholeProgramFacts turns off. materialiseInterfaceImplementations
+// walks every type in the PROGRAM that implements the interface being converted
+// to, and mints each one's descriptor and itab -- deliberately, because
+// runtime.getitab walks those method tables and dropping them made a reflective
+// assertion answer no. The IR of the function is unaffected, which is why the
+// side effect was kept; Module.Data is not.
+//
+// That was invisible while a unit recorded only references to interned artifacts:
+// whatever set of itabs the program materialised, the program materialised. Now
+// that a unit carries the definitions it references, a declaration whose delta
+// includes the materialisation would carry ONE program's implementation set into
+// another, and the corpus says so -- 89 of 406 programs came out with the itabs of
+// whatever filled the cache rather than their own. So such a declaration is not a
+// unit, and lowering says so here rather than the cache guessing from the shape of
+// what came out.
+func (g *gen) wholeProgramLowering() {
+	if g.interns != nil {
+		g.interns.dependent++
+	}
 }
 
 // mintArtifact opens the recording scope of one interned artifact and returns the
