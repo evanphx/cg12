@@ -28,6 +28,24 @@ func (m *Module) NewFuncVoid(name string) *Func {
 	return f
 }
 
+// Adopt appends an already-built function to m and makes m its owner.
+//
+// It is for a caller assembling a module out of functions that were decoded
+// somewhere else -- a cross-compilation cache reading a unit back, which has a
+// *Func whose Module is the scratch module the decode produced. Leaving that
+// back-pointer alone would leave the function resolving source file names and
+// type names against a module that is not the one it is in, and [Func.Module] is
+// what the printer and the verifier ask.
+//
+// The caller still owns the harder half: a decoded function's SrcPos.File values
+// index the file table it was encoded with, so they have to be remapped into m's
+// before the function is adopted.
+func (m *Module) Adopt(f *Func) *Func {
+	f.mod = m
+	m.Funcs = append(m.Funcs, f)
+	return f
+}
+
 // AddType registers an aggregate type and returns a ref to it (for calls and
 // typed allocations).
 func (m *Module) AddType(t *AggType) Ref {

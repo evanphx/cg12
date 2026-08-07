@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/evanphx/cg12/goc"
+	"github.com/evanphx/cg12/internal/cachefile"
 	"github.com/evanphx/cg12/internal/prebuilt"
 	"github.com/evanphx/cg12/internal/runtimepack"
 )
@@ -66,7 +67,7 @@ func buildRuntimeCommand(arguments []string, errorOutput io.Writer) int {
 		fmt.Fprintf(errorOutput, "goc: %v\n", err)
 		return 1
 	}
-	if err := writeFileAtomically(*output, encoded); err != nil {
+	if err := cachefile.WriteFileAtomically(*output, encoded); err != nil {
 		fmt.Fprintf(errorOutput, "goc: %v\n", err)
 		return 1
 	}

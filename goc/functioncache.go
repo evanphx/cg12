@@ -640,12 +640,25 @@ func ProgramCompileIdentity(target Target, optimize bool, name string, src []byt
 		return nil, err
 	}
 
+	return loadedCompileIdentity(string(resolved), optimize, loader, fset, pkg, name, src)
+}
+
+// loadedCompileIdentity computes the identity of a compile whose closure is
+// already loaded and type-checked.
+//
+// It is split out from [ProgramCompileIdentity] because the compiler itself needs
+// it: goc/compile.go has a loader, a FileSet and a checked package by the time it
+// could serve a cache hit, and re-loading the closure to get a key would cost more
+// than the key can save. The two callers must agree exactly -- a compile that
+// computed its key differently from the census would look up files nothing ever
+// wrote -- which is why there is one function and not two.
+func loadedCompileIdentity(target string, optimize bool, loader *sourceLoader, fset *token.FileSet, pkg *types.Package, name string, src []byte) (*CompileIdentity, error) {
 	compiler, err := compilerBinaryDigest()
 	if err != nil {
 		return nil, err
 	}
 	identity := &CompileIdentity{
-		Target:     string(resolved),
+		Target:     target,
 		Optimize:   optimize,
 		TextLayout: arm64.TextLayoutIdentity(),
 		Pipeline:   opt.PipelineIdentity(),

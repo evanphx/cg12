@@ -449,6 +449,14 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	if err := generateDynamicInitializerFunctions(g, dynamicInitializers); err != nil {
 		return nil, err
 	}
+	// The per-function cache, if this compile may use one. It is opened here, after
+	// the closure is loaded and type-checked and before a byte of a reachable
+	// declaration is lowered, because that is the last point at which its key is
+	// knowable and the first at which it could serve a hit. See
+	// goc/functionstore.go.
+	cache, cacheJournal := openFunctionCache(target, options, loader, fset, pkg, name, src)
+	g.interns = cacheJournal
+
 	// rootPackageFunctions are the functions a prebuilt runtime module must leave
 	// undefined because they belong to whatever program is linked against it. The
 	// attribution is by which declaration was being generated, not by the symbol's
@@ -457,6 +465,15 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 	var rootPackageFunctions []string
 	for i := len(functions) - 1; i >= 0; i-- {
 		function := functions[i]
+		cache.stats.Declarations++
+		if stored := cache.lookup(function); stored != nil {
+			if err := cache.replay(g, stored); err != nil {
+				return nil, err
+			}
+			cache.stats.Hits++
+			continue
+		}
+		cache.stats.Misses++
 		generator := g
 		if function.pkg != pkg {
 			// g.globals is allGlobals by now, so the derived generator resolves
@@ -468,20 +485,23 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 		generator.typeArguments = function.typeArguments
 		generator.functionName = function.symbol
 		emitted := len(mod.Funcs)
+		mark := markDeclaration(mod, cacheJournal)
 		generator.funcDecl(function.decl)
 		if generator.err != nil {
 			return nil, generator.err
 		}
+		cache.record(mod, cacheJournal, function, mark)
 		if options.runtimeSplit.buildsRuntime() && function.pkg == pkg {
 			for _, added := range mod.Funcs[emitted:] {
 				rootPackageFunctions = append(rootPackageFunctions, added.Name)
 			}
 		}
 	}
+	cache.finishLowering(mod)
 	addInterfaceMethodWrappers(g, functions)
 	redirectedCallWrappers := redirectUnavailableInterfaceCallWrappers(mod)
 	if compileRuntime {
-		populateRuntimePointerTypes(fset, mod, typeTags, runtimeTypes)
+		populateRuntimePointerTypes(mod, typeTags, cache.pointerTypeKeys(fset, runtimeTypes))
 		clearUnavailableRuntimeMethodOffsets(mod)
 	}
 	if loader.units["crypto/internal/fips140"] != nil && !compileRuntime {
@@ -562,6 +582,9 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			return nil, err
 		}
 	}
+	cache.flush()
+	lastFunctionCacheStats = cache.report()
+	debugFunctionCache(lastFunctionCacheStats)
 	return g.mod, nil
 }
 
@@ -1708,6 +1731,13 @@ type gen struct {
 	dynamicInitializers         map[types.Object]*globalInitializer
 	dynamicInitializerGuards    map[types.Object]string
 	dynamicInitializerFunctions map[types.Object]string
+	// interns journals every entry added to the seven content-keyed tables above,
+	// in insertion order, for the per-function cache. A cached declaration's
+	// lowering is skipped, so the entries it would have added have to be replayed
+	// or the next declaration that wants the same literal mints a second copy of a
+	// symbol that is already in the module. Nil unless a cache is recording; see
+	// goc/functionstore.go.
+	interns *internJournal
 
 	// Source context. Reset by derive; set by callers that lower Go source.
 	file *ast.File
@@ -6392,6 +6422,7 @@ func (g *gen) goABIAggregate(valueType types.Type) *ir.AggType {
 		g.goABITypes = make(map[string]*ir.AggType)
 	}
 	g.goABITypes[cacheKey] = aggregate
+	g.interns.note(internGoABIType, cacheKey, aggregate.Name)
 	return aggregate
 }
 
@@ -7511,6 +7542,7 @@ func (g *gen) staticInterfacePayload(source ast.Node, sourceType types.Type) (st
 		return "", false
 	}
 	g.contentSymbols[payloadPrefix+":"+key] = name
+	g.interns.note(internContentSymbol, payloadPrefix+":"+key, name)
 	g.mod.Data = append(g.mod.Data, &ir.Data{
 		Name:         name,
 		Align:        int(typeAlign(sourceType)),
@@ -7734,6 +7766,7 @@ func (g *gen) ensureInterfaceItab(sourceType, targetType types.Type) string {
 
 	symbol := contentSymbolName(".goc.itab", key)
 	g.interfaceItabs[key] = symbol
+	g.interns.note(internInterfaceItab, key, symbol)
 	interfaceType := targetType.Underlying().(*types.Interface)
 	sourceTypeTag := g.ensureTypeTag(sourceType)
 	g.ensureRuntimeTypeEqual(sourceType, sourceTypeTag)
@@ -7777,6 +7810,7 @@ func (g *gen) ensureInterfaceCallWrapperFor(sourceType types.Type, method *types
 
 	wrapperSymbol := contentSymbolName(methodSymbol+".interfacecall.promoted", key)
 	g.interfaceCallWrappers[key] = wrapperSymbol
+	g.interns.note(internInterfaceCallWrapper, key, wrapperSymbol)
 
 	signature := method.Type().(*types.Signature)
 	receiver := signature.Recv()
@@ -7872,6 +7906,7 @@ func (g *gen) ensureInterfaceCallWrapper(method *types.Func) string {
 	// one, where the two copies must be interchangeable.
 	wrapperSymbol := contentSymbolName(methodSymbol+".interfacecall", signatureKey)
 	g.interfaceCallWrappers[signatureKey] = wrapperSymbol
+	g.interns.note(internInterfaceCallWrapper, signatureKey, wrapperSymbol)
 
 	var function *ir.Func
 	if signature.Results().Len() == 0 {
@@ -8519,6 +8554,12 @@ func (g *gen) ensureTypeTag(valueType types.Type) string {
 	valueType = canonicalAliasType(valueType)
 	key := runtimeTypeKey(g.fset, valueType)
 	if g.runtimeTypes != nil {
+		if _, known := g.runtimeTypes[key]; !known {
+			// The pointer-type key rather than the type: populateRuntimePointerTypes
+			// is the only reader, it only ever asks for *T's key, and a types.Type is
+			// not something a cached unit can carry.
+			g.interns.note(internRuntimeType, key, runtimeTypeKey(g.fset, types.NewPointer(valueType)))
+		}
 		g.runtimeTypes[key] = valueType
 	}
 	name := g.typeTags[key]
@@ -8529,6 +8570,7 @@ func (g *gen) ensureTypeTag(valueType types.Type) string {
 		// named symbols on every build.
 		name = runtimeTypeSymbolName(key)
 		g.typeTags[key] = name
+		g.interns.note(internTypeTag, key, name)
 		gcDataName := name + ".gcdata"
 		mask := paddedPointerMask(pointerMask(valueType))
 		alignment := typeAlign(valueType)
@@ -8735,14 +8777,22 @@ func (g *gen) ensureTypeTag(valueType types.Type) string {
 	return name
 }
 
-func populateRuntimePointerTypes(fset *token.FileSet, module *ir.Module, typeTags map[string]string, runtimeTypes map[string]types.Type) {
+// populateRuntimePointerTypes fills each type descriptor's PtrToThis field with
+// the descriptor of the pointer to it, where the program contains one.
+//
+// pointerKeys maps a type's runtimeTypeKey to the key of the pointer to it. It
+// used to be derived here from a map[string]types.Type, which a cached unit
+// cannot carry: a types.Type belongs to the type checker that made it, and a
+// warm compile never type-checks the body a cached descriptor came from. The key
+// of `*T` is a string, is all this ever wanted from that map, and travels.
+func populateRuntimePointerTypes(module *ir.Module, typeTags map[string]string, pointerKeys map[string]string) {
 	dataByName := make(map[string]*ir.Data, len(module.Data))
 	for _, data := range module.Data {
 		dataByName[data.Name] = data
 	}
-	for key, valueType := range runtimeTypes {
+	for key, pointerKey := range pointerKeys {
 		typeSymbol := typeTags[key]
-		pointerSymbol := typeTags[runtimeTypeKey(fset, types.NewPointer(valueType))]
+		pointerSymbol := typeTags[pointerKey]
 		if typeSymbol == "" || pointerSymbol == "" {
 			continue
 		}
@@ -14869,6 +14919,7 @@ func (g *gen) staticFunctionDescriptor(symbol string) string {
 	}
 	name := ".goc.funcval." + symbol
 	g.functionDescriptors[symbol] = name
+	g.interns.note(internFunctionDescriptor, symbol, name)
 	g.mod.Data = append(g.mod.Data, &ir.Data{
 		Name:  name,
 		Align: 8,
@@ -18187,6 +18238,7 @@ func (g *gen) literalDataSymbol(prefix string, align int, values []int64) string
 	}
 	name := contentSymbolName(prefix, string(contents))
 	g.literalData[key] = name
+	g.interns.note(internLiteralData, key, name)
 	g.mod.Data = append(g.mod.Data, &ir.Data{
 		Name:  name,
 		Align: align,
@@ -18206,5 +18258,6 @@ func (g *gen) internSymbol(prefix, key string) (string, bool) {
 	}
 	name := contentSymbolName(prefix, key)
 	g.contentSymbols[full] = name
+	g.interns.note(internContentSymbol, full, name)
 	return name, true
 }

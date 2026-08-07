@@ -4,14 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/evanphx/cg12/arm64"
+	"github.com/evanphx/cg12/internal/cachefile"
 	"github.com/evanphx/cg12/opt"
 )
 
@@ -37,21 +36,16 @@ import (
 //
 // CG12_NOCACHE=1 bypasses the cache entirely, which is the same switch
 // goc/source_world.go already answers to.
+//
+// The mechanics -- where a key goes on disk, how it is written, how a tree is
+// hashed, and when an entry nobody has read in five days goes away -- are
+// internal/cachefile's, shared with the per-function cache. This file keeps only
+// what is specific to a pack: which clauses go into the key.
 
 // packCacheDirectory is where cached packs live. CG12_PACK_CACHE overrides it,
 // and an empty result means "do not cache".
 func packCacheDirectory() string {
-	if os.Getenv("CG12_NOCACHE") != "" {
-		return ""
-	}
-	if directory := os.Getenv("CG12_PACK_CACHE"); directory != "" {
-		return directory
-	}
-	base, err := os.UserCacheDir()
-	if err != nil {
-		return ""
-	}
-	return filepath.Join(base, "cg12", "runtime-pack")
+	return cachefile.Directory("CG12_PACK_CACHE", "runtime-pack")
 }
 
 // packCacheKey identifies a pack by everything that determines its contents.
@@ -75,62 +69,14 @@ func packCacheKey(version int, target string, optimize bool, packages []string, 
 	if err != nil {
 		return "", err
 	}
-	if err := hashFileInto(digest, compiler); err != nil {
+	if err := cachefile.HashFileInto(digest, compiler); err != nil {
 		return "", err
 	}
-	if err := hashTreeInto(digest, stdlibRoot); err != nil {
+	if err := cachefile.HashTreeInto(digest, stdlibRoot); err != nil {
 		return "", err
 	}
 	digest.Write([]byte(cToolchainIdentity()))
 	return hex.EncodeToString(digest.Sum(nil)), nil
-}
-
-func hashFileInto(digest io.Writer, path string) error {
-	file, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	fmt.Fprintf(digest, "file=%s;\n", filepath.Base(path))
-	_, err = io.Copy(digest, file)
-	return err
-}
-
-// hashTreeInto folds every regular file under root into digest, by relative path
-// and content.
-//
-// Content rather than modification time: a checkout, a rebase or a worktree copy
-// all change mtimes without changing what the compiler reads, and the whole point
-// of the cache is that those cases hit. The vendored tree is 73 MB and hashes in
-// under 0.2 s warm, which is nothing against the 154 s it can save.
-func hashTreeInto(digest io.Writer, root string) error {
-	var paths []string
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		if info.IsDir() || !info.Mode().IsRegular() {
-			return nil
-		}
-		paths = append(paths, path)
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	sort.Strings(paths)
-	for _, path := range paths {
-		relative, err := filepath.Rel(root, path)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(digest, "tree=%s;\n", relative)
-		if err := hashFileInto(digest, path); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // cToolchainIdentity is the version banner of the `cc` that will assemble the
@@ -153,54 +99,20 @@ func cToolchainIdentity() string {
 // one. A cache directory that cannot be read is not an error: the caller just
 // builds the pack.
 func readCachedPack(directory, key, destination string) bool {
-	if directory == "" {
+	contents, found := cachefile.Read(directory, key, ".gocrt")
+	if !found {
 		return false
 	}
-	contents, err := os.ReadFile(filepath.Join(directory, key+".gocrt"))
-	if err != nil {
-		return false
-	}
-	return writeFileAtomically(destination, contents) == nil
+	return cachefile.WriteFileAtomically(destination, contents) == nil
 }
 
 // writeCachedPack stores a pack under its key. A failure to store is not a build
 // failure -- the pack has already been written where the caller asked for it --
 // so it is reported for the caller to mention rather than returned as an error.
 func writeCachedPack(directory, key string, contents []byte) error {
-	if directory == "" {
-		return nil
-	}
-	if err := os.MkdirAll(directory, 0o755); err != nil {
-		return err
-	}
-	return writeFileAtomically(filepath.Join(directory, key+".gocrt"), contents)
-}
-
-// writeFileAtomically writes through a temporary file in the same directory and
-// renames it, so a reader never sees a half-written pack and two builds racing on
-// one key both end with a whole file.
-func writeFileAtomically(path string, contents []byte) error {
-	temporary, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
-	if err != nil {
-		return err
-	}
-	name := temporary.Name()
-	_, writeErr := temporary.Write(contents)
-	closeErr := temporary.Close()
-	if writeErr != nil || closeErr != nil {
-		os.Remove(name)
-		if writeErr != nil {
-			return writeErr
-		}
-		return closeErr
-	}
-	if err := os.Chmod(name, 0o644); err != nil {
-		os.Remove(name)
-		return err
-	}
-	if err := os.Rename(name, path); err != nil {
-		os.Remove(name)
-		return err
-	}
-	return nil
+	// The one moment a pack build is guaranteed to be slow anyway, and so the one
+	// moment it is worth walking the directory to evict. Trim rate-limits itself
+	// to once a day per directory.
+	cachefile.Trim(directory)
+	return cachefile.Write(directory, key, ".gocrt", contents)
 }
