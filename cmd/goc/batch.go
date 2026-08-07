@@ -15,7 +15,6 @@ import (
 
 	"github.com/evanphx/cg12/goc"
 	"github.com/evanphx/cg12/ir"
-	"github.com/evanphx/cg12/opt"
 )
 
 // batchRequest is one program to compile, written as one JSON object on one line
@@ -214,7 +213,7 @@ func compileBatchProgram(target goc.Target, packs *packSet, optimize bool, sourc
 		return err
 	}
 	if optimize {
-		opt.OptimizeModule(module)
+		goc.OptimizeModule(module, target)
 	}
 	return batchError(linkModule(target, module, output, &diagnostics), &diagnostics)
 }

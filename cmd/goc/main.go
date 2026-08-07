@@ -152,7 +152,7 @@ func main() {
 	}
 	check(err)
 	if *optimize {
-		opt.OptimizeModule(m)
+		goc.OptimizeModule(m, target)
 	}
 	finishMemProfile()
 	switch {
@@ -218,7 +218,7 @@ func testCommand(arguments []string) int {
 		return 1
 	}
 	if *optimize {
-		opt.OptimizeModule(module)
+		goc.OptimizeModule(module, target)
 	}
 
 	executable := *output
