@@ -5,9 +5,71 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"os"
 	"sort"
 	"strings"
 )
+
+// reportReachabilityCensus prints how much of the loaded source the
+// whole-program reachability walk is declining to lower.
+//
+// Separate compilation cannot keep that walk: which functions of a package it
+// selects depends on the program being compiled, so the package's lowered form
+// is not a well-defined artifact and cannot be cached. Dropping it means
+// lowering every function a package declares, and this measures what that
+// costs before the change is made rather than after.
+//
+// GOC_REACH_CENSUS=1 turns it on. It is a measurement, so it writes to stderr
+// and returns without touching anything.
+func reportReachabilityCensus(functions []functionDecl, units map[string]*sourceUnit) {
+	if os.Getenv("GOC_REACH_CENSUS") == "" {
+		return
+	}
+	lowered := map[string]int{}
+	for _, function := range functions {
+		if function.pkg != nil {
+			lowered[function.pkg.Path()]++
+		}
+	}
+	type row struct {
+		path              string
+		lowered, declared int
+	}
+	var rows []row
+	totalLowered, totalDeclared := 0, 0
+	for path, unit := range units {
+		declared := 0
+		for _, file := range unit.files {
+			for _, declaration := range file.Decls {
+				if function, ok := declaration.(*ast.FuncDecl); ok && function.Body != nil {
+					declared++
+				}
+			}
+		}
+		rows = append(rows, row{path: path, lowered: lowered[path], declared: declared})
+		totalLowered += lowered[path]
+		totalDeclared += declared
+	}
+	// Generic instantiations are lowered once per type argument set, so a
+	// package can lower more functions than it declares. Sorting by the count
+	// that would be added keeps those from displacing the real costs.
+	sort.Slice(rows, func(i, j int) bool {
+		left, right := rows[i].declared-rows[i].lowered, rows[j].declared-rows[j].lowered
+		if left != right {
+			return left > right
+		}
+		return rows[i].path < rows[j].path
+	})
+	fmt.Fprintf(os.Stderr, "reach census: %d lowered of %d declared across %d packages (%.1fx if every declaration is lowered)\n",
+		totalLowered, totalDeclared, len(rows), float64(totalDeclared)/float64(max(totalLowered, 1)))
+	for index, entry := range rows {
+		if index == 15 || entry.declared-entry.lowered <= 0 {
+			break
+		}
+		fmt.Fprintf(os.Stderr, "  %-28s %4d lowered %4d declared  +%d\n",
+			entry.path, entry.lowered, entry.declared, entry.declared-entry.lowered)
+	}
+}
 
 type functionDecl struct {
 	decl          *ast.FuncDecl
