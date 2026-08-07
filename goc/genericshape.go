@@ -116,6 +116,135 @@ func (s *shapeInterner) name(shape types.Type) string {
 	return name
 }
 
+// aggressiveShapeType is gc's shape rule with gc's own TODO carried out: every
+// pointer-shaped word collapses whatever the constraint, composite element
+// types are shaped recursively, and a struct keeps its layout but loses its
+// field names.
+//
+//	// TODO(mdempsky): It should be possible to do much more aggressive
+//	// shaping still; e.g., collapsing all pointer-shaped types into a
+//	// common type, collapsing scalars of the same size/alignment into a
+//	// common type, recursively shaping the element types of composite
+//	// types, and discarding struct field names and tags.
+//
+// It exists so the measurement can separate two very different conclusions:
+// "stenciling buys nothing here" and "gc's *particular*, deliberately shallow
+// stenciling buys nothing here, but a better rule would". Scalars are left
+// alone, because collapsing int with uint changes what the arithmetic in the
+// shared body means; [layoutShapeKey] is the bound that ignores even that.
+func aggressiveShapeType(argument types.Type, depth int) types.Type {
+	if depth > 12 {
+		return argument.Underlying()
+	}
+	underlying := canonicalAliasType(argument).Underlying()
+	switch value := underlying.(type) {
+	case *types.Pointer:
+		if isNotInHeapType(value.Elem()) {
+			return underlying
+		}
+		return types.NewPointer(types.Typ[types.Uint8])
+	case *types.Map, *types.Chan, *types.Signature:
+		// One word, scanned as a pointer. A shared body that needs the element
+		// type reads it out of the dictionary, exactly as it would for *T.
+		return types.NewPointer(types.Typ[types.Uint8])
+	case *types.Slice:
+		return types.NewSlice(aggressiveShapeType(value.Elem(), depth+1))
+	case *types.Array:
+		return types.NewArray(aggressiveShapeType(value.Elem(), depth+1), value.Len())
+	case *types.Struct:
+		fields := make([]*types.Var, value.NumFields())
+		for index := range fields {
+			field := value.Field(index)
+			fields[index] = types.NewField(0, nil, "_"+strconv.Itoa(index),
+				aggressiveShapeType(field.Type(), depth+1), false)
+		}
+		return types.NewStruct(fields, nil)
+	}
+	return underlying
+}
+
+// layoutShapeKey is the loosest shape a stencil could possibly use: two types
+// share it when they have the same size, the same alignment and the same
+// pointer/scalar map. This is the definition of "GC shape" in the plain sense
+// -- what the garbage collector and the frame layout can tell apart -- and it
+// is strictly coarser than anything gc implements. It is reported as an upper
+// bound on the prize, not as a proposal: a body shared across every type with
+// this key cannot do arithmetic that depends on signedness or float-ness, so
+// something would have to constrain which instantiations may use it.
+// It returns an "unsized:" key for a type argument that is still, or contains,
+// a type parameter. Those exist: the whole-program walk reaches a generic call
+// inside a generic body where the outer substitution did not resolve every
+// argument, and go/types' Sizeof panics on such a type by design ("Type
+// parameters lead to variable sizes/alignments", go/types/gcsizes.go:155). A
+// type parameter has no layout, so it has no layout shape either; the fallback
+// keeps it distinct rather than silently merging it with something sized.
+func layoutShapeKey(argument types.Type, sizes types.Sizes) (key string) {
+	argument = canonicalAliasType(argument)
+	defer func() {
+		if recover() != nil {
+			key = "unsized:" + typeIdentityString(argument)
+		}
+	}()
+	var offsets []int64
+	collectPointerOffsets(argument, 0, sizes, &offsets, 0)
+	var built strings.Builder
+	built.WriteString("size=")
+	built.WriteString(strconv.FormatInt(sizes.Sizeof(argument), 10))
+	built.WriteString(",align=")
+	built.WriteString(strconv.FormatInt(sizes.Alignof(argument), 10))
+	built.WriteString(",ptr=")
+	for index, offset := range offsets {
+		if index > 0 {
+			built.WriteByte(' ')
+		}
+		built.WriteString(strconv.FormatInt(offset, 10))
+	}
+	return built.String()
+}
+
+// collectPointerOffsets appends the byte offset of every pointer-bearing word
+// of valueType, relative to base. It is the pointer/scalar map the GC sees.
+func collectPointerOffsets(valueType types.Type, base int64, sizes types.Sizes, out *[]int64, depth int) {
+	if depth > 12 || valueType == nil {
+		return
+	}
+	word := sizes.Sizeof(types.Typ[types.Uintptr])
+	switch value := canonicalAliasType(valueType).Underlying().(type) {
+	case *types.Pointer, *types.Map, *types.Chan, *types.Signature:
+		*out = append(*out, base)
+	case *types.Basic:
+		switch value.Kind() {
+		case types.UnsafePointer:
+			*out = append(*out, base)
+		case types.String:
+			*out = append(*out, base) // {data *byte, len int}
+		}
+	case *types.Interface:
+		// Both words of an eface or iface are pointers as far as the GC is
+		// concerned: the first to a type descriptor or itab, the second to the
+		// value.
+		*out = append(*out, base, base+word)
+	case *types.Slice:
+		*out = append(*out, base) // {data *E, len, cap int}
+	case *types.Array:
+		if value.Len() <= 0 {
+			return
+		}
+		stride := sizes.Sizeof(value.Elem())
+		for index := int64(0); index < value.Len(); index++ {
+			collectPointerOffsets(value.Elem(), base+index*stride, sizes, out, depth+1)
+		}
+	case *types.Struct:
+		fields := make([]*types.Var, value.NumFields())
+		for index := range fields {
+			fields[index] = value.Field(index)
+		}
+		for index, offset := range sizes.Offsetsof(fields) {
+			collectPointerOffsets(fields[index].Type(), base+offset, sizes, out, depth+1)
+		}
+	}
+}
+
 // isNotInHeapType reports a go:notinheap type: one that embeds
 // internal/runtime/sys.NotInHeap, directly or through an embedded field. gc
 // excludes pointers to these from the `*uint8` collapse because such a pointer
@@ -195,6 +324,12 @@ type GenericInstantiation struct {
 	// Origin[shape,...]. Two instantiations with the same ShapeSymbol share one
 	// body under stenciling and are two bodies under monomorphisation.
 	ShapeSymbol string
+	// AggressiveShapeSymbol is the same under [aggressiveShapeType]: gc's rule
+	// with gc's own TODO carried out.
+	AggressiveShapeSymbol string
+	// LayoutShapeSymbol is the same under [layoutShapeKey]: the loosest shape a
+	// stencil could use, size and alignment and pointer map only.
+	LayoutShapeSymbol string
 	// BasicConstraint records, per type parameter, whether its constraint is a
 	// basic interface -- the precondition for the pointer collapse.
 	BasicConstraint []bool
@@ -228,13 +363,27 @@ type GenericInstantiationCensus struct {
 }
 
 // ShapeCount is the number of distinct shaped bodies the instantiations would
-// collapse to.
+// collapse to under gc's rule.
 func (c GenericInstantiationCensus) ShapeCount() int {
-	shapes := make(map[string]bool, len(c.Instantiations))
-	for _, instantiation := range c.Instantiations {
-		shapes[instantiation.ShapeSymbol] = true
+	return countDistinct(c.Instantiations, func(i GenericInstantiation) string { return i.ShapeSymbol })
+}
+
+// AggressiveShapeCount is ShapeCount under [aggressiveShapeType].
+func (c GenericInstantiationCensus) AggressiveShapeCount() int {
+	return countDistinct(c.Instantiations, func(i GenericInstantiation) string { return i.AggressiveShapeSymbol })
+}
+
+// LayoutShapeCount is ShapeCount under [layoutShapeKey].
+func (c GenericInstantiationCensus) LayoutShapeCount() int {
+	return countDistinct(c.Instantiations, func(i GenericInstantiation) string { return i.LayoutShapeSymbol })
+}
+
+func countDistinct(instantiations []GenericInstantiation, key func(GenericInstantiation) string) int {
+	seen := make(map[string]bool, len(instantiations))
+	for _, instantiation := range instantiations {
+		seen[key(instantiation)] = true
 	}
-	return len(shapes)
+	return len(seen)
 }
 
 // genericCensusSink is the installed recorder, nil in every compile that is not
@@ -261,7 +410,7 @@ func installGenericCensus() func() *GenericInstantiationCensus {
 
 // recordGenericInstantiations is the hook compile() calls once the
 // whole-program walk has finished. It is a no-op unless a census is installed.
-func recordGenericInstantiations(functions []functionDecl, rootPkg *types.Package) {
+func recordGenericInstantiations(functions []functionDecl, rootPkg *types.Package, sizes types.Sizes) {
 	genericCensusMu.Lock()
 	census := genericCensusSink
 	genericCensusMu.Unlock()
@@ -275,6 +424,7 @@ func recordGenericInstantiations(functions []functionDecl, rootPkg *types.Packag
 	census.RootPackage = rootPath
 	census.Reachable = len(functions)
 	shapes := &shapeInterner{}
+	aggressive := &shapeInterner{}
 	seen := make(map[string]bool)
 	for _, function := range functions {
 		object, _ := function.info.Defs[function.decl.Name].(*types.Func)
@@ -297,7 +447,7 @@ func recordGenericInstantiations(functions []functionDecl, rootPkg *types.Packag
 		}
 		seen[symbol] = true
 		census.Instantiations = append(census.Instantiations,
-			describeInstantiation(origin, function.typeArguments, symbol, rootPath, shapes))
+			describeInstantiation(origin, function.typeArguments, symbol, rootPath, shapes, aggressive, sizes))
 	}
 	sort.Slice(census.Instantiations, func(i, j int) bool {
 		return census.Instantiations[i].Symbol < census.Instantiations[j].Symbol
@@ -314,7 +464,7 @@ func isGenericFunctionObject(origin *types.Func) bool {
 	return signature.TypeParams().Len() > 0 || signature.RecvTypeParams().Len() > 0
 }
 
-func describeInstantiation(origin *types.Func, arguments []types.Type, symbol, rootPath string, shapes *shapeInterner) GenericInstantiation {
+func describeInstantiation(origin *types.Func, arguments []types.Type, symbol, rootPath string, shapes, aggressive *shapeInterner, sizes types.Sizes) GenericInstantiation {
 	basics := basicConstraints(origin)
 	instantiation := GenericInstantiation{
 		Symbol:          symbol,
@@ -324,17 +474,25 @@ func describeInstantiation(origin *types.Func, arguments []types.Type, symbol, r
 	if origin.Pkg() != nil {
 		instantiation.OriginPackage = origin.Pkg().Path()
 	}
-	var shaped strings.Builder
+	var shaped, shapedAggressive, shapedLayout strings.Builder
 	shaped.WriteString(instantiation.Origin)
+	shapedAggressive.WriteString(instantiation.Origin)
+	shapedLayout.WriteString(instantiation.Origin)
 	shaped.WriteByte('[')
+	shapedAggressive.WriteByte('[')
+	shapedLayout.WriteByte('[')
 	for index, argument := range arguments {
 		argument = canonicalAliasType(argument)
 		basic := index < len(basics) && basics[index]
 		shape := shapes.name(gcShapeType(argument, basic))
 		if index > 0 {
 			shaped.WriteByte(',')
+			shapedAggressive.WriteByte(',')
+			shapedLayout.WriteByte(',')
 		}
 		shaped.WriteString(shape)
+		shapedAggressive.WriteString(aggressive.name(aggressiveShapeType(argument, 0)))
+		shapedLayout.WriteString(layoutShapeKey(argument, sizes))
 		instantiation.TypeArguments = append(instantiation.TypeArguments, typeIdentityString(argument))
 		instantiation.Shapes = append(instantiation.Shapes, shape)
 		path := typeArgumentPackage(argument)
@@ -347,7 +505,11 @@ func describeInstantiation(origin *types.Func, arguments []types.Type, symbol, r
 		}
 	}
 	shaped.WriteByte(']')
+	shapedAggressive.WriteByte(']')
+	shapedLayout.WriteByte(']')
 	instantiation.ShapeSymbol = shaped.String()
+	instantiation.AggressiveShapeSymbol = shapedAggressive.String()
+	instantiation.LayoutShapeSymbol = shapedLayout.String()
 	return instantiation
 }
 

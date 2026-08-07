@@ -101,7 +101,12 @@ func TestGenericShapeCensus(t *testing.T) {
 	program := *genericShapeCensusProgram
 	require.NotEmpty(t, program, "-generic-shape-census-program is required")
 
-	source, err := os.ReadFile(filepath.Join("testdata", program))
+	path := program
+	if !strings.Contains(program, string(filepath.Separator)) {
+		path = filepath.Join("testdata", program)
+	}
+	program = filepath.Base(program)
+	source, err := os.ReadFile(path)
 	require.NoError(t, err)
 
 	finish := installGenericCensus()
@@ -125,11 +130,22 @@ func TestGenericShapeCensus(t *testing.T) {
 		// OptTotalNanos is the wall time of the whole pipeline, so the
 		// per-function figures can be read as a share of something.
 		OptTotalNanos int64 `json:"optTotalNanos"`
+		// Closure and GenericPackages are Stage 1's package-granular
+		// classification, carried here so the two accountings -- "functions in a
+		// package that declares a generic" and "functions that are an
+		// instantiation" -- can be compared on the same program.
+		Closure         []string `json:"closure"`
+		GenericPackages []string `json:"genericPackages"`
 	}{
 		Program:                    program,
 		GenericInstantiationCensus: census,
 	}
 	report.LoweredBeforeOpt = moduleFunctionNames(module)
+
+	eligibility, err := ClassifyPackageCacheEligibility(HostTarget(), program, source)
+	require.NoError(t, err)
+	report.Closure = eligibility.Closure
+	report.GenericPackages = eligibility.Generic
 
 	start := time.Now()
 	opt.OptimizeModule(module)
