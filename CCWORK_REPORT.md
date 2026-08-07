@@ -7979,3 +7979,72 @@ contribute no lowered declaration to this program, so the cache is never asked
 about them. Set aside those four and the invalidated set is **exactly** the
 reverse-reachable set: 23 for 23, in both directions. Invalidation is precise —
 neither over-broad nor under-broad — for the clause that governs it.
+
+### 4.1 And the literal form of the item: the corpus suite with the cache on
+
+`go test -count=1 -parallel 32 ./goc/` in a pristine worktree at the branch
+commit, with `CG12_FUNC_CACHE` pointing at one shared directory:
+
+```
+FAIL  github.com/evanphx/cg12/goc  448.931s   -- 178 failing tests
+  ... undefined reference to `_goc_type_time_Weekday_46a3982fefcf6797'
+      collect2: error: ld returned 1 exit status
+```
+
+The control is `make verify-full`'s corpus items with the cache off, which all
+passed (`corpus-parallel` 260 s, `corpus-sequential-0/1/2` 293/98/120 s). The
+failures are the same class as §3: undefined interned symbols at link time. This
+is section 3's defect seen through the suite rather than a new one — the suite
+compiles hundreds of different programs against one directory, which is exactly
+the configuration that does not work.
+
+## 6. Warm and cold compile time, and the achieved saving
+
+Three rounds each, separate processes, idle box, `scripts/function-cache-check.sh
+-rounds 3`. Every image identical in all twelve builds.
+
+```
+program                            -O   nocache             cold                warm
+fmt_sprintf.go                     -    6.63 6.61 6.53      6.85 6.89 6.88      5.18 5.17 5.18
+fmt_sprintf.go                     -O   16.67 16.67 16.62   16.88 16.88 16.80   14.98 14.89 14.95
+stdlib_http_tls_client_server.go   -    32.79 32.53 32.59   33.48 33.88 33.78   27.18 27.15 27.24
+stdlib_http_tls_client_server.go   -O   73.60 73.81 74.86   75.12 74.95 74.56   67.32 67.19 67.17
+```
+
+Medians, and the saving a warm compile achieves against the uncached control:
+
+| program | `-O` | nocache | cold | warm | **saving** | branch claimed | cost of filling |
+|---|---|---:|---:|---:|---:|---:|---:|
+| `fmt_sprintf` (small) | no | 6.61 s | 6.88 s | 5.18 s | **21.6%** | 21.8% | +4.1% |
+| `fmt_sprintf` (small) | yes | 16.67 s | 16.88 s | 14.95 s | **10.3%** | 9.7% | +1.3% |
+| `stdlib_http_tls_client_server` | no | 32.59 s | 33.78 s | 27.18 s | **16.6%** | 17.0% | +3.7% |
+| `stdlib_http_tls_client_server` | yes | 73.81 s | 74.95 s | 67.19 s | **9.0%** | 8.8% | +1.5% |
+
+**The branch's performance claims reproduce**, every one of them within 0.6
+percentage points, on a box this gate had exclusively. The cold-compile penalty
+— what it costs to fill a cache that was empty — is between 1.3% and 4.1%, and
+the branch's 3.5%/2.9% figures sit inside that range.
+
+The cache's own report for the small program's warm compile, which is the
+mechanism behind the number: `45/45 packages, 3080/3204 declarations, 3385
+functions, 90.3% of lowered IR, 0 files written; lowering 412 ms (replay 216 ms),
+key 28 ms` against a cold `lowering 1.966 s`. **79.0% of the lowering loop
+removed**, against the branch's 79.2%.
+
+## 7. Cache size on disk
+
+| what filled it | units | size |
+|---|---:|---:|
+| `fmt_sprintf.go` alone | 45 | 16 MB |
+| `stdlib_http_tls_client_server.go` alone | 159 | 57 MB |
+| the whole 408-program corpus, one shared directory | 164 | 55 MB |
+| the `goc` test suite, one shared directory | 164 | 52 MB |
+
+A corpus of 408 programs costs barely more than the single largest program in it,
+because the unit is a package and the corpus's packages are the same packages.
+The bound is the size of the standard library's lowered IR, not the number of
+programs — which is the property the design wanted. On a per-key basis it is a
+few tens of megabytes; five configurations of one program in §5 came to 203 units
+and about 70 MB, so a developer who exercises several `-O`/layout/pipeline
+combinations should expect a few hundred megabytes before eviction's five-day
+cutoff starts collecting.
