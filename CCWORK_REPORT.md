@@ -6738,7 +6738,12 @@ pins the shape model's clauses.
 
 Also added: `analysis/genericshape/probe_pointer_generics.go` (`//go:build
 ignore`, not a corpus case), `scripts/analyse_census.py`,
-`scripts/compare_gc_shapes.py`.
+`scripts/compare_gc_shapes.py`. `TestGenericShapeCensus` is listed in
+`goc/sequential_tests.txt` under a new `census` tag -- it installs a
+package-global sink, so a compile started by any other test in the process would
+land in its census -- and `goc/parallelpolicy_test.go` learned that tag.
+
+`make verify-fast`: **PASS**.
 
 Reproduce:
 
