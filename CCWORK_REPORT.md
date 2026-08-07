@@ -6268,7 +6268,286 @@ instantiations do not collapse.
 
 | program | instantiations goc lowers | distinct gc shapes | **ratio** |
 |---|---:|---:|---:|
-| `fmt_sprintf.go` | 100 | 100 | **1.00** |
-| `stdlib_http_tls_client_server.go` | 542 | 516 | **1.05** |
+| `fmt_sprintf.go` (small) | 100 | 100 | **1.00** |
+| `stdlib_http_tls_client_server.go` (http) | 542 | 516 | **1.05** |
+| `probe_pointer_generics.go` (best case, written for this) | 139 | 95 | **1.46** |
 
-_(sections below appended as each result lands)_
+And the instantiations are a small part of the compile to begin with, so even
+the collapse that does happen is worth almost nothing:
+
+| program | instantiations as share of lowered functions | of `.text` | of optimiser time | **what collapsing them saves** |
+|---|---:|---:|---:|---:|
+| small | 2.15% | 2.51% | 2.01% | **0.00% of `.text`, 0.00% of optimiser time** |
+| http | 4.13% | 6.00% | 4.58% | **0.24% of `.text`, 0.25% of optimiser time** |
+| probe | 5.06% | 8.54% | 7.43% | **3.40% of `.text`, 3.48% of optimiser time** |
+
+**Instantiations using a type declared in the importing program: 0 of 100 and 0
+of 542.** Neither corpus program has any. The probe -- written precisely to
+create them -- has 122 of 139, and even there the ratio only reaches 1.46.
+
+**Recommendation: do not build GC shape stenciling.** Stage B below says what it
+would cost anyway, because the question was asked, and because two of its
+findings are worth acting on for other reasons.
+
+## Contents
+
+- [The shape rule, and validating it against the real gc](#the-shape-rule-and-validating-it-against-the-real-gc)
+- [Stage A -- the full measurement](#stage-a----the-full-measurement)
+- [Why the ratio is 1](#why-the-ratio-is-1)
+- [The thing this measurement found instead](#the-thing-this-measurement-found-instead)
+- [Stage B -- what building it would take](#stage-b----what-building-it-would-take)
+- [What was added to the tree, and the guards](#what-was-added-to-the-tree-and-the-guards)
+
+## The shape rule, and validating it against the real gc
+
+The number above is only worth anything if the shape model is gc's shape model,
+so it was taken from the source and then checked against the compiler.
+
+The rule is `shapify`, go1.26.1 `src/cmd/compile/internal/noder/reader.go:895`.
+For a fully instantiated type argument it reduces to two clauses:
+
+- If the type parameter's constraint is a **basic interface** -- one whose type
+  set is its method set, `types2.Interface.IsMethodSet`, which is what the
+  writer records at `writer.go:938` -- and the argument is a pointer to
+  something that is not `go:notinheap`, the shape is `*uint8`. **This is the
+  only clause that collapses two unrelated types.**
+- Otherwise the shape is the argument's **underlying** type. A defined type
+  loses its name and its methods, so `type myThing struct{n int}` shapes to
+  `struct{n int}`.
+
+and the shape is named `go.shape.` + that type's `LinkString`.
+
+Two things gc deliberately does *not* do, and they are what bounds the answer.
+Shaping is **shallow**: only the top-level name is stripped, so `[]MyInt` and
+`[]YourInt` stay two shapes. And only `*T` collapses: maps, channels and funcs
+are one pointer word wide but are not `TPTR`, so `shapify` leaves them alone.
+gc's own TODO in that function lists both as future work.
+
+The model is `goc/genericshape.go`. Shape *identity* is `types.Identical`, not
+string equality, because go/types prints an unexported struct field as
+`struct{x int}` whatever package declared it while gc's `LinkString` writes
+`struct { main.x int }` -- keying on the string would merge shapes gc separates
+and overstate the collapse, the one error this measurement must not make.
+
+### The validation
+
+`analysis/genericshape/probe_pointer_generics.go` was compiled by both
+compilers. gc's shaped bodies were read out of `go tool nm`; goc's out of the
+census; and the two partitions compared per origin function
+(`scripts/compare_gc_shapes.py`).
+
+| origin | goc instantiations | model shapes | real gc shapes | agree |
+|---|---:|---:|---:|:--:|
+| `slices.breakPatternsCmpFunc` | 7 | 4 | 4 | yes |
+| `slices.choosePivotCmpFunc` | 7 | 4 | 4 | yes |
+| `slices.heapSortCmpFunc` | 7 | 4 | 4 | yes |
+| `slices.medianCmpFunc` | 7 | 4 | 4 | yes |
+| `slices.partialInsertionSortCmpFunc` | 7 | 4 | 4 | yes |
+| `slices.partitionCmpFunc` | 7 | 4 | 4 | yes |
+| `slices.partitionEqualCmpFunc` | 7 | 4 | 4 | yes |
+| `slices.pdqsortCmpFunc` | 7 | 4 | 4 | yes |
+| `slices.siftDownCmpFunc` | 7 | 4 | 4 | yes |
+
+**9 of 9 comparable origins agree**, including the partition and not just the
+count: four pointer element types collapse to `go.shape.*uint8` and the three
+value types stay apart, in both compilers. The other 19 origins goc
+instantiated, gc inlined, so they leave no symbol to compare -- `slices.SortFunc`
+and `slices.Clone` are small wrappers and gc inlines them into `main`.
+
+Separately, a hand-written probe confirmed each clause directly under `go
+build`: `Ident(&A{})`, `Ident(&B{})`, `Ident(&C{})` and `Ident(&D{})` produce
+one `main.Ident[go.shape.*uint8]`; `Ident(A{})` and `Ident(D{})` -- same layout,
+same field name -- share `main.Ident[go.shape.struct { main.x int }]` while
+`B{}`, whose field is named `y`, does not; `Cmp[T int|string]` gets one body per
+argument. And `Box[*A]`, `Box[*B]`, `Box[*C]` produce a single
+`main.(*Box[go.shape.*uint8]).Get` with three distinct dictionaries,
+`main..dict.Box[*main.A]` and siblings, which is the mechanism this whole
+question is about.
+
+## Stage A -- the full measurement
+
+Host: aarch64 Linux, 64 cores, go1.26.1. Every compile is `CompileExecutableFor`
+on the host target followed by `opt.OptimizeModule`, which is what `goc -O`
+does. `.text` is read from the linked binary's symbol table, mapped by
+`ir.LinkerSymbol`; 99.7--100.0% of `.text` matched a lowered function in all
+three programs, so nothing material is unattributed.
+
+### The three programs
+
+- **small** -- `goc/testdata/fmt_sprintf.go`, 10 lines, imports `fmt`.
+- **http** -- `goc/testdata/stdlib_http_tls_client_server.go`, the corpus's
+  heaviest program.
+- **probe** -- `analysis/genericshape/probe_pointer_generics.go`, written for
+  this job. Four program-local pointer types and three value types pushed
+  through `slices.SortFunc`/`IndexFunc`/`Clone`, `sync.OnceValue`,
+  `atomic.Pointer` and a program-declared `pick[T any]`. It exists because
+  neither corpus program declares a named type at all, so without it the
+  "instantiations over importing-program types" line would read 0 and leave it
+  ambiguous whether that is a fact about Go or a fact about two test files.
+
+### Instantiations and shapes
+
+| program | instantiations | distinct origins | **gc shapes** | **ratio** | aggressive shapes | layout shapes |
+|---|---:|---:|---:|---:|---:|---:|
+| small | 100 | 61 | **100** | **1.000** | 96 (1.04) | 90 (1.11) |
+| http | 542 | 196 | **516** | **1.050** | 419 (1.29) | 408 (1.33) |
+| probe | 139 | 28 | **95** | **1.463** | 68 (2.04) | 68 (2.04) |
+
+The last two columns are looser rules than gc's, reported so the conclusion
+separates "stenciling is worth nothing here" from "gc's particular, deliberately
+shallow stenciling is worth nothing here". *Aggressive* carries out gc's own
+TODO: every pointer-shaped word collapses whatever the constraint, composite
+element types shape recursively, struct field names are dropped. *Layout* is the
+loosest shape any stencil could use -- same size, same alignment, same
+pointer/scalar map, which is the brief's own definition -- and is an upper bound
+rather than a proposal, since a body shared that widely cannot do arithmetic
+that depends on signedness.
+
+### Share of the compile
+
+| program | lowered functions | instantiation bodies | +derived | `.text` share | optimiser share |
+|---|---:|---:|---:|---:|---:|
+| small | 5108 | 100 (1.96%) | 110 (**2.15%**) | 85 840 B of 3 421 324 (**2.51%**) | 0.204s of 10.2s (**2.01%**) |
+| http | 14 974 | 542 (3.62%) | 619 (**4.13%**) | 850 392 B of 14 161 576 (**6.00%**) | 2.01s of 43.8s (**4.58%**) |
+| probe | 2927 | 139 (4.75%) | 148 (**5.06%**) | 142 748 B of 1 671 808 (**8.54%**) | 0.391s of 5.3s (**7.43%**) |
+
+"Derived" is the closures, method values and go-wrappers lowering generates
+inside an instantiated body, named `<instantiation>.<suffix>`; they are part of
+the cost and would collapse with their parent. Optimiser time is per-function,
+measured at `opt.funcPass.runTracked` behind `GOC_OPT_FUNCTIME=1`. 70--75% of
+pipeline wall time is attributable to a named function that way; the rest is
+`Inline` and `DeadFuncElim`, which are module passes with nothing to attribute
+to. The instantiation shares above are of the *whole* pipeline, so they are the
+conservative reading; as a share of the attributable part they are 2.7%, 6.6%
+and 10.2%.
+
+### What collapsing would actually save
+
+A shape group of k instantiations becomes one body, so the saving is the group's
+cost minus the one body kept -- the largest, which is the conservative choice.
+
+| program | bodies removed | `.text` removed | optimiser time removed |
+|---|---:|---:|---:|
+| small | 0 of 100 (0.0%) | **0 B (0.00% of `.text`)** | **0.000s (0.00%)** |
+| http | 26 of 542 (4.8%) | **34 088 B (0.24% of `.text`)** | **0.110s (0.25%)** |
+| probe | 44 of 139 (31.7%) | **56 864 B (3.40% of `.text`)** | **0.184s (3.48%)** |
+
+Those are gross figures. Net, they are smaller still: a shaped body reaches its
+type arguments through a dictionary, so it is slower and usually larger than the
+monomorphic body it replaces, and the dictionaries themselves are new data. gc
+accepts that trade to bound *build* time across a whole module graph; goc, which
+already compiles the world in one process, would be paying the cost without that
+compensation.
+
+### Stdlib closure versus program code
+
+| program | population | instantiations | gc shapes | ratio |
+|---|---|---:|---:|---:|
+| small | stdlib generic, stdlib type | 100 | 100 | 1.00 |
+| http | stdlib generic, stdlib type | 542 | 516 | 1.05 |
+| probe | stdlib generic, stdlib type | 17 | 17 | 1.00 |
+| probe | stdlib generic, **program** type | 115 | 74 | 1.55 |
+| probe | program generic, program type | 7 | 4 | 1.75 |
+
+**Every instantiation in both corpus programs is a stdlib generic over a stdlib
+type.** `sort.Slice[main.myThing]` -- the case the brief names as the one that
+makes instantiation caching hard -- does not occur in either, because neither
+program declares a named type. It is not a rare case in Go generally, and the
+probe shows what happens when it does occur: 122 of 139 instantiations (87.8%)
+take a program type, 107 of those shape to a body that mentions no program type
+at all, and they still only collapse 115 -> 74.
+
+That 1.55 is the honest ceiling for the caching argument, and it is worth being
+precise about what it does and does not buy. Under shapes the *code* of
+`slices.pdqsortCmpFunc[go.shape.*uint8]` is program-independent and cacheable.
+But the instantiation still only exists because the program asked for it, so
+`slices` is still not a self-contained unit: the cache key still has to name
+which shapes this program demanded. Shapes shrink that set by a third in the
+best case measured. They do not remove it.
+
+### The pointer population
+
+| program | instantiations with a pointer argument | of which collapsed to `go.shape.*uint8` |
+|---|---:|---:|
+| small | 1 (1.0%) | 1 |
+| http | 170 (31.4%) | 58 |
+| probe | 71 (51.1%) | 71 |
+
+http is the interesting row: a third of its instantiations take a pointer, and
+**two thirds of those do not collapse**, because the pointer is not at a type
+parameter whose constraint is a basic interface. That is the `slices` idiom --
+`func Clone[S ~[]E, E any](s S) S` -- where `E` collapses to `*uint8` and `S`
+does not, so `slices.Clone[[]*http.Request, *http.Request]` and
+`slices.Clone[[]*tls.Conn, *tls.Conn]` remain two bodies. The census shows
+`slices.Clone` at 9 instantiations -> 8 shapes on http and 4 -> 4 on the probe,
+against `slices.pdqsortCmpFunc` -- one type parameter, `[E any]`, taking the
+element directly -- at 7 -> 4.
+
+## Why the ratio is 1
+
+Three structural reasons, all visible in the per-origin data.
+
+**1. Most origins are instantiated once.** small: 100 instantiations over 61
+origins, and 49 of those 61 appear exactly once. http: 542 over 196. An origin
+instantiated once cannot collapse with anything. This alone caps the achievable
+ratio well below the "every pointer type collapses" intuition.
+
+**2. The heaviest repeat origin in both corpus programs is `atomic.Pointer[T]`,
+which takes the pointee, not the pointer.** `sync/atomic.Pointer.Load` is 8
+instantiations on small and 18 on http; `internal/runtime/atomic.Pointer.Load`
+another 9. `Pointer[T any]` is declared over `T`, and every instantiation passes
+a distinct struct -- `runtime.g`, `runtime.m`, `net/http.Transport` -- so the
+shape is that struct's layout and nothing collapses. This is a real limitation
+of gc's shallow rule, not an artefact of the model; real gc emits one
+`atomic.Pointer[T]` method body per pointee type too.
+
+**3. The `~[]E` constraint idiom defeats the collapse at exactly the entry
+points a program calls.** `slices.SortFunc`, `slices.Clone`, `slices.IndexFunc`,
+`slices.Contains`, `slices.Index` are all `[S ~[]E, E any]`. `S`'s constraint has
+a type term, so it is not a basic interface, and `S`'s underlying type is the
+slice itself -- `[]*main.alpha` stays `[]*main.alpha`. Only the internal
+single-type-parameter helpers in `zsortanyfunc.go` collapse. On the probe:
+`slices.SortFunc` 7 -> 7, while `slices.pdqsortCmpFunc` 7 -> 4.
+
+The one place gc's rule works as advertised is `sync.OnceValue[T any]`: 6 -> 3 on
+http, 3 -> 1 on the probe.
+
+## The thing this measurement found instead
+
+Stage 1 recorded that packages declaring generics account for 52--89% of lowered
+functions, and concluded "generic instantiation is not a detail to defer; it is
+the larger half of the problem". The census re-measures both accountings on the
+same programs against the same denominator.
+
+| program | lowered functions | closure packages | declaring a generic | functions in those packages | functions that **are** an instantiation |
+|---|---:|---:|---:|---:|---:|
+| small | 5108 | 60 | 19 (32%) | 3868 (**75.7%**) | 110 (**2.15%**) |
+| http | 14 974 | 185 | 40 (22%) | 7289 (**48.7%**) | 619 (**4.13%**) |
+| probe | 2927 | 36 | 12 (33%) | 2614 (**89.3%**) | 148 (**5.06%**) |
+
+**The gap is 73.6% of lowered functions on small and 44.5% on http: ordinary,
+non-generic functions excluded from a per-package cache only because some other
+function in the same package is generic.** `runtime` is the extreme case -- one
+package, a third of the module, excluded because it declares
+`internal/runtime/atomic.Pointer[T]` among several thousand ordinary functions.
+
+So the 52--89% is an artefact of package-granular accounting, not a measurement
+of how much of a compile generic instantiation costs. The importer-dependent
+population is 2--5%.
+
+That reframes the next step. Shapes would attack the 2--5% and, per the numbers
+above, recover a quarter of a percent of it. Making the cache unit finer than a
+package -- cache the package's non-generic functions, treat each instantiation as
+its own unit keyed on origin plus type arguments -- attacks the other 44--74%,
+needs no new type theory, no dictionaries and no ABI change, and can key an
+instantiation on exactly the facts `genericInstanceSymbol` already writes into
+its name. **That is where the caching work should go, and it does not need
+shapes first.**
+
+Two honest caveats on that. Stage 1's byte-identity proof covered *lowering*; a
+per-package unit also has to survive the optimiser, and the inliner can splice
+an instantiated body into a non-generic caller in the same package, which makes
+that caller's final form depend on the program again. That boundary needs the
+same treatment `opt.Session.Freeze` and `InlineDeps` already give the memoised
+compile, and it needs proving, not assuming. And the 2--5% is a floor for what
+a cache must recompute, not a claim that instantiations are cheap to key.
