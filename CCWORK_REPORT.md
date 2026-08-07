@@ -8055,3 +8055,181 @@ The warm row is worth keeping for §4: it independently confirms the branch's §
 figures for `fmt_sprintf` — 3034 of 3204 declarations replayed and 84.2% of
 lowered IR — and its reason list contains `lowering used a whole-program fact
 x16`, the sixteen refusals the branch attributes the `fmt_sprintf` regression to.
+
+## 4. The stated cost, confirmed independently
+
+Measured on the idle box, `goc` alone, nothing else running (load average 4.5 at
+the start). Best of 3 repeats, except the two http/tls `-O` cells (2 and 1
+repeats — a single build there is 70–75 s). All figures are wall-clock seconds
+of the whole `goc` invocation, not of a stage.
+
+`cold` is a **fresh empty directory before every repeat**. That correction
+matters: a first attempt used one directory for three repeats and reported
+`fmt_sprintf` cold at 5.46 s, which is not a cold number at all — repeats two and
+three were warm runs wearing a cold label. Re-measured properly, a cold fill is
+*slower* than no cache, which is what it should be.
+
+| program | arm | `CG12_NOCACHE=1` | default path | cold (fill) | warm | warm vs nocache |
+|---|---|---:|---:|---:|---:|---:|
+| `fmt_sprintf` | no `-O` | 6.70 | 6.68 | 6.96 | **5.39** | **−19.6%** |
+| `fmt_sprintf` | `-O` | 16.88 | 16.79 | 17.17 | **15.43** | **−8.6%** |
+| `stdlib_http_tls_client_server` | no `-O` | 33.44 | 33.16 | 33.75 | **30.21** | **−9.7%** |
+| `stdlib_http_tls_client_server` | `-O` | 75.18 | 75.00 | 75.73 | **70.39** | **−6.4%** |
+
+Three things this establishes that the branch's table does not say.
+
+**The reference is honest.** `CG12_NOCACHE=1` also switches off the shared source
+world and the pack cache, so it was worth checking that the branch is not quoting
+its saving against a handicapped baseline. It is not: a build with **no cache
+environment set at all** — the default path — comes out within 0.4% of
+`CG12_NOCACHE=1` on all four cells (6.68 vs 6.70, 16.79 vs 16.88, 33.16 vs 33.44,
+75.00 vs 75.18). The source world is process-global and a one-shot `goc` builds it
+once either way.
+
+**Filling costs, it does not save.** A true cold fill is 1–4% *slower* than no
+cache (6.96 vs 6.70; 33.75 vs 33.44). The saving is entirely on the second and
+later compiles.
+
+**The `-O` arm halves the saving, and the branch does not quote it.** `-O` adds a
+large constant the cache cannot touch — the optimiser runs over the assembled
+module after the merge — so `fmt_sprintf` goes from −19.6% to −8.6% and http/tls
+from −9.7% to −6.4%. Nothing is wrong with that; it is simply not in §7's table,
+which quotes the non-`-O` arm only.
+
+### Against the branch's numbers
+
+| | branch says | this gate measures |
+|---|---|---|
+| `fmt_sprintf` warm vs nocache, no `-O` | −19.7% | **−19.6%** |
+| http/tls warm vs nocache, no `-O` | −7.9% | **−9.7%** |
+| `fmt_sprintf` declarations replayed | 3034 / 3204 | **3034 / 3204** |
+| `fmt_sprintf` share of lowered IR | 84.2% | **84.2%** |
+| http/tls declarations replayed | 6976 / 8102 | **6976 / 8102** |
+| http/tls share of lowered IR | 68.8% | **68.8%** |
+| http/tls artifact definitions recorded | 10173 | **10173** |
+
+Every structural number reproduces exactly. `fmt_sprintf`'s percentage
+reproduces. http/tls comes out **better** than the branch reports (−9.7% against
+−7.9%), which is a difference in the branch's favour and most likely a quieter
+box; either way the qualitative claim — http/tls lost more than half of the 17.3%
+it had — holds.
+
+### Does the attribution hold? Partly, and it is overstated.
+
+The branch says the drop is "attributed almost entirely to the
+`materialiseInterfaceImplementations` refusal". The cache's own reason counters
+give the split, and it is not that lopsided:
+
+| program | refused for a whole-program fact | refused for a missing artifact definition | distinct artifacts missing |
+|---|---:|---:|---:|
+| `fmt_sprintf` | **16** | **66** | 28 |
+| http/tls | **140** | **499** | 199 |
+
+Both refusal classes are new with this change and they are disjoint in `record`
+(the whole-program test runs first and returns). **By declaration count the
+missing-definition refusal is 3.6× the whole-program one on http/tls and 4.1× on
+`fmt_sprintf`** — the opposite of "almost entirely".
+
+The branch's claim is defensible only in the weight-per-declaration reading it
+gives for it: "they are the expensive ones, because a declaration that converts
+to a non-empty interface is usually a declaration that does a lot else besides."
+That is plausible and consistent with the arithmetic — 140 declarations are 1.7%
+of http/tls's 8102 while the IR share fell 12.3 points, so whatever is being lost
+is far heavier than the average declaration — but **the branch does not measure
+it, and neither can this gate without changing compiler code**, which the brief
+forbids. What is measured here is that the *other* refusal class is numerically
+much larger and is not mentioned in §7 at all.
+
+**Verdict on item 4: the saving is confirmed and is in fact slightly better than
+stated; the attribution to `materialiseInterfaceImplementations` alone is not
+supported by the counts and should be stated as "the two refusals together",
+with the whole-program one carrying the heavier declarations.** The
+missing-definition refusal — 499 declarations on http/tls, for 199 artifacts
+minted before the journal existed — is a second, unquoted line item in the bill,
+and it is the one the branch's §8 says is "six declarations of 3204 on
+`fmt_sprintf`". That is the count for artifacts minted *inside a refused
+declaration*; the full count of declarations refused for a missing definition is
+66 on `fmt_sprintf` and 499 on http/tls.
+
+## 6. Verdict
+
+### What was established
+
+- **`make verify-full`: 23 of 24 items PASS.** The one failure,
+  `TestCheckedRuntimeCoverageBaselineDenominator`, was checked directly against
+  `main` at `4ad59d2`, built and run from the same absolute path, and fails there
+  with the identical message. It is not this branch's.
+- **The cross-program property holds, re-established independently.** 406 of 406
+  corpus programs link and are byte-identical to their own `CG12_NOCACHE=1` image
+  against a cache filled by a different program, from **each of three fillers** —
+  1218 of 1218 subjects. Two of the fillers (`stdlib_netpoll_tcp_echo`,
+  `stdlib_regexp_find_replace`) share only 9 packages above the 20-package floor
+  every Go program has. The previous gate's 357 link failures of 408 are zero.
+- **No silent image difference was found.** 552 of 552 ordered pairs of a
+  19-program adversarial set plus 3 corpus heavyweights are byte-identical to
+  their own cold builds — including the shapes the brief named (a package used
+  only through an interface, the same artifact minted from different
+  declarations, a type the filler declared but never instantiated) and two
+  programs written specifically to exploit a divergence this gate had already
+  proved was in the stored units. The comparison includes DWARF, so the module's
+  file table and its order are inside it.
+- **The previous gate's arms are intact**: 812 of 812 default-path builds
+  byte-identical to `main` with both compilers built from one absolute path;
+  72 of 72 under 24 concurrent processes sharing one directory; 22 of 45 packages
+  hit and 23 files rewritten on a one-line leaf edit.
+- **The saving is real and slightly better than stated**: `fmt_sprintf` −19.6%
+  (claimed −19.7%), http/tls −9.7% (claimed −7.9%), with every structural number
+  in §7 reproducing exactly.
+
+### What this gate found that the branch does not say
+
+**Two more program-dependent values are carried in a declaration's delta.** The
+branch names two refusals and claims "a unit is self-sufficient". A mechanical
+comparison of caches filled by different programs finds 25–67 mismatching deltas
+per filler pair, all of exactly two kinds:
+
+1. **`NewFiles`** — which source files this declaration was the first *in the
+   program* to touch. The module's file table goes into DWARF, so its order is in
+   the image; a partial record can put a file in the wrong place. Latent.
+2. **The pointer key journalled with a runtime type** — `runtimeTypeKey`
+   canonicalises a signature's parameter names only when the top level *is* a
+   signature, so the `*func(...)` key it stores keeps whichever spelling the
+   minting declaration had. A replayed spelling **overwrites the program's own**
+   in `pointerTypeKeys`, and `populateRuntimePointerTypes` then silently skips
+   the descriptor's `PtrToThis` when the lookup misses. Latent, and the same
+   shape as the `internTypeEqualTarget` defect the previous stage found.
+
+Neither turned into a wrong binary in 1218 corpus subjects, 552 adversarial
+pairs, 812 default-path builds or 72 concurrent builds. Both are real, both are
+unnamed in `BUILD_CACHE.md`, and (2) is a wrong *value* rather than a wrong
+*order*, with a one-line repair in `runtimeTypeKey` — canonicalise through a
+pointer, as `runtimeTypeName` already does at the top level.
+
+**The §7 attribution is overstated.** The drop is attributed "almost entirely" to
+the `materialiseInterfaceImplementations` refusal, but by declaration count the
+*other* new refusal — a reference whose artifact has no carried definition — is
+3.6× larger on http/tls (499 against 140) and 4.1× larger on `fmt_sprintf`
+(66 against 16). The branch's reading is defensible only per-declaration-weight,
+which it asserts and does not measure.
+
+### Not covered
+
+- The `-O` cross-program arm at corpus scale. This gate ran the corpus
+  cross-program arms on the non-`-O` compile only, as the branch did; the `-O`
+  arm is covered by 552 adversarial pairs and 812 default-path builds, not by
+  406 × 2.
+- Whether either newly found leak can be driven to a wrong image by *some*
+  program. Two targeted programs were written for leak 4 and did not do it.
+  A proof either way needs the compiler instrumented, which the brief forbids.
+- `bench-perf` / `bench-crypto`, which no tier schedules.
+
+### SAFE TO MERGE TO MAIN
+
+The property the branch claims is the property this gate measured, from fillers
+the branch did not use and by a harness written independently of the branch's.
+The two leaks found are real and should be recorded and fixed, but neither is a
+regression this change introduces relative to `main` — the cache is off by
+default, the default path is 812-of-812 identical to `main`, and every arm that
+exercises the cache is byte-clean. The `runtimeTypeKey` pointer-key bug in
+particular predates this branch; what the branch does is give it a way to travel
+between programs, and that path is measurably not taken today.
