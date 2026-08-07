@@ -7687,3 +7687,48 @@ different path, so the observed symptom is "no stored unit" for every package
 and `Valid`'s clause never runs. That is the stronger of the two behaviours --
 the entry is not merely refused, it is not even found -- but a reader of the
 statistics should expect the wrong reason string.
+
+## 1. `make verify-full`
+
+**FAIL in 2875 s (47m55s), one item of twenty-four — and the failure is on `main`
+too.**
+
+```
+ITEM                      SECONDS  RESULT      ITEM                    SECONDS  RESULT
+build                           0  PASS        matrix-default-0             78  PASS
+control-corpus                527  PASS        matrix-default-1             72  PASS
+control-matrix-default        152  PASS        matrix-default-2             39  PASS
+control-matrix-opt            198  PASS        matrix-default-3             46  PASS
+corpus-parallel               260  PASS        matrix-opt-0                131  PASS
+corpus-sequential-0           293  PASS        matrix-opt-1                124  PASS
+corpus-sequential-1            98  PASS        matrix-opt-2                119  PASS
+corpus-sequential-2           120  PASS        matrix-opt-3                 45  PASS
+determinism                   416  PASS        reducers                    107  PASS
+determinism-opt               885  PASS        ruby                         51  PASS
+gofmt                           1  PASS        unit                         12  PASS
+vet                             4  PASS        goc-cmd                     373  FAIL
+```
+
+The failure:
+
+```
+--- FAIL: TestCheckedRuntimeCoverageBaselineDenominator (0.03s)
+    capability "gc-invariants/promoted-local-root" is in neither the accepted
+    baseline nor testdata/runtime_coverage_baseline_pending.json; record why the
+    baseline does not cover it, or rerun and accept a new baseline
+```
+
+Run again on `main` (`4ad59d2`) in a separate worktree, the same test fails with
+the same message on the same capability. **Pre-existing; not this branch.** The
+branch touches no coverage baseline, no capability list and nothing in
+`cmd/goc/testdata`. It is a bookkeeping item somebody owes `main`: a capability
+exists that the accepted coverage baseline does not mention and the pending file
+does not excuse.
+
+Everything the branch could have broken passed, including the two the fast tier
+cannot run and the branch therefore did not: the full corpus determinism sweep on
+both arms (`determinism` 416 s, `determinism-opt` 885 s, 406 programs x 4
+compiles each, all identical), the goc driver end-to-end suite apart from the
+failure above, the Ruby/C differential, all four capability-matrix shards on both
+arms, and the `main` controls, which had to be measured from scratch (`no record
+for key 4c3d72451d73`) and agreed.
