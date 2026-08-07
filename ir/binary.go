@@ -746,8 +746,8 @@ func (e *enc) encInstr(in *Instr, blockRef func(*Block)) {
 	}
 	e.typeRef(in.RetAgg)
 	e.boolean(in.RetValues)
-	e.ref(in.StackResult)
-	e.iv(in.StackResultOffset)
+	e.ref(in.StackResult())
+	e.iv(in.StackResultOffset())
 	e.srcPos(in.Pos)
 	e.boolean(in.Tail)
 	e.boolean(in.Volatile)
@@ -1196,8 +1196,9 @@ func (d *dec) decInstr(blockRef func() *Block) Instr {
 	}
 	in.RetAgg = d.typeRef()
 	in.RetValues = d.boolean()
-	in.StackResult = d.ref()
-	in.StackResultOffset = d.iv()
+	if slot, offset := d.ref(), d.iv(); !slot.IsNone() || offset != 0 {
+		in.SetStackResult(slot, offset)
+	}
 	in.Pos = d.srcPos()
 	in.Tail = d.boolean()
 	in.Volatile = d.boolean()

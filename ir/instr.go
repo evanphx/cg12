@@ -94,11 +94,8 @@ type Instr struct {
 	//
 	// Declared with the other single-byte fields at the top of the struct.
 
-	// StackResult identifies a local aggregate slot that receives an
-	// ABIInternal stack-assigned result. The emitter copies RetAgg from the
-	// outgoing call frame at StackResultOffset before releasing that frame.
-	StackResult       Ref
-	StackResultOffset int64
+	// StackResult and StackResultOffset moved to InstrExtra: only arm64 sets
+	// them, and only for a Go-ABI call with a stack-assigned aggregate result.
 
 	// Pos is the source position this instruction was generated from, or the
 	// zero SrcPos when unknown. Backends emit it as debug-line info.

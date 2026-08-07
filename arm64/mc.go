@@ -2754,7 +2754,7 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 		m.materializeFrameAllocation(a)
 	}
 	m.emitCall(call)
-	if call.RetAgg != nil && !call.StackResult.IsNone() {
+	if call.RetAgg != nil && !call.StackResult().IsNone() {
 		m.emitStackAggregateResult(call)
 	}
 	if dynamicAAPCSFrame {
@@ -2789,12 +2789,12 @@ func (m *mc) emitStackAggregateArgument(argument *ir.Instr, goInternal bool) {
 }
 
 func (m *mc) emitStackAggregateResult(call *ir.Instr) {
-	destination := m.src(call.StackResult, 0, 8)
+	destination := m.src(call.StackResult(), 0, 8)
 	if destination != mcGP2 {
 		m.emit(a64.AddImm(true, mcGP2, destination, 0))
 	}
 	size, _ := call.RetAgg.Layout()
-	m.emitStackAggregateCopy(mcGP2, 0, mcSP, goStackLinkSize+int(call.StackResultOffset), size)
+	m.emitStackAggregateCopy(mcGP2, 0, mcSP, goStackLinkSize+int(call.StackResultOffset()), size)
 }
 
 func (m *mc) emitStackAggregateCopy(destination a64.Reg, destinationOffset int, source a64.Reg, sourceOffset int, size int) {

@@ -1324,8 +1324,7 @@ func lowerCalls(f *ir.Func, conventions calleeConventions) error {
 			}
 			if !stackResult.IsNone() {
 				loweredCall.RetAgg = in.RetAgg
-				loweredCall.StackResult = stackResult
-				loweredCall.StackResultOffset = int64(stackResultOffset)
+				loweredCall.SetStackResult(stackResult, int64(stackResultOffset))
 			}
 			out = append(out, loweredCall)
 			out = append(out, post...)
