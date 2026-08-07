@@ -1,0 +1,88 @@
+package main
+
+// gateclosure prints the per-package identity of a program's compile closure,
+// and — given a package path — the set of packages that can reach it through
+// imports. It is the stage-2 gate's independent answer to "which packages should
+// a warm compile have had to re-lower after this edit?", computed from the
+// import graph rather than from the cache's own report.
+
+import (
+	"flag"
+	"fmt"
+	"os"
+	"sort"
+
+	"github.com/evanphx/cg12/goc"
+)
+
+func main() {
+	reaches := flag.String("reaches", "", "print the packages that transitively import this one")
+	flag.Parse()
+	if flag.NArg() != 1 {
+		fmt.Fprintln(os.Stderr, "usage: gateclosure [-reaches pkg] program.go")
+		os.Exit(2)
+	}
+	source, err := os.ReadFile(flag.Arg(0))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	identity, err := goc.ProgramCompileIdentity(goc.TargetARM64, false, flag.Arg(0), source)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	fromSource := 0
+	paths := make([]string, 0, len(identity.Packages))
+	for path, pkg := range identity.Packages {
+		paths = append(paths, path)
+		if pkg.FromSource {
+			fromSource++
+		}
+	}
+	sort.Strings(paths)
+	fmt.Printf("packages=%d fromSource=%d\n", len(paths), fromSource)
+
+	if *reaches == "" {
+		for _, path := range paths {
+			pkg := identity.Packages[path]
+			fmt.Printf("%s source=%s transitive=%s fromSource=%v imports=%d\n",
+				path, pkg.Source, pkg.Transitive, pkg.FromSource, len(pkg.Imports))
+		}
+		return
+	}
+
+	// Reverse reachability: everything with a path of imports to -reaches.
+	importers := map[string][]string{}
+	for path, pkg := range identity.Packages {
+		for _, imported := range pkg.Imports {
+			importers[imported] = append(importers[imported], path)
+		}
+	}
+	seen := map[string]bool{*reaches: true}
+	queue := []string{*reaches}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		for _, importer := range importers[current] {
+			if !seen[importer] {
+				seen[importer] = true
+				queue = append(queue, importer)
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	sourceReachers := 0
+	for path := range seen {
+		out = append(out, path)
+		if identity.Packages[path].FromSource {
+			sourceReachers++
+		}
+	}
+	sort.Strings(out)
+	fmt.Printf("reaches=%s count=%d fromSource=%d\n", *reaches, len(out), sourceReachers)
+	for _, path := range out {
+		fmt.Printf("  %s fromSource=%v\n", path, identity.Packages[path].FromSource)
+	}
+}

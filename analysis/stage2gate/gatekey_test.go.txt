@@ -1,0 +1,249 @@
+package goc
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/evanphx/cg12/internal/cachefile"
+)
+
+// This file is the stage-2 gate's clause-by-clause check of the per-package
+// cache key. It is not part of the branch under test; it is written by the gate
+// so that "each clause invalidates" is a run rather than a reading.
+//
+// Two properties per clause, because either one alone is insufficient:
+//
+//   - packageCacheKeyDigest must move, so the two keys never name one file.
+//   - FunctionCacheEntry.Valid must refuse and name the clause, so a hash
+//     collision or a hand-placed file is still refused.
+
+func gateIdentity() *CompileIdentity {
+	return &CompileIdentity{
+		Target:     "arm64",
+		Optimize:   false,
+		TextLayout: "layout-v1",
+		Pipeline:   "pipeline-v1",
+		Compiler:   CacheDigest{1, 2, 3},
+		Packages: map[string]PackageIdentity{
+			"example/leaf": {
+				Path:       "example/leaf",
+				Source:     CacheDigest{10},
+				Transitive: CacheDigest{11},
+				FromSource: true,
+			},
+			"example/mid": {
+				Path:       "example/mid",
+				Source:     CacheDigest{20},
+				Transitive: CacheDigest{21},
+				Imports:    []string{"example/leaf"},
+				FromSource: true,
+			},
+		},
+	}
+}
+
+func gateEntry(t *testing.T, identity *CompileIdentity) *FunctionCacheEntry {
+	t.Helper()
+	entry, err := NewFunctionCacheEntry("example/mid.F", "example/mid", identity)
+	if err != nil {
+		t.Fatalf("NewFunctionCacheEntry: %v", err)
+	}
+	return entry
+}
+
+func TestGateEveryKeyClauseInvalidates(t *testing.T) {
+	t.Parallel()
+	base := gateIdentity()
+	baseEntry := gateEntry(t, base)
+	baseDigest := packageCacheKeyDigest(baseEntry)
+
+	if valid, reason := baseEntry.Valid(base); !valid {
+		t.Fatalf("unmoved key is invalid: %s", reason)
+	}
+
+	cases := []struct {
+		clause string
+		// move mutates the compile's identity; the entry stays as written.
+		move func(*CompileIdentity)
+		want string
+	}{
+		{"target", func(i *CompileIdentity) { i.Target = "amd64" }, "target moved"},
+		{"-O", func(i *CompileIdentity) { i.Optimize = true }, "-O moved"},
+		{"text layout", func(i *CompileIdentity) { i.TextLayout = "layout-v2" }, "text layout policy moved"},
+		{"pipeline", func(i *CompileIdentity) { i.Pipeline = "pipeline-v2" }, "optimiser pipeline moved"},
+		{"compiler binary", func(i *CompileIdentity) { i.Compiler = CacheDigest{9, 9, 9} }, "compiler binary moved"},
+		{"package source", func(i *CompileIdentity) {
+			p := i.Packages["example/mid"]
+			p.Source = CacheDigest{99}
+			i.Packages["example/mid"] = p
+		}, "package example/mid source moved"},
+		{"dependency source", func(i *CompileIdentity) {
+			p := i.Packages["example/leaf"]
+			p.Transitive = CacheDigest{99}
+			i.Packages["example/leaf"] = p
+		}, "dependency example/leaf moved"},
+		{"import set", func(i *CompileIdentity) {
+			p := i.Packages["example/mid"]
+			p.Imports = nil
+			i.Packages["example/mid"] = p
+		}, "package example/mid changed its import set"},
+		{"dependency left", func(i *CompileIdentity) {
+			p := i.Packages["example/mid"]
+			p.Imports = []string{"example/gone"}
+			i.Packages["example/mid"] = p
+			i.Packages["example/gone"] = PackageIdentity{Path: "example/gone"}
+		}, "package example/mid changed its import set"},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.clause, func(t *testing.T) {
+			moved := gateIdentity()
+			testCase.move(moved)
+
+			valid, reason := baseEntry.Valid(moved)
+			if valid {
+				t.Fatalf("%s moved and Valid still accepted the entry", testCase.clause)
+			}
+			if reason != testCase.want {
+				t.Fatalf("%s moved: reason %q, want %q", testCase.clause, reason, testCase.want)
+			}
+
+			// And the file it would be stored under has to move too, or a stale
+			// entry and a fresh one share a path and the last writer wins.
+			movedEntry, err := NewFunctionCacheEntry("example/mid.F", "example/mid", moved)
+			if err != nil {
+				// A clause that removes the package from the compile has no entry to
+				// write, which is a miss by construction.
+				return
+			}
+			if digest := packageCacheKeyDigest(movedEntry); digest == baseDigest {
+				t.Fatalf("%s moved and the key digest did not: %s", testCase.clause, digest)
+			}
+		})
+	}
+}
+
+// TestGateUnitVersionAndPackagePathAreInTheKey covers the two clauses that are
+// not reachable by moving the compile: the unit format version and the package
+// path.
+func TestGateUnitVersionAndPackagePathAreInTheKey(t *testing.T) {
+	t.Parallel()
+	identity := gateIdentity()
+	entry := gateEntry(t, identity)
+	base := packageCacheKeyDigest(entry)
+
+	bumped := *entry
+	bumped.UnitVersion = entry.UnitVersion + 1
+	if packageCacheKeyDigest(&bumped) == base {
+		t.Fatal("key version is not in the key digest")
+	}
+	if valid, reason := bumped.Valid(identity); valid || reason != "unit format version moved" {
+		t.Fatalf("bumped unit version: valid=%v reason=%q", valid, reason)
+	}
+
+	renamed := *entry
+	renamed.Package = "example/other"
+	if packageCacheKeyDigest(&renamed) == base {
+		t.Fatal("package path is not in the key digest")
+	}
+
+	// The file-layout version is a constant, so it is checked where it is
+	// enforced: a unit written under a different one must not decode.
+	unit := newPackageCacheUnit(entry)
+	encoded := unit.encode()
+	encoded[len(packageUnitMagic)] = byte(packageUnitVersion + 1)
+	if _, err := decodePackageCacheUnit(encoded); err == nil {
+		t.Fatal("a unit with a foreign layout version decoded")
+	}
+}
+
+// TestGateHalfWrittenUnitIsNeverReadable checks the three ways a partial or
+// damaged file can present itself.
+func TestGateHalfWrittenUnitIsNeverReadable(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	identity := gateIdentity()
+	entry := gateEntry(t, identity)
+	unit := newPackageCacheUnit(entry)
+	unit.add(&cachedDeclaration{Decl: "a.go:1:1", Symbol: "example/mid.F", Unit: []byte{}})
+
+	if err := writePackageCacheUnit(directory, unit); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	path := cachefile.Path(directory, packageCacheKeyDigest(entry), ".gocfn")
+	whole, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if readPackageCacheUnit(directory, entry) == nil {
+		t.Fatal("a whole unit did not read back")
+	}
+
+	// 1. Truncated at every length: never a decode.
+	for cut := 0; cut < len(whole); cut++ {
+		if err := os.WriteFile(path, whole[:cut], 0o644); err != nil {
+			t.Fatalf("truncate: %v", err)
+		}
+		if got := readPackageCacheUnit(directory, entry); got != nil {
+			t.Fatalf("a unit truncated to %d of %d bytes decoded", cut, len(whole))
+		}
+	}
+
+	// 2. One flipped bit anywhere in the body: never a decode.
+	for offset := len(packageUnitMagic) + 1 + 32; offset < len(whole); offset++ {
+		damaged := append([]byte(nil), whole...)
+		damaged[offset] ^= 0x01
+		if err := os.WriteFile(path, damaged, 0o644); err != nil {
+			t.Fatalf("damage: %v", err)
+		}
+		if got := readPackageCacheUnit(directory, entry); got != nil {
+			t.Fatalf("a unit with byte %d flipped decoded", offset)
+		}
+	}
+
+	// 3. The atomic write leaves nothing at the final path until it is whole:
+	// every intermediate file lives under a different name in the same directory.
+	if err := os.WriteFile(path, whole, 0o644); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, present := range entries {
+		if present.Name() != filepath.Base(path) {
+			t.Fatalf("a temporary file survived the write: %s", present.Name())
+		}
+	}
+}
+
+// TestGateNoCacheDisablesTheDirectory is the CG12_NOCACHE=1 switch at the level
+// the merge gates depend on: the resolver returns no directory at all.
+func TestGateNoCacheDisablesTheDirectory(t *testing.T) {
+	directory := t.TempDir()
+	t.Setenv("CG12_FUNC_CACHE", directory)
+	if functionCacheDirectory() != directory {
+		t.Fatalf("CG12_FUNC_CACHE=%s did not select it", directory)
+	}
+	t.Setenv("CG12_NOCACHE", "1")
+	if got := functionCacheDirectory(); got != "" {
+		t.Fatalf("CG12_NOCACHE=1 left the cache directory at %q", got)
+	}
+	if !cachefile.Disabled() {
+		t.Fatal("cachefile.Disabled did not see CG12_NOCACHE")
+	}
+	if cachefile.Directory("CG12_FUNC_CACHE", "function-cache") != "" {
+		t.Fatal("cachefile.Directory served a directory with CG12_NOCACHE set")
+	}
+	if err := cachefile.Write("", "abcd", ".x", []byte("x")); err != nil {
+		t.Fatalf("write to an empty directory should be a no-op: %v", err)
+	}
+	if _, found := cachefile.Read("", "abcd", ".x"); found {
+		t.Fatal("read from an empty directory found something")
+	}
+	if !strings.Contains(functionCacheDirectory(), "") {
+		t.Fatal("unreachable")
+	}
+}
