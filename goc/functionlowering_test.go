@@ -122,8 +122,12 @@ func TestFunctionLoweringDoesNotDependOnItsPackagesInstantiations(t *testing.T) 
 		len(leftRuntime), len(rightRuntime), strings.Join(leftRuntime, "\n  "), strings.Join(rightRuntime, "\n  "))
 
 	paths := ModuleImportPaths(tracked, payload)
-	leftDigests := loweredFunctionDigests(t, tracked)
-	rightDigests := loweredFunctionDigests(t, payload)
+	leftDigests := loweredFunctionDigestsAll(t, tracked)
+	rightDigests := loweredFunctionDigestsAll(t, payload)
+	classification := make(map[string]CacheUnitReason, len(tracked.Funcs))
+	for _, function := range tracked.Funcs {
+		classification[function.Name] = ClassifyCacheUnit(function)
+	}
 
 	// Which packages declare a generic at all, from Stage 1's own classifier, so
 	// the two accountings are read off the same programs.
@@ -140,7 +144,9 @@ func TestFunctionLoweringDoesNotDependOnItsPackagesInstantiations(t *testing.T) 
 		cacheableDiffering  []string
 		instantiationShared int
 		instantiationSame   int
-		instantiationDiffer []string
+		generatedShared     int
+		generatedSame       int
+		generatedDiffer     []string
 	}
 	results := map[string]*packageResult{}
 	resultFor := func(path string) *packageResult {
@@ -164,12 +170,19 @@ func TestFunctionLoweringDoesNotDependOnItsPackagesInstantiations(t *testing.T) 
 			continue
 		}
 		result := resultFor(path)
-		if IsGenericInstanceSymbol(name) {
+		switch classification[name] {
+		case CacheUnitInstantiation:
 			result.instantiationShared++
 			if other == digest {
 				result.instantiationSame++
+			}
+			continue
+		case CacheUnitInterfaceCallWrapper, CacheUnitInterfaceMethodDispatcher:
+			result.generatedShared++
+			if other == digest {
+				result.generatedSame++
 			} else {
-				result.instantiationDiffer = append(result.instantiationDiffer, name)
+				result.generatedDiffer = append(result.generatedDiffer, name)
 			}
 			continue
 		}
@@ -190,6 +203,8 @@ func TestFunctionLoweringDoesNotDependOnItsPackagesInstantiations(t *testing.T) 
 	shared, identical := 0, 0
 	genericShared, genericIdentical, genericPackages := 0, 0, 0
 	instantiationShared, instantiationSame := 0, 0
+	generatedShared, generatedSame := 0, 0
+	var generatedDiffering []string
 	var offenders []string
 	for _, path := range packages {
 		result := results[path]
@@ -197,6 +212,9 @@ func TestFunctionLoweringDoesNotDependOnItsPackagesInstantiations(t *testing.T) 
 		identical += result.cacheableIdentical
 		instantiationShared += result.instantiationShared
 		instantiationSame += result.instantiationSame
+		generatedShared += result.generatedShared
+		generatedSame += result.generatedSame
+		generatedDiffering = append(generatedDiffering, result.generatedDiffer...)
 		if declaresGeneric[path] {
 			genericPackages++
 			genericShared += result.cacheableShared
@@ -224,6 +242,15 @@ func TestFunctionLoweringDoesNotDependOnItsPackagesInstantiations(t *testing.T) 
 		runtimeResult.cacheableShared, runtimeResult.cacheableIdentical)
 	t.Logf("instantiations shared by both programs: %d, %d identical",
 		instantiationShared, instantiationSame)
+	// Reported, never asserted. These two families are excluded because their
+	// bodies are chosen from the assembled program, not because they were
+	// observed to differ; a pair in which both programs lower the same methods
+	// will not make them differ. The number is here so that whoever decides
+	// whether a cache can hold a wrapper and re-run the redirect step has the
+	// measurement in front of them rather than an intuition.
+	sort.Strings(generatedDiffering)
+	t.Logf("interface-call wrappers and dispatchers shared by both programs: %d, %d identical; %d differ: %s",
+		generatedShared, generatedSame, len(generatedDiffering), strings.Join(generatedDiffering, ", "))
 
 	if len(offenders) > 0 {
 		t.Errorf("a function's lowering depends on something outside its own package: %d of %d cacheable functions differ between the two programs\n%s",

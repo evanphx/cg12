@@ -6782,4 +6782,53 @@ the instantiation set of `runtime` genuinely differs between these two programs
 -- the comparison is not vacuous -- and every one of the other 2091 `runtime`
 functions still encodes to the same bytes.
 
-A purpose-built pair, and the rest of the measurement, follow below.
+### The purpose-built pair, which is the actual deliverable
+
+`goc/functionlowering_test.go`,
+`TestFunctionLoweringDoesNotDependOnItsPackagesInstantiations`. The pair Stage 1
+had was not built for this question -- `runtime`'s instantiation sets differed
+there by accident, and both of the wide program's came from `internal/poll`
+rather than from the program. So a second pair was written to make the question
+as sharp as it can be made: both programs call `runtime.AddCleanup`, which is
+generic, with types **they declare themselves**.
+
+```
+runtime carries 3 instantiations in one program and 3 in the other, disjoint:
+  runtime.AddCleanup[main.tracked,main.note]
+  runtime.callCleanup[main.note]
+  runtime.callCleanup[main.note].gointernal.funcvalue.…
+  runtime.AddCleanup[main.other,main.payload]
+  runtime.callCleanup[main.payload]
+  runtime.callCleanup[main.payload].gointernal.funcvalue.…
+```
+
+Those are functions **of package `runtime`** whose type arguments are declared in
+`main`. No per-package unit for `runtime` could ever contain them, in either
+program. `slices` is in the same position through `slices.SortFunc`: 14
+instantiations each, disjoint, every one over a `main` type.
+
+Against that, every function that is *not* an instantiation:
+
+| | shared by both programs | byte-identical |
+|---|---:|---:|
+| all cacheable functions, 29 packages | 2453 | **2453 (100%)** |
+| in the 8 packages that declare a generic | 2200 | **2200 (100%)** |
+| **`runtime` alone** | **2103** | **2103 (100%)** |
+| instantiations both programs happen to share | 17 | 17 (100%) |
+
+**So a function is the right unit.** A non-generic function in a generic-declaring
+package does not depend on which instantiations that package was asked to carry,
+and `runtime` -- one package, roughly a third of the module, the whole reason the
+package-granular figure was 52-89% -- is not a special case.
+
+The test asserts its own non-vacuity: it fails if the two programs stop asking
+`runtime` for disjoint instantiations, if either set becomes empty, or if neither
+set names a type from the importing program. A proof that quietly became vacuous
+is the failure mode that matters here, because the property looks true by
+inspection and is not.
+
+The last row is a smaller, separate finding: an instantiation *present in both*
+programs lowers identically too. That does not make instantiations part of their
+package's unit -- *which* of them exist is still a whole-program fact -- but it
+does mean each is keyable as its own unit on its origin plus its type arguments,
+which is exactly what `genericInstanceSymbol` already writes into the name.

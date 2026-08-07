@@ -57,8 +57,12 @@
 # census     Installs the package-global generic-instantiation sink that
 #            goc/genericshape.go's compile() hook writes into, so a compile
 #            started by any other test in the process would be recorded in this
-#            one's census. Flag-gated (-generic-shape-census), so it skips in a
-#            normal run.
+#            one's census. TestGenericShapeCensus is flag-gated
+#            (-generic-shape-census) and skips in a normal run;
+#            TestGenericInstanceSymbolMatchesTheCompilersOwnAnswer is not -- it
+#            costs one small compile of serial time and it is what holds
+#            goc/functioncache.go's name-based instantiation predicate to the
+#            type arguments the compiler actually recorded.
 # setenv     Calls t.Setenv, which mutates process-global state and panics if the
 #            test is parallel.
 # timing     Measures elapsed time on a pinned core and has a pre-flight that
@@ -141,6 +145,7 @@ TestUnsafePointerStoreKeepsWriteBarrier	placement
 TestValueBoxedIntoAnInterfaceEscapes	placement
 TestZeroCaptureFunctionLiteralUsesStaticDescriptor	placement
 TestGenericShapeCensus	census
+TestGenericInstanceSymbolMatchesTheCompilersOwnAnswer	census
 TestLoadExactStandardRuntimeSource	setenv
 TestStdlibOverlayRejectsAssemblyReplacement	setenv
 TestStdlibOverlayRejectsReplacementWithoutUpstreamHash	setenv

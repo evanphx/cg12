@@ -105,18 +105,32 @@ func main() {
 }
 `
 
-// loweredFunctionDigests digests every function of a module under a file table
-// renumbered per function. See the file comment for why.
-func loweredFunctionDigests(t *testing.T, m *ir.Module) map[string]string {
+// loweredFunctionDigestsAll digests every function of a module under a file
+// table renumbered per function. See the file comment for why.
+//
+// It must be called at most once per module: renumbering rewrites SrcPos.File in
+// place, so a second pass would renumber indices that no longer point into the
+// module's file table and produce digests that mean nothing.
+func loweredFunctionDigestsAll(t *testing.T, m *ir.Module) map[string]string {
 	t.Helper()
 	digests := make(map[string]string, len(m.Funcs))
 	for _, f := range m.Funcs {
-		if generatedAfterLowering(f) {
-			continue
-		}
 		digest, err := loweredFunctionDigest(f)
 		require.NoError(t, err, "digesting %s", f.Name)
 		digests[f.Name] = digest
+	}
+	return digests
+}
+
+// loweredFunctionDigests is loweredFunctionDigestsAll without the two families
+// that are generated from the assembled program.
+func loweredFunctionDigests(t *testing.T, m *ir.Module) map[string]string {
+	t.Helper()
+	digests := loweredFunctionDigestsAll(t, m)
+	for _, f := range m.Funcs {
+		if generatedAfterLowering(f) {
+			delete(digests, f.Name)
+		}
 	}
 	return digests
 }

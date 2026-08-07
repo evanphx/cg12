@@ -264,6 +264,21 @@ type FunctionCacheCensus struct {
 	// path; a caller measuring what a *library* cache could hold should subtract
 	// it, because the root package changes every build by definition.
 	ByPackage map[string]*PackageFunctionCounts
+
+	// The same partition weighted by IR instructions rather than by function.
+	//
+	// Counting functions answers "how many units may a cache hold", which is what
+	// the classification is about. It does not answer "how much work does a hit
+	// save", because the excluded families are not average-sized: an
+	// interface-call wrapper is a handful of instructions that loads a receiver
+	// and tail-calls, and there are thousands of them. Reporting only the
+	// function count would make the exclusion look far more expensive than it is,
+	// so both are measured.
+	LoweredInstructions                   int
+	CacheableInstructions                 int
+	InstantiationInstructions             int
+	InterfaceCallWrapperInstructions      int
+	InterfaceMethodDispatcherInstructions int
 }
 
 // PackageFunctionCounts is one package's row of a [FunctionCacheCensus].
@@ -285,6 +300,14 @@ func (c FunctionCacheCensus) CacheableShare() float64 {
 	return float64(c.Cacheable) / float64(c.Lowered)
 }
 
+// CacheableInstructionShare is CacheableShare weighted by IR instructions.
+func (c FunctionCacheCensus) CacheableInstructionShare() float64 {
+	if c.LoweredInstructions == 0 {
+		return 0
+	}
+	return float64(c.CacheableInstructions) / float64(c.LoweredInstructions)
+}
+
 // CensusFunctionCache classifies every function of a lowered module.
 //
 // paths is the set of import paths function names may be attributed to; pass
@@ -303,22 +326,36 @@ func CensusFunctionCache(module *ir.Module, paths []string) FunctionCacheCensus 
 			census.ByPackage[path] = row
 		}
 		row.Lowered++
+		instructions := loweredInstructionCount(function)
+		census.LoweredInstructions += instructions
 		switch ClassifyCacheUnit(function) {
 		case CacheUnitCacheable:
 			census.Cacheable++
 			row.Cacheable++
+			census.CacheableInstructions += instructions
 		case CacheUnitInstantiation:
 			census.Instantiations++
 			row.Instantiations++
+			census.InstantiationInstructions += instructions
 		case CacheUnitInterfaceCallWrapper:
 			census.InterfaceCallWrappers++
 			row.InterfaceCallWrappers++
+			census.InterfaceCallWrapperInstructions += instructions
 		case CacheUnitInterfaceMethodDispatcher:
 			census.InterfaceMethodDispatchers++
 			row.InterfaceMethodDispatchers++
+			census.InterfaceMethodDispatcherInstructions += instructions
 		}
 	}
 	return census
+}
+
+func loweredInstructionCount(function *ir.Func) int {
+	total := 0
+	for _, block := range function.Blocks {
+		total += len(block.Instrs)
+	}
+	return total
 }
 
 // PackageOfFunction attributes a lowered symbol to the import path that declared
@@ -614,7 +651,7 @@ func ProgramCompileIdentity(target Target, optimize bool, name string, src []byt
 	}
 	// The program's own package is a unit like any other; a cache would never get
 	// a hit on it, but the key has to exist for the functions it declares.
-	if err := rootPackageIdentity(pkg, fset, []*ast.File{file}, identity.Packages); err != nil {
+	if err := rootPackageIdentity(pkg, name, src, identity.Packages); err != nil {
 		return nil, err
 	}
 	return identity, nil
@@ -657,12 +694,15 @@ func loaderPackageIdentities(loader *sourceLoader, fset *token.FileSet, into map
 }
 
 // rootPackageIdentity gives the program's own package the same treatment.
-func rootPackageIdentity(pkg *types.Package, fset *token.FileSet, files []*ast.File, into map[string]PackageIdentity) error {
+//
+// Its source is hashed from the bytes the caller handed in rather than read back
+// from the named file, because the program being compiled need not be a file at
+// all -- goc's library entry points take a name and a []byte, and every test in
+// this package passes a string literal.
+func rootPackageIdentity(pkg *types.Package, name string, src []byte, into map[string]PackageIdentity) error {
 	digest := sha256.New()
 	fmt.Fprintf(digest, "package\x00%s\x00", pkg.Path())
-	if err := hashParsedFiles(digest, fset, files); err != nil {
-		return err
-	}
+	fmt.Fprintf(digest, "file\x00%s\x00%x\x00", TrimPath(name), sha256.Sum256(src))
 	var source CacheDigest
 	copy(source[:], digest.Sum(nil))
 	into[pkg.Path()] = PackageIdentity{

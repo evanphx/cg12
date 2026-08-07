@@ -138,6 +138,10 @@ func TestGenericShapeCensus(t *testing.T) {
 		// instantiation" -- can be compared on the same program.
 		Closure         []string `json:"closure"`
 		GenericPackages []string `json:"genericPackages"`
+		// FunctionCache is Stage 2's accounting on the same denominator: what a
+		// cache whose unit is a FUNCTION may hold, with the instantiations
+		// excluded but their packages kept.
+		FunctionCache FunctionCacheCensus `json:"functionCache"`
 	}{
 		Program:                    program,
 		GenericInstantiationCensus: census,
@@ -148,6 +152,9 @@ func TestGenericShapeCensus(t *testing.T) {
 	require.NoError(t, err)
 	report.Closure = eligibility.Closure
 	report.GenericPackages = eligibility.Generic
+	// Before the optimiser, so the denominator is the same "lowered functions"
+	// the instantiation share above is measured against.
+	report.FunctionCache = CensusFunctionCache(module, append(append([]string(nil), eligibility.Closure...), census.RootPackage))
 
 	start := time.Now()
 	opt.OptimizeModule(module)
@@ -162,6 +169,15 @@ func TestGenericShapeCensus(t *testing.T) {
 	require.NoError(t, os.WriteFile(out, encoded, 0o644))
 	t.Logf("census: %d instantiations, %d shapes, %d reachable, %d lowered after opt -> %s",
 		len(census.Instantiations), census.ShapeCount(), census.Reachable, len(report.LoweredAfterOpt), out)
+	t.Logf("function-granular cache: %d of %d lowered functions cacheable (%.2f%%); excluded %d instantiations, %d interface-call wrappers, %d interface-method dispatchers",
+		report.FunctionCache.Cacheable, report.FunctionCache.Lowered, 100*report.FunctionCache.CacheableShare(),
+		report.FunctionCache.Instantiations, report.FunctionCache.InterfaceCallWrappers,
+		report.FunctionCache.InterfaceMethodDispatchers)
+	t.Logf("by IR instruction: %d of %d cacheable (%.2f%%); %d in instantiations, %d in call wrappers, %d in dispatchers",
+		report.FunctionCache.CacheableInstructions, report.FunctionCache.LoweredInstructions,
+		100*report.FunctionCache.CacheableInstructionShare(),
+		report.FunctionCache.InstantiationInstructions, report.FunctionCache.InterfaceCallWrapperInstructions,
+		report.FunctionCache.InterfaceMethodDispatcherInstructions)
 }
 
 func moduleFunctionNames(module *ir.Module) []string {
