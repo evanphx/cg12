@@ -7732,3 +7732,137 @@ compiles each, all identical), the goc driver end-to-end suite apart from the
 failure above, the Ruby/C differential, all four capability-matrix shards on both
 arms, and the `main` controls, which had to be measured from scratch (`no record
 for key 4c3d72451d73`) and agreed.
+
+## 2. Default-path invariance: PASS, 408 programs, both arms
+
+Two compilers built from **one absolute path** — a single detached worktree at
+`$TMPDIR/gate/cmp`, checked out at `main` (`4ad59d2`), built, then checked out at
+the branch (`235c54c`) and built again. Both binaries therefore embed the same
+`runtime.Caller` source path, so the false differences the brief warns about
+cannot arise.
+
+Every `goc/testdata/*.go` program compiled and linked with each compiler, with
+`CG12_FUNC_CACHE`, `CG12_PACK_CACHE` and `CG12_NOCACHE` all unset — the default
+path — through `goc compile-batch` at 48 workers.
+
+```
+corpus-run[main.plain]:   408 programs, built=408 failed=0, 110s
+corpus-run[branch.plain]: 408 programs, built=408 failed=0, 108s
+corpus-diff [main-vs-branch plain]: identical=408 different=0
+
+corpus-run[main.opt]:     408 programs, built=408 failed=0, 235s
+corpus-run[branch.opt]:   408 programs, built=408 failed=0, 232s
+corpus-diff [main-vs-branch opt]: identical=408 different=0
+```
+
+**816 of 816 images byte-identical.** (408 rather than 406 because the two
+boundary programs from `goc/functionlowering_test.go` were extracted to files and
+added to the corpus for this gate.) With the cache off, the branch is `main`.
+
+## 3. The cache's own correctness claim: it does not hold across programs
+
+**This is a stop, and it is not the concurrency case the brief expected it in.**
+
+### 3.1 What happened
+
+The corpus was compiled with `CG12_FUNC_CACHE` pointing at one shared directory,
+48 concurrent workers, against the section-2 cache-off images as the control:
+
+```
+corpus-run[plain.cold]: 408 programs, built=51  failed=357, 77s   (164 units, 54M)
+corpus-diff: identical=44 different=364
+corpus-run[plain.warm]: 408 programs, built=0   failed=408, 74s
+corpus-diff: identical=0  different=408
+corpus-run[opt.cold]:   408 programs, built=0   failed=408, 181s
+corpus-run[opt.warm]:   408 programs, built=0   failed=408, 181s
+```
+
+The failures are link failures. A representative one:
+
+```
+/usr/bin/ld: goc.o: in function `runtime_hexdumper_fmtHex':
+  stdlib/src/runtime/hexdump.go:246: undefined reference to
+  `_goc_string_0123456789abcdef_9f9f5111f7b27a78'
+/usr/bin/ld: goc.o: in function `internal_runtime_cgroup_unescapePath':
+  stdlib/src/internal/runtime/cgroup/cgroup.go:459: undefined reference to
+  `_goc_runtime_type_error_ca00fccfb408989e'
+```
+
+Every undefined symbol is an **interned, content-addressed artifact**: a string
+literal (`.goc.string.*`), a type descriptor (`.goc.type.*`,
+`.goc.runtime.type.*`), an itab (`.goc.itab.*`), a static function descriptor
+(`.goc.funcval.*`), a channel type, an interface payload.
+
+### 3.2 It is not concurrency, and it is not scale
+
+Re-run strictly sequentially, one `goc` process at a time, one shared directory,
+the first 60 corpus programs in sorted order:
+
+```
+sequential fill: 58 failure(s) of 60
+  adler32_marshal_loop   undefined reference to `_goc_funcval_runtime_strhash'
+  allocs_per_run         undefined reference to `_goc_type_main_reason_24fdd708cb045885'
+  hello                  undefined reference to `_goc_funcval_runtime_strhash'
+  fmt_sprintf            undefined reference to `_goc_type_main_reason_c4ab6d1386063a2f'
+  ...
+```
+
+And it reduces to **two programs and two commands**:
+
+```
+$ export CG12_FUNC_CACHE=/tmp/c            # empty directory
+$ goc -o a goc/testdata/fmt_sprintf.go     # succeeds, fills the cache
+$ goc -o b goc/testdata/hello.go           # LINK FAILS
+  undefined reference to `_goc_itab_internal_runtime_maps_unhashableTypeError__error_...'
+  undefined reference to `_goc_itab_internal_strconv_Error__error_...'
+```
+
+Other pairs, each in a fresh directory, one process at a time:
+
+| filler | target | result |
+|---|---|---|
+| `reflect_methods` | `hello` | LINK FAILED — `_goc_funcval_runtime_strhash`, `_goc_runtime_type_byte_...` |
+| `context_cancel` | `hello` | LINK FAILED — `_goc_channel_type_struct_...`, `_goc_ifacedata_runtime_plainError__send_on_closed_channel_...` |
+| `fmt_sprintf` | `hello` | LINK FAILED — two itabs |
+| `hello` | `fmt_sprintf` | **links, and the image is DIFFERENT**: `ca2884d1f7a3fd49` against the uncached `463df9fb813a58d7` |
+| `gc_struct` | `hello` | identical |
+| `hello` | `hello` | identical |
+
+The `hello` -> `fmt_sprintf` row is the worse of the two failure modes: it is a
+**silently different binary**, not a diagnosed one. Both executables run and both
+exit 0; the defined-symbol sets are the same size (19616 each) and identical as
+sets, so the difference is in content, not in what is present.
+
+### 3.3 The mechanism, and it is the one section 0.3 predicted
+
+The delta model attributes every shared, content-interned artifact to whichever
+declaration happened to mint it **first, in the program that filled the cache**.
+A later declaration that wants the same artifact finds it in an intern map (or,
+for `.equal` and `.hash`, by scanning `Module.Funcs`) and emits a *reference*
+with no definition — so its stored delta carries the reference alone.
+
+Replay a delta of the second kind into a program where the declaration of the
+first kind is not replayed and not lowered — because it is in a package this
+program does not reach, or in a package whose unit missed, or in the root `main`
+package, which is never cacheable — and the symbol is referenced by nothing that
+defines it.
+
+The cache's own files show it directly. `.goc.funcval.runtime.strhash` appears in
+the stored units of **`reflect`, `flag` and `runtime`**; only one of those deltas
+can hold its definition. `_goc_type_main_reason_...` is the descriptor of a type
+declared in *some other program's* `main`, and it is referenced from a stdlib
+package's stored unit — a cached unit for package P holding a reference to a
+symbol derived from a root package whose source is not in P's key at all.
+
+That last one is the branch's own section 7, stated as an assumption:
+
+> The key ... does not cover the whole-program facts lowering consults —
+> `collectDynamicTypes`, `reachableFunctions`, the interface-method candidate
+> sets. ... That is measurement, not proof, and it is the assumption a future
+> stage should attack first if a cached build ever produces a wrong binary.
+
+It produces a wrong binary. The measurement that stood in for the proof —
+`TestCacheFilledByAnotherProgramIsUsable` — uses a pair of programs chosen to
+differ in their *generic instantiations* while agreeing almost exactly in their
+import closure and their reachable set. That is the one axis along which the
+scheme is sound. Two programs with different closures break it immediately.
