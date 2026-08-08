@@ -1189,7 +1189,25 @@ func lowerAggReturn(f *ir.Func, b *ir.Block, retBuf ir.Ref) {
 
 func lowerCalls(f *ir.Func, conventions calleeConventions) error {
 	for _, b := range f.Blocks {
-		var out []ir.Instr
+		// A block with no call is left alone. The loop below rebuilds the whole
+		// instruction list to splice argument setup around each call, and a block
+		// without one would copy every instruction into a new slice to arrive at
+		// what it started with -- at 128 bytes an ir.Instr, growing from nil, that
+		// was 44 MB on a -O compile of the SQLite amalgamation, most of it for
+		// blocks that had nothing to lower. Where there is work to do, the new list
+		// is at least as long as the old, so size it that way up front rather than
+		// doubling into it (as the second loop of this file already does).
+		calls := false
+		for i := range b.Instrs {
+			if b.Instrs[i].Op == ir.OCall {
+				calls = true
+				break
+			}
+		}
+		if !calls {
+			continue
+		}
+		out := make([]ir.Instr, 0, len(b.Instrs))
 		for i := range b.Instrs {
 			in := b.Instrs[i]
 			if in.Op != ir.OCall {

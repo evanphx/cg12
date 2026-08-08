@@ -23,6 +23,7 @@ import (
 	"runtime"
 	"runtime/metrics"
 	"runtime/pprof"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -133,6 +134,7 @@ func (s *peakSampler) finish() uint64 {
 
 // run is one compile's worth of measurement.
 type run struct {
+	module    *ir.Module
 	stages    []stage
 	objectSHA string
 	preOpt    shape
@@ -187,6 +189,7 @@ func main() {
 	sampleEvery := flag.Duration("sample", 2*time.Millisecond, "live-heap sampling interval for the peak floor")
 	cpuProfile := flag.String("cpuprofile", "", "write a CPU profile of the compile to this file")
 	memProfile := flag.String("memprofile", "", "write a heap profile of the compile to this file")
+	census := flag.Bool("instr-census", false, "count how often each optional ir.Instr field is set")
 	var includeDirs stringList
 	var defines stringList
 	flag.Var(&includeDirs, "I", "add an include search `directory` (repeatable)")
@@ -252,6 +255,9 @@ func main() {
 		reportReproducibility(runs)
 	}
 	reportPasses()
+	if *census && len(runs) > 0 {
+		reportInstrCensus(runs[len(runs)-1].module)
+	}
 	writeCSV(runs)
 
 	if *memProfile != "" {
@@ -310,6 +316,7 @@ func compile(path, source string, options cc.Options, optimize bool) *run {
 		}
 	})
 	result.objectSHA = fmt.Sprintf("%x", sha256.Sum256(encoded))
+	result.module = module
 	return result
 }
 
@@ -368,6 +375,70 @@ func reportReproducibility(runs []*run) {
 	if stable {
 		fmt.Fprintf(os.Stderr, "  allocation byte-exact across all runs\n")
 	}
+}
+
+// reportInstrCensus counts how often each of ir.Instr's optional fields is
+// actually set.
+//
+// It exists to price moving a field out of the struct and behind InstrExtra.
+// That trade is not free: the field stops costing its width on every
+// instruction, and starts costing an InstrExtra -- 96 bytes -- on every
+// instruction that needs one and did not already have one. So a field is worth
+// moving roughly when it is set on fewer than (its width / 96) of instructions,
+// and the "already has Extra" column is what says how much of that is already
+// paid for.
+func reportInstrCensus(module *ir.Module) {
+	var total, withExtra int
+	counts := map[string]int{}
+	alone := map[string]int{}
+	for _, function := range module.Funcs {
+		for _, block := range function.Blocks {
+			for index := range block.Instrs {
+				in := &block.Instrs[index]
+				total++
+				extra := in.Extra != nil
+				if extra {
+					withExtra++
+				}
+				note := func(name string, set bool) {
+					if !set {
+						return
+					}
+					counts[name]++
+					if !extra {
+						alone[name]++
+					}
+				}
+				note("Blk", in.Blk != nil)
+				note("Asm", in.Asm != nil)
+				note("Intrin", in.Intrin != nil)
+				note("RetAgg", in.RetAgg != nil)
+				note("Inl", in.Inl != nil)
+				note("ClosureContext", !in.ClosureContext.IsNone())
+				note("Aux", in.Aux != 0)
+				note("Amode", in.Amode != 0)
+			}
+		}
+	}
+	fmt.Fprintf(os.Stderr, "\n  instruction census: %d instructions, %d (%.1f%%) already carry an InstrExtra\n",
+		total, withExtra, percent(withExtra, total))
+	fmt.Fprintf(os.Stderr, "  %-16s %10s %8s %14s %8s\n", "field", "set", "of all", "set w/o extra", "of all")
+	names := make([]string, 0, len(counts))
+	for name := range counts {
+		names = append(names, name)
+	}
+	sort.Slice(names, func(i, j int) bool { return counts[names[i]] > counts[names[j]] })
+	for _, name := range names {
+		fmt.Fprintf(os.Stderr, "  %-16s %10d %7.2f%% %14d %7.2f%%\n",
+			name, counts[name], percent(counts[name], total), alone[name], percent(alone[name], total))
+	}
+}
+
+func percent(part, whole int) float64 {
+	if whole == 0 {
+		return 0
+	}
+	return float64(part) / float64(whole) * 100
 }
 
 func reportPasses() {

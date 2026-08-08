@@ -18,14 +18,17 @@ func (c *CFG) Dominators() *DomTree {
 		return d
 	}
 
-	const undef = -1
-	idom := make([]int, n)
+	// int32 rather than int: these are reverse-postorder indices, so a function
+	// would need two billion blocks to overflow one, and the array is built once
+	// per function per pass per fixpoint round.
+	const undef = int32(-1)
+	idom := make([]int32, n)
 	for i := range idom {
 		idom[i] = undef
 	}
 	idom[0] = 0 // entry is its own immediate dominator during the fixpoint
 
-	intersect := func(a, b int) int {
+	intersect := func(a, b int32) int32 {
 		for a != b {
 			for a > b {
 				a = idom[a]
@@ -42,7 +45,7 @@ func (c *CFG) Dominators() *DomTree {
 		for i := 1; i < n; i++ {
 			newIdom := undef
 			for _, p := range c.RPO[i].Preds {
-				pi := c.Num(p)
+				pi := int32(c.Num(p))
 				if pi < 0 || idom[pi] == undef {
 					continue // unreachable or not yet processed
 				}
