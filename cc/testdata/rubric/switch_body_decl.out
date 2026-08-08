@@ -1,0 +1,5 @@
+total 21194
+rule 0 -> 22
+rule 1 -> 698
+rule 2 -> 21
+rule 3 -> -7

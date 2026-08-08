@@ -14,6 +14,7 @@ import (
 
 	moderncc "github.com/evanphx/cg12/internal/cc"
 	"github.com/evanphx/cg12/ir"
+	lowerpass "github.com/evanphx/cg12/lower"
 )
 
 // gen holds the state of translating one translation unit to a cg12 module.
@@ -705,6 +706,30 @@ func (g *gen) genFunc(fd *moderncc.FunctionDefinition) {
 			g.cur.Ret(g.zero(ret))
 		}
 	}
+
+	// Reservations for automatic storage move to the entry block, where they
+	// dominate every use.
+	//
+	// A declaration inside a switch body but before the first case label is the
+	// shape that requires this. C reaches the case labels directly, so the block
+	// holding the body's leading declarations has no predecessor at all -- but the
+	// storage it reserves is used by the reachable cases:
+	//
+	//	switch( yyruleno ){
+	//	  YYMINORTYPE yylhsminor;   // an alloca in an unreachable block
+	//	  case 0: ... yylhsminor ...
+	//
+	// Emitting the alloca there is invalid: its definition does not dominate its
+	// uses. Nothing noticed for as long as nothing removed the block, so the fault
+	// was latent -- and then jump threading's unreachable-block prune deleted it
+	// correctly and every store through it read a value nothing defined. That was
+	// a SIGSEGV in SQLite's parser, from IR the front end should not have built.
+	//
+	// The hoist is the backend's (lower.HoistAllocas), run here as well so what
+	// leaves the front end is already well formed rather than being repaired after
+	// the optimiser has had its chance to act on it. Variable-length arrays stay
+	// where they are: their size is a runtime value.
+	lowerpass.HoistAllocas(g.fn)
 
 	// Guard: every block must be terminated. An unterminated block is a codegen
 	// bug; catching it here fails cleanly instead of handing malformed IR to the
