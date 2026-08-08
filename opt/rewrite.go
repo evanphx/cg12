@@ -46,11 +46,18 @@ func applySubst(f *ir.Func, s subst) {
 	}
 }
 
-// useCounts returns how many times each temporary is used as an operand.
-func useCounts(f *ir.Func) map[uint32]int {
-	u := map[uint32]int{}
+// useCounts returns how many times each temporary is used as an operand,
+// indexed by temp id.
+//
+// A slice rather than a map because temp ids are dense: ir.Func only ever
+// appends temporaries, so they run 0..len(Temps)-1 with no gaps, and a map was
+// paying hashing and 69 MB of growth on a -O compile of the SQLite amalgamation
+// to hold what an array holds exactly. [IfConvert] already counted uses this
+// way; this brings DCE into line with it.
+func useCounts(f *ir.Func) []int32 {
+	u := make([]int32, len(f.Temps))
 	add := func(r ir.Ref) {
-		if r.Kind == ir.RefTemp {
+		if r.Kind == ir.RefTemp && int(r.ID) < len(u) {
 			u[r.ID]++
 		}
 	}
@@ -94,4 +101,14 @@ func constInt(f *ir.Func, r ir.Ref) (int64, bool) {
 		}
 	}
 	return 0, false
+}
+
+// useCountOf reads a temporary's use count from a [useCounts] result, answering
+// zero for a ref naming a temporary the count was not sized for. A caller that
+// counted before adding temporaries would otherwise index past the end.
+func useCountOf(uses []int32, r ir.Ref) int32 {
+	if r.Kind != ir.RefTemp || int(r.ID) >= len(uses) {
+		return 0
+	}
+	return uses[r.ID]
 }

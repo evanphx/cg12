@@ -34,10 +34,10 @@ func DCE(f *ir.Func) bool {
 	return changed
 }
 
-func filterPhis(phis []*ir.Phi, uses map[uint32]int) []*ir.Phi {
+func filterPhis(phis []*ir.Phi, uses []int32) []*ir.Phi {
 	out := phis[:0]
 	for _, p := range phis {
-		if p.To.Kind == ir.RefTemp && uses[p.To.ID] == 0 {
+		if p.To.Kind == ir.RefTemp && useCountOf(uses, p.To) == 0 {
 			continue
 		}
 		out = append(out, p)
@@ -46,14 +46,14 @@ func filterPhis(phis []*ir.Phi, uses map[uint32]int) []*ir.Phi {
 }
 
 // isDead reports whether an instruction can be removed.
-func isDead(in *ir.Instr, uses map[uint32]int) bool {
+func isDead(in *ir.Instr, uses []int32) bool {
 	if hasSideEffect(in) {
 		return false
 	}
 	if in.To.Kind != ir.RefTemp {
 		return true // no side effect and no result: pure dead weight
 	}
-	return uses[in.To.ID] == 0
+	return useCountOf(uses, in.To) == 0
 }
 
 // hasSideEffect reports whether an instruction affects state beyond its result.

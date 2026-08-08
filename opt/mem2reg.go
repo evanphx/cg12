@@ -2,6 +2,7 @@ package opt
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/evanphx/cg12/analysis"
@@ -153,7 +154,7 @@ func Mem2Reg(f *ir.Func) bool {
 	// definition, dropping loads/stores/allocs and filling successor phis.
 	children := domChildren(cfg, dom)
 	sub := subst{}
-	init := map[int]ir.Ref{}
+	init := make([]ir.Ref, len(vars))
 	for vi, v := range vars {
 		init[vi] = zeroConst(f, v.cls)
 	}
@@ -307,7 +308,7 @@ func findPromotable(f *ir.Func) ([]promotable, map[uint32]int) {
 func renameBlock(
 	f *ir.Func,
 	b *ir.Block,
-	curDef map[int]ir.Ref,
+	curDef []ir.Ref,
 	vars []promotable,
 	varOf map[uint32]int,
 	phiOf map[*ir.Block]map[int]*ir.Phi,
@@ -389,12 +390,18 @@ func domChildren(cfg *analysis.CFG, dom *analysis.DomTree) map[*ir.Block][]*ir.B
 	return children
 }
 
-func copyDefs(m map[int]ir.Ref) map[int]ir.Ref {
-	out := make(map[int]ir.Ref, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
+// copyDefs gives a dominator-tree child its own copy of the reaching
+// definitions, so that what the child does to them does not reach its siblings.
+//
+// The definitions are indexed by promoted-variable number, which findPromotable
+// hands out densely, so this is a slice clone rather than the map copy it was.
+// Renaming copies them once per edge of the dominator tree, which made that map
+// copy 63 MB on a -O compile of the SQLite amalgamation -- for a table whose
+// keys are 0..len(vars)-1 with nothing missing. An absent definition reads as
+// the zero ir.Ref either way: RefNone is the zero value, so a freshly made
+// slice already says "no reaching definition" for every variable.
+func copyDefs(m []ir.Ref) []ir.Ref {
+	return slices.Clone(m)
 }
 
 // variableLiveIn computes, for each block, the set of promoted-variable indices that

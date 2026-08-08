@@ -178,7 +178,7 @@ func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 			// the crossed calls so colouring can weigh that cost against callee-saved and
 			// against spilling.
 			if in.Op == ir.OCall {
-				for _, t := range liveSet.Members() {
+				for t := range liveSet.All() {
 					g.crossFreq[t] += weight
 				}
 			}
@@ -192,7 +192,7 @@ func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 						g.forbid(t, r)
 					}
 				}
-				for _, t := range liveSet.Members() {
+				for t := range liveSet.All() {
 					forbidAll(t)
 				}
 				for _, u := range uses {
@@ -203,7 +203,7 @@ func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 				}
 			}
 			if in.Op == ir.OCall || in.Op == ir.OSafepoint {
-				for _, t := range liveSet.Members() {
+				for t := range liveSet.All() {
 					if f.Temps[t].GCRef {
 						g.gc[t] = true
 					}
@@ -215,7 +215,7 @@ func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 				liveSet.Add(d)
 			}
 			for _, d := range defs {
-				for _, l := range liveSet.Members() {
+				for l := range liveSet.All() {
 					g.addEdge(d, l)
 				}
 			}

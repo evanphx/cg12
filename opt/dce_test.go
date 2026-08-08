@@ -75,7 +75,7 @@ func TestDCERemovesDeadPhi(t *testing.T) {
 }
 
 func TestIsDeadClassification(t *testing.T) {
-	uses := map[uint32]int{}
+	var uses []int32
 	// No side effect and no result temporary: dead weight.
 	assert.True(t, isDead(&ir.Instr{Op: ir.OArg}, uses))
 	// Side-effecting op is never dead.

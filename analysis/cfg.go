@@ -9,7 +9,12 @@ type CFG struct {
 	Fn  *ir.Func
 	RPO []*ir.Block // reverse postorder; RPO[0] is the entry block
 
-	num map[*ir.Block]int // block -> index within RPO
+	// num maps a block to its index within RPO. int32 rather than int because a
+	// map's value width is paid for every slot of every bucket it allocates, and
+	// this map is built once per function per pass per fixpoint round -- it was
+	// 93 MB on a -O compile of the SQLite amalgamation, the largest single
+	// allocation the CFG makes.
+	num map[*ir.Block]int32
 }
 
 // BuildCFG computes predecessors and reverse postorder for f. Blocks not
@@ -18,7 +23,7 @@ func BuildCFG(f *ir.Func) *CFG {
 	fillPreds(f)
 	// Presized: a growing map rehashes on the way up, and rehashing was a
 	// measurable share of a whole-module compile all by itself.
-	c := &CFG{Fn: f, num: make(map[*ir.Block]int, len(f.Blocks))}
+	c := &CFG{Fn: f, num: make(map[*ir.Block]int32, len(f.Blocks))}
 	c.computeRPO()
 	return c
 }
@@ -118,19 +123,23 @@ func (c *CFG) computeRPO() {
 			stack = stack[:top]
 		}
 	}
-	// Reverse the postorder into RPO and record each block's index.
-	c.RPO = make([]*ir.Block, len(post))
-	for i := range post {
-		rb := post[len(post)-1-i]
-		c.RPO[i] = rb
-		c.num[rb] = i
+	// Reverse the postorder in place and keep it as the RPO, rather than copying
+	// it into a second slice of the same size: the copy was 26 MB of a -O compile
+	// of the SQLite amalgamation, holding exactly what the first slice already
+	// held, backwards.
+	for i, j := 0, len(post)-1; i < j; i, j = i+1, j-1 {
+		post[i], post[j] = post[j], post[i]
+	}
+	c.RPO = post
+	for i, b := range c.RPO {
+		c.num[b] = int32(i)
 	}
 }
 
 // Num returns the reverse-postorder index of b, or -1 if b is unreachable.
 func (c *CFG) Num(b *ir.Block) int {
 	if n, ok := c.num[b]; ok {
-		return n
+		return int(n)
 	}
 	return -1
 }

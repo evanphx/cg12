@@ -222,10 +222,10 @@ func (c *compiler) buildRanges(bStart, termPos map[*ir.Block]int, total int) []l
 	live := c.cfg.Liveness()
 	for _, b := range c.cfg.RPO {
 		bs, be := bStart[b], termPos[b]
-		for _, id := range live.LiveIn(b).Members() {
+		for id := range live.LiveIn(b).All() {
 			obT(uint32(id), bs)
 		}
-		for _, id := range live.LiveOut(b).Members() {
+		for id := range live.LiveOut(b).All() {
 			obT(uint32(id), be)
 		}
 		for _, p := range b.Phis {

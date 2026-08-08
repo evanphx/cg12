@@ -83,7 +83,7 @@ func slotGroups(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, temps []
 			liveMembers[word] = 0
 		}
 		becameLive = becameLive[:0]
-		for _, temp := range live.LiveOut(block).Members() {
+		for temp := range live.LiveOut(block).All() {
 			addLive(temp)
 		}
 		if block.Jmp.Arg.Kind == ir.RefTemp {

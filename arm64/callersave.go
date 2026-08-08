@@ -42,7 +42,7 @@ func insertCallerSaves(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, a
 					def[d] = true
 				}
 				var sv []int
-				for _, t := range liveSet.Members() {
+				for t := range liveSet.All() {
 					if def[t] {
 						continue
 					}

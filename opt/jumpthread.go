@@ -543,7 +543,7 @@ func reconRename(
 	}
 
 	for _, c := range children[blk] {
-		reconRename(f, c, copyDefs(cur), b, bp, vars, idOf, phiOf, children)
+		reconRename(f, c, copyReachingMap(cur), b, bp, vars, idOf, phiOf, children)
 	}
 }
 
@@ -736,4 +736,19 @@ func replaceJmpTarget(j *ir.Jmp, from, to *ir.Block) {
 			j.Cases[k].Blk = to
 		}
 	}
+}
+
+// copyReachingMap gives a dominator-tree child its own reaching definitions.
+//
+// This stays a map where mem2reg's equivalent became a slice, because here the
+// difference between "no definition reaches this value" and "the definition is
+// the zero ref" is load-bearing: reconRename falls back to a zero constant for
+// the first (and mustReach panics on it), so the presence of the key is the
+// answer, not the value stored under it.
+func copyReachingMap(m map[int]ir.Ref) map[int]ir.Ref {
+	out := make(map[int]ir.Ref, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }

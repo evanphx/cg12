@@ -243,7 +243,7 @@ func buildPhiInterference(cfg *analysis.CFG, live *analysis.Liveness, nt int, in
 	// other temp live there.
 	def := func(d int, liveNow *analysis.TempSet) {
 		if involved[d] {
-			for _, t := range liveNow.Members() {
+			for t := range liveNow.All() {
 				addEdge(d, t)
 			}
 		}

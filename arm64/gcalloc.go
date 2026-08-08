@@ -108,21 +108,21 @@ type colorGraph struct {
 	freq  *analysis.Freq    // per-block execution frequency, for the spill cost model
 	remat map[int]rematRule // temps recomputable at each use instead of reloaded
 
-	adj       []map[int]bool // temp id -> interfering temp ids (nodes only; same class)
-	forb      []map[Reg]bool // temp id -> physical registers it may not use
-	node      []bool         // temp id -> is a colourable node (used, not pre-coloured)
-	gc        []bool         // temp id -> must be spilled (GC ref live across a safepoint)
-	mv        [][]int        // temp id -> temps it is copied to/from (coalescing bias)
-	cost      []float64      // temp id -> spill cost (references weighted by block frequency)
-	crossFreq []float64      // temp id -> summed frequency of the calls it is live across
+	adj       *interferenceGraph // interfering temp ids (nodes only; same class)
+	forb      []regSet           // temp id -> physical registers it may not use
+	node      []bool             // temp id -> is a colourable node (used, not pre-coloured)
+	gc        []bool             // temp id -> must be spilled (GC ref live across a safepoint)
+	mv        [][]int            // temp id -> temps it is copied to/from (coalescing bias)
+	cost      []float64          // temp id -> spill cost (references weighted by block frequency)
+	crossFreq []float64          // temp id -> summed frequency of the calls it is live across
 }
 
 func newColorGraph(f *ir.Func) *colorGraph {
 	n := len(f.Temps)
 	g := &colorGraph{
 		f:         f,
-		adj:       make([]map[int]bool, n),
-		forb:      make([]map[Reg]bool, n),
+		adj:       newInterferenceGraph(n),
+		forb:      make([]regSet, n),
 		node:      make([]bool, n),
 		gc:        make([]bool, n),
 		mv:        make([][]int, n),
@@ -138,10 +138,7 @@ func newColorGraph(f *ir.Func) *colorGraph {
 }
 
 func (g *colorGraph) forbid(t int, r Reg) {
-	if g.forb[t] == nil {
-		g.forb[t] = map[Reg]bool{}
-	}
-	g.forb[t][r] = true
+	g.forb[t].add(r)
 }
 
 // addEdge records that temps a and b are simultaneously live. Temps of different
@@ -164,14 +161,7 @@ func (g *colorGraph) addEdge(a, b int) {
 	case tb.Fixed:
 		g.forbid(a, Reg(tb.Reg))
 	default:
-		if g.adj[a] == nil {
-			g.adj[a] = map[int]bool{}
-		}
-		if g.adj[b] == nil {
-			g.adj[b] = map[int]bool{}
-		}
-		g.adj[a][b] = true
-		g.adj[b][a] = true
+		g.adj.addPair(a, b)
 	}
 }
 
@@ -226,7 +216,7 @@ func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 			// register that survives a call -- AAPCS64 preserves only the low 64 bits of
 			// V8-V15 -- so it must stay out of every register across a call (hard forbid).
 			if in.Op == ir.OCall {
-				for _, t := range liveSet.Members() {
+				for t := range liveSet.All() {
 					g.crossFreq[t] += weight
 					if f.Temps[t].Cls == ir.ClsQ {
 						for r := V0; r <= vLast; r++ {
@@ -246,7 +236,7 @@ func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 						g.forbid(t, r)
 					}
 				}
-				for _, t := range liveSet.Members() {
+				for t := range liveSet.All() {
 					forbidAll(t)
 				}
 				for _, u := range uses {
@@ -257,7 +247,7 @@ func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 				}
 			}
 			if in.Op == ir.OCall || in.Op == ir.OSafepoint {
-				for _, t := range liveSet.Members() {
+				for t := range liveSet.All() {
 					if f.Temps[t].GCRef {
 						g.gc[t] = true
 					}
@@ -269,7 +259,7 @@ func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 				liveSet.Add(d)
 			}
 			for _, d := range defs {
-				for _, l := range liveSet.Members() {
+				for l := range liveSet.All() {
 					g.addEdge(d, l)
 				}
 			}
@@ -294,6 +284,9 @@ func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 			}
 		}
 	}
+	// Every edge has been reported; organise them into rows. Nothing may read a
+	// row before this, and addEdge must not be called after it.
+	g.adj.seal()
 }
 
 // assign removes nodes lowest-degree first, then colours them in reverse, spilling
@@ -377,7 +370,7 @@ func (g *colorGraph) assign() (*allocation, error) {
 	for _, c := range cands {
 		pick := Reg(ir.NoReg)
 		for _, r := range intAllocOrderFor(f) {
-			if calleeSavedReg(r) && !g.forb[c.t][r] {
+			if calleeSavedReg(r) && !g.forb[c.t].has(r) {
 				pick = r
 				break
 			}
@@ -387,9 +380,9 @@ func (g *colorGraph) assign() (*allocation, error) {
 		}
 		f.Temps[c.t].Reg = int(pick)
 		removed[c.t] = true
-		for w := range g.adj[c.t] {
+		for _, w := range g.adj.row(c.t) {
 			if !removed[w] {
-				g.forbid(w, pick)
+				g.forbid(int(w), pick)
 			}
 		}
 	}
@@ -407,19 +400,24 @@ func (g *colorGraph) assign() (*allocation, error) {
 			pool = floatAllocOrder
 		}
 		for _, r := range pool {
-			if !g.forb[t][r] {
+			if !g.forb[t].has(r) {
 				availK[t]++
 			}
 		}
 	}
 
 	active := 0
+	// activeNodes is the same set in the same ascending order, kept so the
+	// simplify loop below scans the nodes still in the graph rather than every
+	// temp in the function. See the note there.
+	activeNodes := make([]int, 0, len(f.Temps))
 	for t := range f.Temps {
 		if removed[t] {
 			continue
 		}
 		active++
-		for w := range g.adj[t] {
+		activeNodes = append(activeNodes, t)
+		for _, w := range g.adj.row(t) {
 			if !removed[w] {
 				degree[t]++
 			}
@@ -472,30 +470,59 @@ func (g *colorGraph) assign() (*allocation, error) {
 		}
 		return degree[a] < degree[b] // then least constrained
 	}
+	// Each round removes one node, and the round used to rescan every temp in the
+	// function to find it -- so the loop cost the function's node count times its
+	// temp count. On a -O compile of the SQLite amalgamation that was half of the
+	// whole backend's wall clock, and sqlite3VdbeExec (11,304 temps) and yy_reduce
+	// between them were 43% of it. Two things are wrong with the old scan and both
+	// are fixed here without changing which node it picks.
+	//
+	// It rescanned temps it had already removed, which by the last rounds is nearly
+	// all of them: line-level profiling put a fifth of the loop's time in the test
+	// that skipped them. activeNodes holds the survivors, compacted in place each
+	// round, so the scan is over the graph rather than over the function.
+	//
+	// And it computed the spill candidate on every node of every round, when that
+	// answer is used only in the rounds where nothing is trivially colourable --
+	// under real register pressure, which is rare. Computing it only when it is
+	// about to be read is the same answer: the search runs over the same nodes in
+	// the same order with the same comparison, and the old code discarded it
+	// whenever low was found.
+	//
+	// The ascending order matters and is preserved. moreRemovable is not a total
+	// order -- it returns false for a tie -- so the incumbent wins, and the node
+	// chosen among equals is the one with the lowest temp index. Reordering the
+	// scan would silently reassign registers.
 	stack := make([]int, 0, active)
 	for active > 0 {
-		low, spillCand := -1, -1
-		for t := range f.Temps {
-			if !g.node[t] || removed[t] {
+		live := activeNodes[:0]
+		low := -1
+		for _, t := range activeNodes {
+			if removed[t] {
 				continue
 			}
+			live = append(live, t)
 			if degree[t] < availK[t] {
 				if low < 0 || moreRemovable(t, low) {
 					low = t
 				}
 			}
-			if spillCand < 0 || spillRatio(g.cost[t], degree[t]) < spillRatio(g.cost[spillCand], degree[spillCand]) {
-				spillCand = t
-			}
 		}
+		activeNodes = live
 		best := low
 		if best < 0 {
+			spillCand := -1
+			for _, t := range activeNodes {
+				if spillCand < 0 || spillRatio(g.cost[t], degree[t]) < spillRatio(g.cost[spillCand], degree[spillCand]) {
+					spillCand = t
+				}
+			}
 			best = spillCand
 		}
 		removed[best] = true
 		stack = append(stack, best)
 		active--
-		for w := range g.adj[best] {
+		for _, w := range g.adj.row(best) {
 			if !removed[w] {
 				degree[w]--
 			}
@@ -506,7 +533,7 @@ func (g *colorGraph) assign() (*allocation, error) {
 	for i := len(stack) - 1; i >= 0; i-- {
 		t := stack[i]
 		used := map[Reg]bool{}
-		for w := range g.adj[t] {
+		for _, w := range g.adj.row(t) {
 			if r := f.Temps[w].Reg; r != ir.NoReg {
 				used[Reg(r)] = true
 			}
@@ -541,7 +568,7 @@ func (g *colorGraph) assign() (*allocation, error) {
 				prefer[Reg(r)] = true
 			}
 		}
-		usable := func(r Reg) bool { return !used[r] && !g.forb[t][r] }
+		usable := func(r Reg) bool { return !used[r] && !g.forb[t].has(r) }
 		picked := Reg(ir.NoReg)
 		for _, r := range pool {
 			if prefer[r] && usable(r) {

@@ -25,15 +25,32 @@ func (c *CFG) Liveness() *Liveness {
 		l.Out[b] = NewTempSet(nt)
 	}
 
+	// The loop below allocated two sets and a successor slice for every block of
+	// every round, and threw all three away again -- on a -O compile of the SQLite
+	// amalgamation, NewTempSet and Copy together were 200 MB, most of it here.
+	// None of it is necessary, because this dataflow only ever grows a set:
+	//
+	// Each round recomputed a block's live-out from scratch and replaced the
+	// stored one. But live-in sets only gain elements, so the recomputed live-out
+	// always contained the stored one -- accumulating into the stored set gives
+	// the same answer without a new one. The same holds one level up: the new
+	// live-in always contains the old, so unioning it in and asking whether that
+	// changed anything is the same test as comparing them and replacing, which is
+	// what lets the working set be one scratch buffer reused across every block.
+	live := NewTempSet(nt)
 	for changed := true; changed; {
 		changed = false
 		// Process near-exit blocks first so successors' live-in is fresh.
 		for i := len(c.RPO) - 1; i >= 0; i-- {
 			b := c.RPO[i]
 
-			out := NewTempSet(nt)
+			out := l.Out[b]
 			// Successors of a reachable block are reachable, hence in l.In.
-			for _, s := range c.Succs(b) {
+			for k, count := 0, succCount(b); k < count; k++ {
+				s := succAt(b, k)
+				if s == nil {
+					continue
+				}
 				out.Union(l.In[s])
 				// Operands of successor phis flow out along this edge.
 				for _, p := range s.Phis {
@@ -44,9 +61,8 @@ func (c *CFG) Liveness() *Liveness {
 					}
 				}
 			}
-			l.Out[b] = out
 
-			live := out.Copy()
+			live.SetTo(out)
 			live.AddRef(b.Jmp.Arg) // terminator use
 			for _, a := range b.Jmp.Args {
 				live.AddRef(a) // extra live-out registers (multi-register return)
@@ -78,8 +94,7 @@ func (c *CFG) Liveness() *Liveness {
 				}
 			}
 
-			if !live.Equal(l.In[b]) {
-				l.In[b] = live
+			if l.In[b].Union(live) {
 				changed = true
 			}
 		}

@@ -145,7 +145,7 @@ func computeSafepointRoots(f *ir.Func, cfg *analysis.CFG, liveness *analysis.Liv
 				for allocation := range escaping {
 					recorded[allocation] = true
 				}
-				for _, temporary := range live.Members() {
+				for temporary := range live.All() {
 					if isSafepointRoot(f, temporary) {
 						recorded[temporary] = true
 					}
@@ -766,11 +766,11 @@ func buildIntervals(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, num 
 		bp := num.pos[b]
 		// Live-in temps are live from the block's first position...
 		if cfg.Reachable(b) {
-			for _, id := range live.LiveIn(b).Members() {
+			for id := range live.LiveIn(b).All() {
 				extend(id, bp[0])
 			}
 			// ...live-out temps through the terminator position.
-			for _, id := range live.LiveOut(b).Members() {
+			for id := range live.LiveOut(b).All() {
 				extend(id, bp[1])
 			}
 		}

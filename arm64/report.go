@@ -77,7 +77,7 @@ func dumpPressureReport(f *ir.Func, alloc *allocation, num *numbering, cfg *anal
 			in := &b.Instrs[k]
 			// GP pressure at this instruction = int temps live-out of it.
 			gp := 0
-			for _, t := range liveAfter.Members() {
+			for t := range liveAfter.All() {
 				if isInt(t) {
 					gp++
 				}
@@ -88,7 +88,7 @@ func dumpPressureReport(f *ir.Func, alloc *allocation, num *numbering, cfg *anal
 			if gp > maxP {
 				maxP, maxPBlock, maxPFreq = gp, b.Name, fr
 				maxPLive = nil
-				for _, t := range liveAfter.Members() {
+				for t := range liveAfter.All() {
 					if isInt(t) {
 						maxPLive = append(maxPLive, t)
 					}
@@ -105,7 +105,7 @@ func dumpPressureReport(f *ir.Func, alloc *allocation, num *numbering, cfg *anal
 			if in.Op == ir.OCall {
 				// live across = live both before and after (survives the call), int only.
 				var cross []int
-				for _, t := range liveAfter.Members() {
+				for t := range liveAfter.All() {
 					if isInt(t) && liveBefore.Has(t) {
 						cross = append(cross, t)
 					}

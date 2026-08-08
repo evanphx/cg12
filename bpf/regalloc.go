@@ -70,10 +70,10 @@ func (c *comp) regAlloc() {
 	}
 	for _, b := range cfg.RPO {
 		bp := pos[b]
-		for _, id := range live.LiveIn(b).Members() {
+		for id := range live.LiveIn(b).All() {
 			extend(id, bp[0])
 		}
-		for _, id := range live.LiveOut(b).Members() {
+		for id := range live.LiveOut(b).All() {
 			extend(id, bp[1])
 		}
 		p := bp[0]
