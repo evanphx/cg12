@@ -5,7 +5,6 @@ import (
 	"go/token"
 	"go/types"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/evanphx/cg12/internal/cachefile"
@@ -74,16 +73,17 @@ type functionCache struct {
 	recorded map[string]bool
 
 	// aggregates interns AggTypes structurally across units. See hazard 2.
-	aggregates map[string]*ir.AggType
+	//
+	// The table and the walk moved to ir.AggTypeInterner so the memo's decoder
+	// can share one closure across the whole compile rather than decoding a
+	// fresh copy of every type per function. This is the same code; it lives
+	// where both callers can reach it.
+	aggregates *ir.AggTypeInterner
 	// aggregatesScanned is how much of Module.Types the intern table has already
 	// absorbed, so seeding it is amortised rather than quadratic.
 	aggregatesScanned int
 	// declaredAggregates is Module.Types as a set, for the same reason.
 	declaredAggregates map[*ir.AggType]bool
-	// interning guards the walk of nested field types against a type that reaches
-	// itself. goc does not build one, and a compiler that starts to should get a
-	// duplicated type rather than a hang.
-	interning map[*ir.AggType]bool
 	// data indexes the module's definitions by name for the collision check, and
 	// functions and aggregateNames do the same for the other two tables. Together
 	// they answer "does this module already define that symbol", which is what
@@ -134,10 +134,9 @@ func newFunctionCache(identity *CompileIdentity, root string, fset *token.FileSe
 		writing:    map[string]*packageCacheUnit{},
 		replayed:   map[string]bool{},
 		recorded:   map[string]bool{},
-		aggregates: map[string]*ir.AggType{},
+		aggregates: ir.NewAggTypeInterner(),
 
 		declaredAggregates: map[*ir.AggType]bool{},
-		interning:          map[*ir.AggType]bool{},
 		data:               map[string]*ir.Data{},
 		functions:          map[string]bool{},
 		aggregateNames:     map[string]bool{},
@@ -954,25 +953,7 @@ func (c *functionCache) seedData(module *ir.Module) {
 // collected types cold against three warm, on a function whose printed IL was
 // identical.
 func (c *functionCache) internAggregate(aggregate *ir.AggType) *ir.AggType {
-	if aggregate == nil || c.interning[aggregate] {
-		return aggregate
-	}
-	c.interning[aggregate] = true
-	for index := range aggregate.Fields {
-		aggregate.Fields[index].Type = c.internAggregate(aggregate.Fields[index].Type)
-	}
-	for union := range aggregate.Cases {
-		for index := range aggregate.Cases[union] {
-			aggregate.Cases[union][index].Type = c.internAggregate(aggregate.Cases[union][index].Type)
-		}
-	}
-	delete(c.interning, aggregate)
-	key := aggregateKey(aggregate)
-	if existing, known := c.aggregates[key]; known {
-		return existing
-	}
-	c.aggregates[key] = aggregate
-	return aggregate
+	return c.aggregates.Intern(aggregate)
 }
 
 // internFunctionAggregates rewrites every aggregate reference in a decoded
@@ -983,30 +964,7 @@ func (c *functionCache) internAggregate(aggregate *ir.AggType) *ir.AggType {
 // encoder already has to know every one of them, and a merge that missed one
 // would leave a duplicate type behind in exactly the case the encoder does not.
 func (c *functionCache) internFunctionAggregates(function *ir.Func) {
-	function.RetAgg = c.internAggregate(function.RetAgg)
-	for index := range function.AggregateValues {
-		function.AggregateValues[index].Type = c.internAggregate(function.AggregateValues[index].Type)
-	}
-	for index := range function.ParamGroups {
-		function.ParamGroups[index].Type = c.internAggregate(function.ParamGroups[index].Type)
-	}
-	for _, temporary := range function.Temps {
-		if temporary != nil {
-			temporary.Agg = c.internAggregate(temporary.Agg)
-		}
-	}
-	for _, block := range function.Blocks {
-		for index := range block.Instrs {
-			instruction := &block.Instrs[index]
-			instruction.RetAgg = c.internAggregate(instruction.RetAgg)
-			for argument := range instruction.AggArgs() {
-				instruction.AggArgs()[argument] = c.internAggregate(instruction.AggArgs()[argument])
-			}
-			for group := range instruction.ArgGroups() {
-				instruction.ArgGroups()[group].Type = c.internAggregate(instruction.ArgGroups()[group].Type)
-			}
-		}
-	}
+	c.aggregates.InternFunc(function)
 }
 
 // aggregateKey is a structural spelling of an aggregate type, including its name.
@@ -1016,34 +974,9 @@ func (c *functionCache) internFunctionAggregates(function *ir.Func) {
 // cold compile would have shared the pointer. Interning on structure alone would
 // merge two aggregates a cold compile kept apart, and the merged module would stop
 // matching the cold one for no gain.
-func aggregateKey(aggregate *ir.AggType) string {
-	var out strings.Builder
-	var write func(*ir.AggType, int)
-	writeFields := func(fields []ir.Field, depth int) {
-		for _, field := range fields {
-			fmt.Fprintf(&out, "f%d,%d,%v;", field.Sub, field.Count, field.Pointer)
-			if field.Type != nil {
-				write(field.Type, depth+1)
-			}
-		}
-	}
-	write = func(aggregate *ir.AggType, depth int) {
-		if aggregate == nil || depth > 16 {
-			out.WriteString("<>")
-			return
-		}
-		fmt.Fprintf(&out, "[%s|%d|%d|%v|%v|%v|", aggregate.Name, aggregate.Align, aggregate.Size,
-			aggregate.Opaque, aggregate.Packed, aggregate.Union)
-		writeFields(aggregate.Fields, depth)
-		for _, union := range aggregate.Cases {
-			out.WriteString("c:")
-			writeFields(union, depth)
-		}
-		out.WriteString("]")
-	}
-	write(aggregate, 0)
-	return out.String()
-}
+// The structural spelling this used to compute is now ir.aggTypeKey, reached
+// through ir.AggTypeInterner. Two copies of a key function is two definitions
+// of when two types are the same type.
 
 // sameDataDefinition reports whether two definitions of one symbol are the same
 // definition.
