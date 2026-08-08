@@ -21,7 +21,7 @@ import (
 // put them: the source block's other successors would run them too, and the
 // target's other predecessors would not. The new block is that nowhere.
 func SplitCriticalEdges(f *ir.Func) {
-	analysis.BuildCFG(f) // fills Preds
+	analysis.FillPreds(f) // the numbering a full CFG carries is not read here
 	// Snapshot the block list; we append split blocks as we go.
 	blocks := append([]*ir.Block(nil), f.Blocks...)
 	for _, u := range blocks {

@@ -54,6 +54,20 @@ func succAt(b *ir.Block, i int) *ir.Block {
 	}
 }
 
+// FillPreds rebuilds each block's predecessor list and nothing else.
+//
+// It is [BuildCFG] without the reverse postorder, for a caller that mutates the
+// graph and needs the predecessor lists to catch up but never asks a block for
+// its RPO number. That is the whole of what BuildCFG does to f -- computeRPO
+// writes only into the CFG it returns -- so calling this instead is the same
+// change to the function with none of the numbering.
+//
+// It exists because SimplifyCFG's block coalescing called BuildCFG after every
+// single fusion, purely to refresh Preds, and each of those built and threw away
+// a block-keyed map, a postorder slice and a DFS stack. Coalescing was 40% of
+// the 107,026 CFG builds a -O compile of the SQLite amalgamation performs.
+func FillPreds(f *ir.Func) { fillPreds(f) }
+
 // fillPreds rebuilds each block's predecessor list from the executable and
 // synthetic control-flow edges. A predecessor is listed once even if several
 // edges target the same block.

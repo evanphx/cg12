@@ -194,7 +194,13 @@ func SimplifyCFG(f *ir.Func) bool {
 	// it unconditionally: the two are straight-line, so fuse them (appending the
 	// successor's body and taking its terminator) and redirect any phis that named
 	// the absorbed block to name the survivor.
-	analysis.BuildCFG(f)
+	//
+	// The loop reads exactly one thing the graph has to be current for: whether
+	// the successor has a single predecessor. So it refreshes the predecessor
+	// lists rather than building a whole CFG -- the numbering a CFG carries is
+	// discarded here, and building one per fusion made this the largest single
+	// source of CFG builds in the compiler.
+	analysis.FillPreds(f)
 	for {
 		fused := false
 		for _, a := range f.Blocks {
@@ -223,10 +229,10 @@ func SimplifyCFG(f *ir.Func) bool {
 		if !fused {
 			break
 		}
-		analysis.BuildCFG(f)
+		analysis.FillPreds(f)
 	}
 
-	analysis.BuildCFG(f) // refresh predecessor lists
+	analysis.FillPreds(f) // refresh predecessor lists
 	return changed
 }
 
