@@ -67,7 +67,8 @@ func requireAggregateMatchesType(t *testing.T, g *gen, name string, valueType ty
 
 // aggregateProbeGen returns a gen holding only what goABIAggregate reads: the
 // file set its cache keys are built from, a module to register aggregates in,
-// the cache itself, and the flag that says this compilation has a managed
+// the two caches it writes through -- the aggregates themselves and the type-key
+// memo behind them -- and the flag that says this compilation has a managed
 // runtime and therefore Go-ABI aggregates at all.
 func aggregateProbeGen(fset *token.FileSet) *gen {
 	return &gen{
@@ -75,6 +76,7 @@ func aggregateProbeGen(fset *token.FileSet) *gen {
 		mod:               ir.NewModule(),
 		runtimeAllocation: true,
 		goABITypes:        map[string]*ir.AggType{},
+		goTypeKeys:        map[types.Type]string{},
 	}
 }
 
