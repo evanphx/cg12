@@ -103,7 +103,7 @@ func CoalescePhis(f *ir.Func) {
 
 	cfg := analysis.BuildCFG(f)
 	live := cfg.Liveness()
-	interf := buildPhiInterference(f, live, nt, involved)
+	interf := buildPhiInterference(cfg, live, nt, involved)
 
 	// Union-find over temps, each root carrying its members and the union of its
 	// members' interference sets. Two classes may coalesce only when no member of
@@ -216,7 +216,17 @@ func CoalescePhis(f *ir.Func) {
 // phi-involved temps whose live range overlaps it -- the ones it may not share
 // storage with. Interference with temps that take no part in any phi is not
 // recorded: those are never coalesced, so it could not change a decision.
-func buildPhiInterference(f *ir.Func, live *analysis.Liveness, nt int, involved []bool) []*analysis.TempSet {
+//
+// It walks the CFG's reverse postorder rather than f.Blocks because that is the
+// set [analysis.Liveness] answers for: liveness is computed for the blocks
+// reachable from the entry and nothing else, so an unreachable block left in the
+// list has no live-out set at all, and reading one through the map returned nil
+// and crashed. Skipping it is not merely tolerable but right -- interference is
+// a claim about two temps being live at the same moment, and code that cannot
+// execute has no moments. A computed-goto target is not affected: its edges are
+// executable successors ([ir.Block.SuccAt] enumerates JmpBr targets), so it is
+// reachable and in the reverse postorder like any other block.
+func buildPhiInterference(cfg *analysis.CFG, live *analysis.Liveness, nt int, involved []bool) []*analysis.TempSet {
 	interf := make([]*analysis.TempSet, nt)
 	for i := 0; i < nt; i++ {
 		if involved[i] {
@@ -238,7 +248,7 @@ func buildPhiInterference(f *ir.Func, live *analysis.Liveness, nt int, involved 
 			}
 		}
 	}
-	for _, b := range f.Blocks {
+	for _, b := range cfg.RPO {
 		liveNow := live.Out[b].Copy()
 		liveNow.AddRef(b.Jmp.Arg)
 		for _, a := range b.Jmp.Args {

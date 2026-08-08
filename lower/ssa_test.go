@@ -92,6 +92,42 @@ func TestCoalescePhisRemovesComputedGotoCopies(t *testing.T) {
 	}
 }
 
+func TestCoalescePhisSurvivesUnreachableBlocks(t *testing.T) {
+	// A block the optimizer stopped jumping to but left in the list has no
+	// liveness at all -- analysis.Liveness answers for the blocks reachable from
+	// the entry and no others -- and buildPhiInterference used to walk f.Blocks,
+	// read a nil live-out set through the map, and crash on it.
+	//
+	// Found on Lua's lvm.c under -O, whose interpreter loop leaves one behind
+	// after simplification; the panic was in analysis.(*TempSet).Copy with a nil
+	// receiver. The shape is the whole bug: an indirect-branch phi to get this far
+	// (coalescing does nothing without one), plus one orphan block.
+	f := ir.NewModule().NewFunc("interp", ir.ClsW)
+	param := f.Param("n", ir.ClsW)
+	e := f.Entry()
+	a := f.NewBlock("a")
+	b := f.NewBlock("b")
+
+	t0 := e.Add(ir.ClsW, param, f.Word(1))
+	e.BrIndirect(e.BlockAddr(a), a, b)
+	t1 := b.Add(ir.ClsW, param, f.Word(2))
+	b.Goto(a)
+	xa := a.Phi(ir.ClsW, ir.PhiEdge{From: e, Val: t0}, ir.PhiEdge{From: b, Val: t1})
+	a.Ret(xa)
+
+	// Nothing branches here, and nothing ever will.
+	orphan := f.NewBlock("orphan")
+	orphan.Ret(orphan.Add(ir.ClsW, param, f.Word(3)))
+
+	SplitCriticalEdges(f)
+	CoalescePhis(f)
+	DestructSSA(f)
+
+	for _, blk := range f.Blocks {
+		assert.Empty(t, blk.Phis, "phis are gone after destruction")
+	}
+}
+
 func TestCoalescePhisKeepsInterferingCopies(t *testing.T) {
 	// When a phi's result and an argument are simultaneously live (they interfere),
 	// they must not be coalesced -- doing so would clobber one. Here the argument t0
