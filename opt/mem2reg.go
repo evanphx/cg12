@@ -42,6 +42,7 @@ func Mem2Reg(f *ir.Func) bool {
 	}
 
 	cfg := analysis.BuildCFG(f)
+	defer cfg.Release()
 	dom := cfg.Dominators()
 	df := cfg.DominanceFrontier(dom)
 

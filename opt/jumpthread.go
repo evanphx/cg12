@@ -83,6 +83,10 @@ func jumpThread(f *ir.Func, state map[*ir.Func]*jtState) bool {
 		cfg := analysis.BuildCFG(f)
 		dom := cfg.Dominators()
 		cand, ok := findThreadCandidate(f, cfg, dom)
+		// Last use of both: what follows threads the candidate and prunes, neither
+		// of which asks the graph for a number. A deferred release would instead
+		// hold every round's numbering until the pass returned.
+		cfg.Release()
 		if !ok {
 			break
 		}

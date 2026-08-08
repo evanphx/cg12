@@ -65,6 +65,7 @@ func IfConvert(f *ir.Func) bool {
 		return false
 	}
 	cfg := analysis.BuildCFG(f)
+	defer cfg.Release()
 	if len(cfg.RPO) == 0 {
 		return false
 	}

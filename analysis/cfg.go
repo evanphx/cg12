@@ -1,6 +1,10 @@
 package analysis
 
-import "github.com/evanphx/cg12/ir"
+import (
+	"sync"
+
+	"github.com/evanphx/cg12/ir"
+)
 
 // CFG holds control-flow information derived from a function: predecessor lists
 // (written back onto the blocks) and a reverse-postorder numbering. It is the
@@ -15,17 +19,90 @@ type CFG struct {
 	// 93 MB on a -O compile of the SQLite amalgamation, the largest single
 	// allocation the CFG makes.
 	num map[*ir.Block]int32
+
+	// released marks a CFG whose numbering has been handed back; see [CFG.Release].
+	released bool
 }
 
 // BuildCFG computes predecessors and reverse postorder for f. Blocks not
 // reachable from the entry are omitted from RPO (and thus from later analyses).
+//
+// A caller that is finished with the result should say so with [CFG.Release],
+// which hands the numbering map back to be filled in again rather than
+// collected. See there for why that is worth doing and when it is not allowed.
 func BuildCFG(f *ir.Func) *CFG {
 	fillPreds(f)
-	// Presized: a growing map rehashes on the way up, and rehashing was a
-	// measurable share of a whole-module compile all by itself.
-	c := &CFG{Fn: f, num: make(map[*ir.Block]int32, len(f.Blocks))}
+	c := &CFG{Fn: f, num: takeNumbering(len(f.Blocks))}
 	c.computeRPO()
 	return c
+}
+
+// pooledNumberingLimit bounds the size of a numbering map worth recycling.
+//
+// A map handed back from a large function keeps its buckets for as long as the
+// pool holds it, and would then be handed to a small one that cannot use them.
+// Measured on a -O compile of the SQLite amalgamation, half of all CFG builds
+// are on functions of sixteen blocks or fewer and 96% on 128 or fewer, so a
+// modest limit captures nearly all of the reuse and none of the retention.
+const pooledNumberingLimit = 256
+
+var numberingPool sync.Pool
+
+// takeNumbering returns a map to number size blocks into, recycled if one is
+// waiting. A function too large to have been pooled gets a fresh presized map:
+// growing a small recycled one into place would rehash all the way up, which is
+// the cost presizing exists to avoid.
+func takeNumbering(size int) map[*ir.Block]int32 {
+	if size <= pooledNumberingLimit {
+		if recycled, ok := numberingPool.Get().(map[*ir.Block]int32); ok {
+			return recycled
+		}
+	}
+	return make(map[*ir.Block]int32, size)
+}
+
+// Release says the caller is done with c, so its numbering map can be filled in
+// again by the next build instead of being collected.
+//
+// It is worth saying: a compile builds a CFG per function per pass per fixpoint
+// round -- 60,629 of them for the SQLite amalgamation -- and the map is the
+// largest thing each one allocates, at 29 bytes for every block. Nothing else
+// about the CFG is reused; only the storage.
+//
+// The rule is that c must be dead. Releasing a CFG something still holds would
+// let the next build overwrite the answers it gives, which is why reading a
+// released CFG panics rather than quietly returning a number from somebody
+// else's function. Do not release a CFG that is returned, stored in a struct
+// that outlives the call, or captured by a closure that does -- and when in
+// doubt, do not release at all: the cost of not releasing is the allocation
+// this saves, which is the situation before it existed.
+func (c *CFG) Release() {
+	if c == nil || c.released {
+		return
+	}
+	c.released = true
+	numbering := c.num
+	c.num = nil
+	// RPO is deliberately left alone. It is not recycled -- nothing else will
+	// write to that slice -- so it stays correct, and clearing it would be a trap
+	// rather than a check: RPO is a plain exported field, so a read after release
+	// cannot be intercepted, and a nil one would quietly turn a pass that walks it
+	// into a pass that does nothing. Only the map is handed back, and only the map
+	// reads are guarded.
+	if len(numbering) > pooledNumberingLimit {
+		return
+	}
+	clear(numbering)
+	numberingPool.Put(numbering)
+}
+
+// checkLive panics when a released CFG is read. The alternative is worse than a
+// panic: c.num is nil after a release, and a nil map reads as "no such block",
+// so every block would silently report itself unreachable.
+func (c *CFG) checkLive() {
+	if c.released {
+		panic("analysis: CFG read after Release")
+	}
 }
 
 // Succs returns the executable and synthetic analysis successors of b.
@@ -152,6 +229,7 @@ func (c *CFG) computeRPO() {
 
 // Num returns the reverse-postorder index of b, or -1 if b is unreachable.
 func (c *CFG) Num(b *ir.Block) int {
+	c.checkLive()
 	if n, ok := c.num[b]; ok {
 		return int(n)
 	}
@@ -160,6 +238,7 @@ func (c *CFG) Num(b *ir.Block) int {
 
 // Reachable reports whether b is reachable from the entry.
 func (c *CFG) Reachable(b *ir.Block) bool {
+	c.checkLive()
 	_, ok := c.num[b]
 	return ok
 }

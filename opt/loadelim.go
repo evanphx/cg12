@@ -16,6 +16,7 @@ func LoadElim(f *ir.Func) bool {
 	}
 	ai := newAliasInfo(f)
 	cfg := analysis.BuildCFG(f)
+	defer cfg.Release()
 
 	exit := map[*ir.Block]availMem{}
 	sub := subst{}
