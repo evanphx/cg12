@@ -49,3 +49,8 @@ runtime_package_initializer_dispatch
 # Python bytecode from the placement sweep helper
 __pycache__/
 *.pyc
+
+# Real C programs the compiler is measured against, fetched by pinned hash
+# rather than committed: sqlite3.c alone is 9.2 MB of generated C. See
+# scripts/fetch-bench-c.sh, which explains why each one is here.
+/cc/testdata/bench/

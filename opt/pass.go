@@ -118,6 +118,26 @@ type tracked interface {
 // runPass applies one pipeline step, using change tracking where the pass
 // supports it.
 func runPass(p Pass, m *ir.Module, log *changeLog) bool {
+	if !passTimingEnabled {
+		return applyPass(p, m, log)
+	}
+	// A fixpoint reaches each of its members through runPass as well, so timing
+	// it here on top of them would count the same work in two rows. Time the
+	// leaves; opt/passtime.go counts the fixpoints separately.
+	if _, nested := p.(fixpoint); nested {
+		return applyPass(p, m, log)
+	}
+	startBytes, startObjects := allocated()
+	start := time.Now()
+	changed := applyPass(p, m, log)
+	elapsed := time.Since(start)
+	endBytes, endObjects := allocated()
+	recordPassRun(passKeyOf(p), elapsed, endBytes-startBytes, endObjects-startObjects)
+	return changed
+}
+
+// applyPass is runPass with the accounting taken out.
+func applyPass(p Pass, m *ir.Module, log *changeLog) bool {
 	if t, ok := p.(tracked); ok {
 		return t.runTracked(m, log)
 	}
@@ -155,14 +175,20 @@ func (p funcPass) Run(m *ir.Module) bool { return p.runTracked(m, nil) }
 
 func (p funcPass) runTracked(m *ir.Module, log *changeLog) bool {
 	changed := false
+	// Counted in locals and filed once at the end: a pass sees every function in
+	// the module, so recording a visit at a time would measure the accounting.
+	// See opt/passtime.go.
+	var visits, skipped, moves int64
 	for _, f := range m.Funcs {
 		if f.Start == nil {
 			continue // a declaration with no body
 		}
 		if log.isFrozen(f) {
+			skipped++
 			continue // a memoised answer; see Session.Freeze
 		}
 		if log.settled(p.id, f) {
+			skipped++
 			continue // converged on exactly these bytes already
 		}
 		// CFG analyses currently model a single entry. Leave metadata-entered
@@ -170,6 +196,7 @@ func (p funcPass) runTracked(m *ir.Module, log *changeLog) bool {
 		// Declining to transform one is a settled outcome like any other, so the
 		// scan for it is not repeated until something changes the function.
 		if hasSecondaryEntry(f) {
+			skipped++
 			log.record(p.id, f, false)
 			continue
 		}
@@ -182,10 +209,15 @@ func (p funcPass) runTracked(m *ir.Module, log *changeLog) bool {
 		} else {
 			moved = p.run(f)
 		}
+		visits++
 		log.record(p.id, f, moved)
 		if moved {
+			moves++
 			changed = true
 		}
+	}
+	if passTimingEnabled {
+		recordPassVisits(passKey{name: p.name, id: p.id}, visits, skipped, moves)
 	}
 	return changed
 }
@@ -224,8 +256,14 @@ func (fp fixpoint) Name() string { return fp.name }
 func (fp fixpoint) Run(m *ir.Module) bool { return fp.runTracked(m, nil) }
 
 func (fp fixpoint) runTracked(m *ir.Module, log *changeLog) bool {
+	if passTimingEnabled {
+		recordFixpointRound(fp.name, true)
+	}
 	any := false
 	for {
+		if passTimingEnabled {
+			recordFixpointRound(fp.name, false)
+		}
 		round := false
 		for _, p := range fp.passes {
 			if runPass(p, m, log) {
