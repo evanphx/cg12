@@ -3,6 +3,7 @@ package arm64
 import (
 	"fmt"
 	"math"
+	"os"
 	"sort"
 
 	"github.com/evanphx/cg12/analysis"
@@ -600,7 +601,69 @@ func (g *colorGraph) assign() (*allocation, error) {
 	if err := g.verifyPrecolor(); err != nil {
 		return nil, err
 	}
+	g.reportStats(alloc)
 	return alloc, nil
+}
+
+// reportStats prints what the allocation cost, when CG12_REGALLOC_STATS names a
+// function (or is "1" for every function over a hundred temps).
+//
+// It exists because the interesting question about this allocator is not whether
+// it succeeded but how much it had to give up, and that is invisible from the
+// outside. A temp here gets a register for the whole of its live range or none of
+// it -- there is no splitting -- so a value wanted in a hot loop but also live
+// across a cold stretch loses its register everywhere. The numbers that show it
+// are the share of call-crossing values that ended up in memory, and how much of
+// the spill weight those account for.
+func (g *colorGraph) reportStats(alloc *allocation) {
+	want := os.Getenv("CG12_REGALLOC_STATS")
+	if want == "" {
+		return
+	}
+	f := g.f
+	if want != "1" && want != f.Name {
+		return
+	}
+	var nodes, spilled, crossing, crossSpilled int
+	var spillWeight, crossSpillWeight float64
+	for t := range f.Temps {
+		if !g.node[t] {
+			continue
+		}
+		nodes++
+		isSpilled := f.Temps[t].Reg == ir.NoReg
+		if isSpilled {
+			spilled++
+			spillWeight += g.cost[t]
+		}
+		if g.crossFreq[t] > 0 {
+			crossing++
+			if isSpilled {
+				crossSpilled++
+				crossSpillWeight += g.cost[t]
+			}
+		}
+	}
+	if want == "1" && nodes < 100 {
+		return
+	}
+	pct := func(a, b int) float64 {
+		if b == 0 {
+			return 0
+		}
+		return float64(a) / float64(b) * 100
+	}
+	fmt.Fprintf(os.Stderr,
+		"regalloc %s: temps=%d spilled=%d (%.0f%%) callCrossing=%d spilledOfThose=%d (%.0f%%) "+
+			"spillBytes=%d spillWeight=%.0f ofWhichCallCrossing=%.0f%%\n",
+		f.Name, nodes, spilled, pct(spilled, nodes), crossing, crossSpilled, pct(crossSpilled, crossing),
+		alloc.spillBytes, spillWeight,
+		func() float64 {
+			if spillWeight == 0 {
+				return 0
+			}
+			return crossSpillWeight / spillWeight * 100
+		}())
 }
 
 // spillRatio ranks spill candidates: spill cost per interfering neighbour freed. A
