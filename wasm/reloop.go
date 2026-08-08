@@ -96,7 +96,7 @@ func (s *structurer) classify() error {
 		if !s.isMerge[b] {
 			continue
 		}
-		d := s.dom.Idom[b]
+		d := s.dom.Idom(b)
 		s.mergeKids[d] = append(s.mergeKids[d], b)
 	}
 	for d, kids := range s.mergeKids {

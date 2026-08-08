@@ -178,6 +178,31 @@ type rpoFrame struct {
 	next  int
 }
 
+// rpoStackPool recycles the depth-first walk's stack.
+//
+// This one needs no lifetime rule at all, which is what makes it the easiest of
+// the three things a CFG build allocates: the stack is created, walked and
+// dropped entirely inside computeRPO and is never reachable from the CFG it
+// produces. It was 33 MB of a -O compile of the SQLite amalgamation.
+var rpoStackPool sync.Pool
+
+func takeRPOStack(size int) []rpoFrame {
+	if recycled, ok := rpoStackPool.Get().([]rpoFrame); ok {
+		return recycled[:0]
+	}
+	return make([]rpoFrame, 0, size)
+}
+
+// putRPOStack hands a stack back, unless the function it grew for was large
+// enough that holding its capacity would cost more than the reuse saves -- the
+// same bound, and the same reasoning, as the numbering maps.
+func putRPOStack(stack []rpoFrame) {
+	if cap(stack) > pooledNumberingLimit {
+		return
+	}
+	rpoStackPool.Put(stack[:0])
+}
+
 func (c *CFG) computeRPO() {
 	// The walk is the recursive postorder DFS it has always been, written with an
 	// explicit stack: the closure the recursive form needed escaped to the heap on
@@ -186,7 +211,7 @@ func (c *CFG) computeRPO() {
 	const visiting = -1
 	post := make([]*ir.Block, 0, len(c.Fn.Blocks))
 	if c.Fn.Start != nil {
-		stack := make([]rpoFrame, 0, len(c.Fn.Blocks))
+		stack := takeRPOStack(len(c.Fn.Blocks))
 		stack = append(stack, rpoFrame{block: c.Fn.Start})
 		c.num[c.Fn.Start] = visiting
 		for len(stack) > 0 {
@@ -213,6 +238,7 @@ func (c *CFG) computeRPO() {
 			post = append(post, b)
 			stack = stack[:top]
 		}
+		putRPOStack(stack)
 	}
 	// Reverse the postorder in place and keep it as the RPO, rather than copying
 	// it into a second slice of the same size: the copy was 26 MB of a -O compile

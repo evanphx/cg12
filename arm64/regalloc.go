@@ -77,7 +77,10 @@ func regAlloc(f *ir.Func) (*allocation, error) {
 	}
 	cfg := analysis.BuildCFG(f)
 	live := cfg.Liveness()
-	freq := cfg.Frequency(cfg.Dominators())
+	dom := cfg.Dominators()
+	freq := cfg.Frequency(dom)
+	// The frequency estimate is block-keyed and keeps nothing of the tree.
+	dom.Release()
 
 	alloc, err := colorAlloc(f, cfg, live, freq)
 	if err != nil {
@@ -96,7 +99,13 @@ func regAlloc(f *ir.Func) (*allocation, error) {
 	// pointers so computeFrame's allocOff (keyed by the final instruction) matches.
 	refreshRematAllocas(f, alloc.remat)
 
+	// The first CFG described the blocks as they were before caller-save insertion
+	// rewrote them, and nothing above outlives this point: colouring, the spill
+	// coalescer and insertCallerSaves all take it as an argument and keep only
+	// block-keyed results.
+	cfg.Release()
 	cfg = analysis.BuildCFG(f)
+	defer cfg.Release()
 	live = cfg.Liveness()
 	num := numberInstrs(cfg)
 	alloc.intervals = buildIntervals(f, cfg, live, num)

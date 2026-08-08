@@ -87,6 +87,7 @@ func jumpThread(f *ir.Func, state map[*ir.Func]*jtState) bool {
 		// of which asks the graph for a number. A deferred release would instead
 		// hold every round's numbering until the pass returned.
 		cfg.Release()
+		dom.Release()
 		if !ok {
 			break
 		}

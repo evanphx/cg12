@@ -44,6 +44,7 @@ func Mem2Reg(f *ir.Func) bool {
 	cfg := analysis.BuildCFG(f)
 	defer cfg.Release()
 	dom := cfg.Dominators()
+	defer dom.Release()
 	df := cfg.DominanceFrontier(dom)
 
 	// A phi merging a promoted variable inherits that variable's name, so the SSA
@@ -384,7 +385,7 @@ func isDefaultName(s string) bool {
 func domChildren(cfg *analysis.CFG, dom *analysis.DomTree) map[*ir.Block][]*ir.Block {
 	children := map[*ir.Block][]*ir.Block{}
 	for _, b := range cfg.RPO {
-		if id := dom.Idom[b]; id != nil {
+		if id := dom.Idom(b); id != nil {
 			children[id] = append(children[id], b)
 		}
 	}

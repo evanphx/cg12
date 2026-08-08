@@ -105,5 +105,5 @@ func TestEmptyFunctionCFG(t *testing.T) {
 	c := BuildCFG(f)
 	assert.Empty(t, c.RPO)
 	d := c.Dominators()
-	assert.Empty(t, d.Idom)
+	assert.Zero(t, d.Len())
 }

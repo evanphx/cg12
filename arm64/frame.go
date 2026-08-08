@@ -83,7 +83,10 @@ func computeFrame(f *ir.Func, alloc *allocation, conventions calleeConventions) 
 	// lifetimes are disjoint (per their lifetime.start/end markers) share one slot;
 	// allocaGroups maps each such alloc to its group's representative, and the group
 	// is laid out once, when its first member is reached.
-	groups := allocaGroups(f, analysis.BuildCFG(f))
+	frameCFG := analysis.BuildCFG(f)
+	groups := allocaGroups(f, frameCFG)
+	// allocaGroups returns a block-keyed map; the graph itself is done with here.
+	frameCFG.Release()
 	groupOff := map[*ir.Instr]int{}
 	for _, b := range f.Blocks {
 		for k := range b.Instrs {

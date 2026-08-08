@@ -20,9 +20,9 @@ func (c *CFG) DominanceFrontier(dom *DomTree) map[*ir.Block]BlockSet {
 		if len(b.Preds) < 2 {
 			continue
 		}
-		idb := dom.Idom[b]
+		idb := dom.Idom(b)
 		for _, p := range b.Preds {
-			for runner := p; runner != nil && runner != idb; runner = dom.Idom[runner] {
+			for runner := p; runner != nil && runner != idb; runner = dom.Idom(runner) {
 				add(runner, b)
 			}
 		}

@@ -19,12 +19,12 @@ func GCM(f *ir.Func) bool {
 		return false
 	}
 	dom := cfg.Dominators()
-	idom := dom.Idom
+	defer dom.Release()
 	domDepth := computeDomDepth(cfg, dom)
 	loopDepth := cfg.LoopDepth(dom)
 
 	sched := &gcmScheduler{
-		f: f, cfg: cfg, idom: idom, domDepth: domDepth, loopDepth: loopDepth,
+		f: f, cfg: cfg, dom: dom, domDepth: domDepth, loopDepth: loopDepth,
 		movInstr: map[uint32]ir.Instr{}, origBlock: map[uint32]*ir.Block{},
 		fixedBlock: map[uint32]*ir.Block{}, early: map[uint32]*ir.Block{},
 		selected: map[uint32]*ir.Block{}, uses: map[uint32][]useSite{},
@@ -41,7 +41,7 @@ type useSite struct {
 type gcmScheduler struct {
 	f         *ir.Func
 	cfg       *analysis.CFG
-	idom      map[*ir.Block]*ir.Block
+	dom       *analysis.DomTree
 	domDepth  map[*ir.Block]int
 	loopDepth map[*ir.Block]int
 
@@ -220,7 +220,7 @@ func (s *gcmScheduler) scheduleLate(id uint32) *ir.Block {
 		best = e // dead value: park at its earliest position (DCE will remove it)
 	} else {
 		for cur := lca; cur != e; {
-			cur = s.idom[cur]
+			cur = s.dom.Idom(cur)
 			if cur == nil {
 				break
 			}
@@ -267,14 +267,14 @@ func (s *gcmScheduler) lca(a, b *ir.Block) *ir.Block {
 		return a
 	}
 	for s.domDepth[a] > s.domDepth[b] {
-		a = s.idom[a]
+		a = s.dom.Idom(a)
 	}
 	for s.domDepth[b] > s.domDepth[a] {
-		b = s.idom[b]
+		b = s.dom.Idom(b)
 	}
 	for a != b {
-		a = s.idom[a]
-		b = s.idom[b]
+		a = s.dom.Idom(a)
+		b = s.dom.Idom(b)
 	}
 	return a
 }
@@ -282,7 +282,7 @@ func (s *gcmScheduler) lca(a, b *ir.Block) *ir.Block {
 func computeDomDepth(cfg *analysis.CFG, dom *analysis.DomTree) map[*ir.Block]int {
 	depth := map[*ir.Block]int{}
 	for _, b := range cfg.RPO { // RPO visits a dominator before the blocks it dominates
-		if id := dom.Idom[b]; id != nil {
+		if id := dom.Idom(b); id != nil {
 			depth[b] = depth[id] + 1
 		}
 	}

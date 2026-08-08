@@ -21,6 +21,7 @@ func GVN(f *ir.Func) bool {
 	// The dominator tree and the children map are block-keyed and hold no CFG,
 	// so the numbering can go back now rather than at the end of the pass.
 	cfg.Release()
+	defer dom.Release()
 
 	sub := subst{}
 	table := map[valueKey]ir.Ref{}
