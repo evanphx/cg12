@@ -1,6 +1,11 @@
 package arm64
 
-import "github.com/evanphx/cg12/ir"
+import (
+	"fmt"
+	"os"
+
+	"github.com/evanphx/cg12/ir"
+)
 
 // Rematerialization (GCC's lra-remat): a value whose definition is a cheap, pure,
 // operand-free computation is recomputed at each use instead of spilled and reloaded,
@@ -34,6 +39,8 @@ func rematRules(f *ir.Func) map[int]rematRule {
 	defCount := make([]int, n)
 	defInstr := make([]*ir.Instr, n)
 	unsafe := make([]bool, n)
+	// Two passes: which instruction defines each temp has to be known before the
+	// second can ask whether a particular consumer is able to rebuild it.
 	for _, b := range f.Blocks {
 		for k := range b.Instrs {
 			in := &b.Instrs[k]
@@ -41,6 +48,11 @@ func rematRules(f *ir.Func) map[int]rematRule {
 				defCount[d]++
 				defInstr[d] = in
 			}
+		}
+	}
+	for _, b := range f.Blocks {
+		for k := range b.Instrs {
+			in := &b.Instrs[k]
 			// Only instructions that resolve their operands through the selection
 			// driver's src/reload path can consume a rematerialised value (it is rebuilt
 			// there). An operand of a call, parameter, blit, or by-value aggregate flows
@@ -48,7 +60,7 @@ func rematRules(f *ir.Func) map[int]rematRule {
 			// slot directly and cannot recompute, so those operands are not remat-safe.
 			if !srcResolvesOperands(in) {
 				for _, a := range in.Uses() {
-					if a.Kind == ir.RefTemp {
+					if a.Kind == ir.RefTemp && !argTakesFrameAddressDirectly(in, defInstr[a.ID]) {
 						unsafe[a.ID] = true
 					}
 				}
@@ -65,8 +77,25 @@ func rematRules(f *ir.Func) map[int]rematRule {
 	}
 
 	rules := map[int]rematRule{}
+	var rejFixed, rejGC, rejUnsafe, rejMultiDef, allocas int
 	for t := 0; t < n; t++ {
 		tt := f.Temps[t]
+		if tt != nil && defInstr[t] != nil {
+			switch defInstr[t].Op {
+			case ir.OAlloc4, ir.OAlloc8, ir.OAlloc16:
+				allocas++
+				switch {
+				case tt.Fixed:
+					rejFixed++
+				case tt.GCRef:
+					rejGC++
+				case unsafe[t]:
+					rejUnsafe++
+				case defCount[t] != 1:
+					rejMultiDef++
+				}
+			}
+		}
 		if tt == nil || tt.Fixed || tt.GCRef || unsafe[t] || defCount[t] != 1 {
 			continue
 		}
@@ -85,6 +114,13 @@ func rematRules(f *ir.Func) map[int]rematRule {
 				}
 			}
 		}
+	}
+	// CG12_REMAT_STATS=<func> reports why a function's alloca addresses did or did
+	// not become rematerialisable. It is how the callOperand rejection above was
+	// found: sqlite3VdbeExec reported 41 of 64 rejected for that reason alone.
+	if want := os.Getenv("CG12_REMAT_STATS"); want != "" && want == f.Name {
+		fmt.Fprintf(os.Stderr, "remat %s: allocaTemps=%d rematerialised=%d rejected(fixed=%d gcref=%d callOperand=%d multiDef=%d)\n",
+			f.Name, allocas, len(rules), rejFixed, rejGC, rejUnsafe, rejMultiDef)
 	}
 	return rules
 }
@@ -122,6 +158,34 @@ func srcResolvesOperands(in *ir.Instr) bool {
 		return false
 	}
 	return true
+}
+
+// argTakesFrameAddressDirectly reports whether in is a call argument that the
+// emitter builds from the frame pointer itself, so the value it names never has
+// to have been put anywhere first.
+//
+// callSequence routes an OArg whose operand has a frame allocation to
+// materializeFrameAllocation, which emits `add rd, x29, #off` straight into the
+// ABI register -- the same instruction rematerialising the alloca would emit. So
+// for this one consumer the blanket "a call operand cannot recompute" rule is
+// wrong, and it was expensive: an interpreter hands the address of its locals to
+// out-parameters constantly (&iMeta, &zErr, &pVCur in SQLite's VDBE), and that
+// cost 41 of sqlite3VdbeExec's 64 alloca addresses their rematerialisation, and
+// with it their exemption from the register pressure they were adding.
+//
+// The condition mirrors callSequence's own branch exactly: a register argument,
+// not an aggregate, whose operand is a fixed alloca. Every such alloca has a
+// frame offset (computeFrame fills allocOff for all of them), so the emitter is
+// always able to honour it.
+func argTakesFrameAddressDirectly(in, def *ir.Instr) bool {
+	if def == nil || in.Op != ir.OArg || in.To.IsNone() || in.AggArgs() != nil || in.RetAgg() != nil {
+		return false
+	}
+	switch def.Op {
+	case ir.OAlloc4, ir.OAlloc8, ir.OAlloc16:
+		return true
+	}
+	return false
 }
 
 // movImmChunks is how many movz/movk instructions materialising val takes: the number

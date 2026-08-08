@@ -29,6 +29,7 @@ func colorAlloc(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, freq *an
 	g := newColorGraph(f)
 	g.freq = freq
 	g.remat = rematRules(f)
+	g.cfg, g.live = cfg, live
 	g.build(cfg, live)
 	// A rematerialisable value is cheap to "spill" -- one ALU op per use, no memory --
 	// so make it a preferred spill victim.
@@ -116,6 +117,11 @@ type colorGraph struct {
 	mv        [][]int            // temp id -> temps it is copied to/from (coalescing bias)
 	cost      []float64          // temp id -> spill cost (references weighted by block frequency)
 	crossFreq []float64          // temp id -> summed frequency of the calls it is live across
+
+	// Kept only so reportStats can describe a temp's live range. Nothing in the
+	// colouring itself reads them after build.
+	cfg  *analysis.CFG
+	live *analysis.Liveness
 }
 
 func newColorGraph(f *ir.Func) *colorGraph {
@@ -357,24 +363,70 @@ func (g *colorGraph) assign() (*allocation, error) {
 		cost float64
 	}
 	var cands []crossCand
+	var exRemoved, exNotNode, exFloat, exNoCross, exLowCost int
 	for t := range f.Temps {
 		if removed[t] || !g.node[t] || f.Temps[t].Cls.IsFloat() {
+			switch {
+			case removed[t]:
+				exRemoved++
+			case !g.node[t]:
+				exNotNode++
+			default:
+				exFloat++
+			}
+			if os.Getenv("CG12_PREASSIGN_STATS") == f.Name && g.cost[t] > 5 {
+				n := f.Temps[t].Name
+				if n == "" {
+					n = fmt.Sprintf("t%d", t)
+				}
+				why := "float"
+				if removed[t] {
+					why = "removed"
+				} else if !g.node[t] {
+					why = "not a node"
+				}
+				fmt.Fprintf(os.Stderr, "  EXCLUDED t%d %-16s cost=%.1f crossFreq=%.1f reason=%s fixed=%v reg=%d\n", t, n, g.cost[t], g.crossFreq[t], why, f.Temps[t].Fixed, f.Temps[t].Reg)
+			}
 			continue
 		}
 		// preferCallee: the save/restore bill of a caller-saved register (crossFreq*2)
 		// outweighs the single prologue save/restore of a callee-saved one (cost ~2).
 		if g.crossFreq[t] > 0 && g.crossFreq[t]*2 >= 2.0 && g.cost[t] >= 1.0 {
 			cands = append(cands, crossCand{t, g.cost[t]})
+		} else if g.crossFreq[t] == 0 {
+			exNoCross++
+		} else {
+			exLowCost++
 		}
 	}
+	if os.Getenv("CG12_PREASSIGN_STATS") == f.Name {
+		fmt.Fprintf(os.Stderr, "preassign %s excluded: removed=%d notNode=%d float=%d noCallCross=%d lowCost=%d\n",
+			f.Name, exRemoved, exNotNode, exFloat, exNoCross, exLowCost)
+	}
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].cost > cands[j].cost })
-	for _, c := range cands {
+	preassignDebug := os.Getenv("CG12_PREASSIGN_STATS") == f.Name
+	if preassignDebug {
+		fmt.Fprintf(os.Stderr, "preassign %s: %d call-crossing candidates\n", f.Name, len(cands))
+	}
+	for ci, c := range cands {
 		pick := Reg(ir.NoReg)
 		for _, r := range intAllocOrderFor(f) {
 			if calleeSavedReg(r) && !g.forb[c.t].has(r) {
 				pick = r
 				break
 			}
+		}
+		if preassignDebug && ci < 14 {
+			name := f.Temps[c.t].Name
+			if name == "" {
+				name = fmt.Sprintf("t%d", c.t)
+			}
+			got := "none"
+			if pick != Reg(ir.NoReg) {
+				got = fmt.Sprintf("x%d", int(pick))
+			}
+			fmt.Fprintf(os.Stderr, "  #%d %-16s cost=%.1f crossFreq=%.1f -> %s\n",
+				ci, name, c.cost, g.crossFreq[c.t], got)
 		}
 		if pick == Reg(ir.NoReg) {
 			continue // no callee-saved register free; leave this one to the colourer
@@ -624,14 +676,28 @@ func (g *colorGraph) reportStats(alloc *allocation) {
 	if want != "1" && want != f.Name {
 		return
 	}
-	var nodes, spilled, crossing, crossSpilled int
+	var nodes, spilled, crossing, crossSpilled, rematerialised, gcForced int
+	for t := range f.Temps {
+		if g.node[t] && g.gc[t] {
+			gcForced++
+		}
+	}
 	var spillWeight, crossSpillWeight float64
 	for t := range f.Temps {
 		if !g.node[t] {
 			continue
 		}
 		nodes++
-		isSpilled := f.Temps[t].Reg == ir.NoReg
+		// A rematerialisable temp also has no register, but it costs no memory and
+		// no reload: the emitter recomputes it (an alloca address is one add off the
+		// frame pointer). Counting it as a spill overstates the problem, and this is
+		// the distinction that says whether a wide live range actually costs
+		// anything.
+		_, remat := g.remat[t]
+		isSpilled := f.Temps[t].Reg == ir.NoReg && !remat
+		if remat {
+			rematerialised++
+		}
 		if isSpilled {
 			spilled++
 			spillWeight += g.cost[t]
@@ -653,17 +719,77 @@ func (g *colorGraph) reportStats(alloc *allocation) {
 		}
 		return float64(a) / float64(b) * 100
 	}
+	// How wide a spilled value's live range is decides which repair is the right
+	// one. A value spilled while live across most of the function cannot be helped
+	// by anything but splitting its range; one spilled while live in a handful of
+	// blocks is being spilled for some other reason, and splitting would not reach
+	// it. So the two are counted separately rather than averaged.
+	blocks := len(g.cfg.RPO)
+	span := make([]int, len(f.Temps))
+	if g.live != nil {
+		for _, b := range g.cfg.RPO {
+			for t := range g.live.LiveIn(b).All() {
+				span[t]++
+			}
+		}
+	}
+	var wide, narrow int
+	for t := range f.Temps {
+		if !g.node[t] || f.Temps[t].Reg != ir.NoReg {
+			continue
+		}
+		if _, remat := g.remat[t]; remat {
+			continue
+		}
+		if blocks > 0 && span[t]*4 >= blocks {
+			wide++ // live in a quarter of the function or more
+		} else {
+			narrow++
+		}
+	}
+	if os.Getenv("CG12_REGALLOC_SPILLS") != "" {
+		// The per-temp listing the lifetime diagnostic asks to be correlated against:
+		// opt/liferegions.go reports how wide each source variable's lifetime region
+		// is, and this reports which temps actually lost their register and how far
+		// their live range reaches. A wide-range spill whose source variable has a
+		// narrow region is one clamping liveness to that region could rescue; a wide
+		// range on a variable that really is live function-wide is not.
+		type row struct {
+			id   int
+			name string
+			span int
+			cost float64
+		}
+		var rows []row
+		for t := range f.Temps {
+			if !g.node[t] || f.Temps[t].Reg != ir.NoReg {
+				continue
+			}
+			if _, remat := g.remat[t]; remat {
+				continue
+			}
+			rows = append(rows, row{t, f.Temps[t].Name, span[t], g.cost[t]})
+		}
+		sort.SliceStable(rows, func(i, j int) bool { return rows[i].span > rows[j].span })
+		for _, r := range rows {
+			name := r.name
+			if name == "" {
+				name = "(unnamed)"
+			}
+			fmt.Fprintf(os.Stderr, "spill %s t%d %s span=%d/%d cost=%.1f\n", f.Name, r.id, name, r.span, blocks, r.cost)
+		}
+	}
 	fmt.Fprintf(os.Stderr,
-		"regalloc %s: temps=%d spilled=%d (%.0f%%) callCrossing=%d spilledOfThose=%d (%.0f%%) "+
-			"spillBytes=%d spillWeight=%.0f ofWhichCallCrossing=%.0f%%\n",
-		f.Name, nodes, spilled, pct(spilled, nodes), crossing, crossSpilled, pct(crossSpilled, crossing),
+		"regalloc %s: blocks=%d temps=%d spilled=%d (%.0f%%) callCrossing=%d spilledOfThose=%d (%.0f%%) "+
+			"spillBytes=%d spillWeight=%.0f ofWhichCallCrossing=%.0f%% spilledWideRange=%d spilledNarrowRange=%d remat=%d gcForced=%d managedFrame=%v\n",
+		f.Name, blocks, nodes, spilled, pct(spilled, nodes), crossing, crossSpilled, pct(crossSpilled, crossing),
 		alloc.spillBytes, spillWeight,
 		func() float64 {
 			if spillWeight == 0 {
 				return 0
 			}
 			return crossSpillWeight / spillWeight * 100
-		}())
+		}(), wide, narrow, rematerialised, gcForced, f.UsesManagedFrame())
 }
 
 // spillRatio ranks spill candidates: spill cost per interfering neighbour freed. A
