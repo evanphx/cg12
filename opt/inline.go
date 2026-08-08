@@ -1185,6 +1185,19 @@ func cloneInstr(caller *ir.Func, in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBl
 	// no longer in tail position. Amode is normally unset before lowering, but copy
 	// it so this remains a total instruction clone if a later pipeline reorders the
 	// pass.
+	//
+	// CallConv/CallConvSet must ride along for the same reason, and unlike the
+	// rest they cannot be reconstructed downstream: an indirect call names no
+	// symbol, so calleeConventions.forCall has nothing to look the convention up
+	// by and falls back to the platform ABI. A cloned closure call that lost the
+	// override was lowered as AAPCS64 into an ABIInternal callee, which decides
+	// both argument assignment and result placement. The two agree for a scalar
+	// result and for an aggregate of two words or fewer, so the damage stayed
+	// invisible; they disagree above that, where ABIInternal returns the words in
+	// x0/x1/x2 and AAPCS64 expects the callee to have written them through x8 --
+	// leaving the caller to read its result out of a buffer nobody wrote. That is
+	// crypto/tls's Config.time() returning a garbage time.Time once Config.time
+	// was inlined. See TestInlineKeepsCallConvention.
 	out := ir.Instr{
 		Op:             in.Op,
 		Cls:            in.Cls,
@@ -1198,6 +1211,8 @@ func cloneInstr(caller *ir.Func, in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBl
 		Volatile:       in.Volatile,
 		ClosureCall:    in.ClosureCall,
 		ClosureContext: mapRef(in.ClosureContext),
+		CallConv:       in.CallConv,
+		CallConvSet:    in.CallConvSet,
 		Asm:            in.Asm,
 		Intrin:         in.Intrin,
 		Pos:            in.Pos,

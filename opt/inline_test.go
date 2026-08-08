@@ -917,6 +917,41 @@ func TestInlinePreservesVolatile(t *testing.T) {
 	assert.True(t, vol, "inlined store stayed volatile")
 }
 
+func TestInlineKeepsCallConvention(t *testing.T) {
+	// A callee whose body calls a function value. An indirect call names no
+	// symbol, so the explicit convention on the instruction is the only record of
+	// how it must be lowered -- arm64's calleeConventions.forCall has nothing to
+	// look one up by and falls back to the platform ABI without it. cloneInstr used
+	// to drop the flag, so inlining such a callee silently re-lowered an
+	// ABIInternal call as AAPCS64: agreement for a scalar result, and for an
+	// aggregate over two words a caller that reads its result from the x8 buffer
+	// the callee never wrote instead of from x0/x1/x2.
+	m := ir.NewModule()
+	forward := m.NewFunc("forward", ir.ClsL)
+	fp := forward.Param("fp", ir.ClsP)
+	forwardEntry := forward.Entry()
+	forwardEntry.Ret(forwardEntry.CallWithConvention(ir.ClsL, ir.CallConvGoInternal, fp))
+
+	caller := m.NewFunc("go", ir.ClsL).Export()
+	callerFp := caller.Param("fp", ir.ClsP)
+	callerEntry := caller.Entry()
+	callerEntry.Ret(callerEntry.Call(ir.ClsL, caller.Sym("forward", 0), callerFp))
+
+	require.True(t, opt.Inline(m))
+
+	var indirect *ir.Instr
+	for _, b := range caller.Blocks {
+		for i := range b.Instrs {
+			if in := &b.Instrs[i]; in.Op == ir.OCall && in.Args[0].Kind != ir.RefConst {
+				indirect = in
+			}
+		}
+	}
+	require.NotNil(t, indirect, "the cloned indirect call is in the caller")
+	assert.True(t, indirect.CallConvSet, "the cloned call kept its explicit convention")
+	assert.Equal(t, ir.CallConvGoInternal, indirect.CallConv, "the cloned call kept ABIInternal")
+}
+
 func TestInlinePreservesGCTemporaryAndStackAllocationMetadata(t *testing.T) {
 	m := ir.NewModule()
 	callee := m.NewFunc("callee", ir.ClsP)
