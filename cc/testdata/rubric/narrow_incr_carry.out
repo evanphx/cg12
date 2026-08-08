@@ -1,0 +1,8 @@
+carry hi=1 lo=2
+preinc  1 0
+postinc 1 0
+pluseq  1 0
+predec  1 255
+ushort  1 0
+schar   1 -128
+towide  44

@@ -96,6 +96,33 @@ func (g *gen) convert(v ir.Ref, from, to moderncc.Type) ir.Ref {
 //
 // from may be nil when the source is not an integer (a float conversion), in
 // which case the narrowing always applies.
+// storedValue re-presents a freshly computed value the way memory now holds it,
+// for an expression whose result is the value that was just stored: ++x, x--,
+// and x op= y all yield what landed in x, not what the arithmetic produced.
+//
+// It matters because C computes those in int and stores back in the narrower
+// type. For `u8 x = 255`, `++x` adds one to 255 in a word, giving 256; the store
+// keeps the low byte, 0, and 0 is the value of the expression. Returning the 256
+// is wrong wherever nothing narrows it again -- and an assignment to another u8
+// does narrow it again, which is why this hid: it only shows when the result
+// feeds something that takes it as it is.
+//
+// SQLite is what it was found on. Its page header carries a two-byte cell count
+// incremented by hand, low byte first, with the carry conditional on the wrap:
+//
+//	if( (++data[hdr+4])==0 ) data[hdr+3]++;
+//
+// With the un-narrowed 256 the comparison never holds, the carry never happens,
+// and every b-tree page with more than 255 cells records the wrong count. The
+// database is then corrupt in a way that surfaces much later and elsewhere.
+//
+// It goes through narrowInt with a nil source type deliberately: narrowInt skips
+// the work when the value is already held in the destination's width, which is
+// true of a value loaded from memory and false of one just computed.
+func (g *gen) storedValue(v ir.Ref, t moderncc.Type) ir.Ref {
+	return g.narrowInt(v, nil, t, clsOf(t))
+}
+
 func (g *gen) narrowInt(v ir.Ref, from, to moderncc.Type, tc ir.Cls) ir.Ref {
 	if !moderncc.IsIntegerType(to) || isInt128(to) {
 		return v

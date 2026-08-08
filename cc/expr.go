@@ -408,7 +408,7 @@ func (g *gen) genUnary(n *moderncc.UnaryExpression) ir.Ref {
 		}
 		v := g.incDec(g.loadVal(addr, t), t, n.Case == moderncc.UnaryExpressionInc)
 		g.storeVal(addr, v, t)
-		return v
+		return g.storedValue(v, t)
 	case moderncc.UnaryExpressionSizeofExpr, moderncc.UnaryExpressionSizeofType:
 		var t moderncc.Type
 		if n.Case == moderncc.UnaryExpressionSizeofType {
@@ -837,7 +837,7 @@ func (g *gen) genAssign(n *moderncc.AssignmentExpression) ir.Ref {
 	rhs := g.convert(g.genExpr(n.AssignmentExpression), n.AssignmentExpression.Type(), t)
 	v := g.combineOp(n.Case, old, rhs, t)
 	g.storeVal(addr, v, t)
-	return v
+	return g.storedValue(v, t)
 }
 
 // compoundArithOp maps a compound-assignment case to its binary operator (only
