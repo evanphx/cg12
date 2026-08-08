@@ -388,6 +388,11 @@ func DefaultPipeline() []Pass {
 		// scalar that is now only loaded and stored -- promotable, but the initial
 		// mem2reg ran before inlining and could not see it. Promote again, then clean
 		// up the phis and redundant loads it exposes.
+		// Before this mem2reg, not after: expanding a struct copy into loads and
+		// stores of two locals is what lets the promotion below turn those locals
+		// into registers and delete the copy outright, rather than merely inlining
+		// it. Inlining has run, so the sizes that are going to be constant are.
+		FuncPass("expandcopy", ExpandSmallCopies),
 		FuncPass("mem2reg", Mem2Reg),
 		clean,
 		UnrollPass(), // bounded in-place recursion unrolling
