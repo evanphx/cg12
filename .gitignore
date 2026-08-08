@@ -50,6 +50,11 @@ runtime_package_initializer_dispatch
 __pycache__/
 *.pyc
 
+# Measurement tools built into the working tree by hand. cmd/ccstat is the one
+# that keeps landing here, being the tool the memory work is driven from.
+/ccstat
+/ccprobe
+
 # Real C programs the compiler is measured against, fetched by pinned hash
 # rather than committed: sqlite3.c alone is 9.2 MB of generated C. See
 # scripts/fetch-bench-c.sh, which explains why each one is here.
