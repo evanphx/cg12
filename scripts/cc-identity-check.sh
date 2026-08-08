@@ -74,13 +74,13 @@ inputs() {
 	ls "$ROOT"/cmd/viz/testdata/*.c 2>/dev/null
 	if [ "$INCLUDE_BENCH" = 1 ]; then
 		ls "$ROOT"/cc/testdata/bench/*.c 2>/dev/null
-		# lua is deliberately absent. Compiling cc/testdata/bench/lua/onelua.c
-		# twice with the same binary produces two different objects, at -O0 as
-		# well as -O, and it does so at HEAD with no local changes -- so it is a
-		# standing bug in the compiler and not something a change under test did.
-		# Including it here would report every run as DIFFER and make this check
-		# useless for the thing it exists for. Put it back the day that is fixed;
-		# it is the better input of the two, being the one whose output can be run.
+		# lua was excluded here for a while: it produced a different object on
+		# every run, at -O0 as well as -O, so it reported every comparison as
+		# DIFFER and made this check useless for what it exists for. The cause was
+		# the front end emitting on-demand internal-linkage definitions in Go map
+		# order (cc/compile.go); it is fixed, and lua is back, being the better of
+		# the two inputs -- it is the one whose output can be run.
+		ls "$ROOT"/cc/testdata/bench/lua/onelua.c 2>/dev/null
 	fi
 }
 

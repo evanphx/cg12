@@ -342,8 +342,25 @@ func genModule(target Target, ast *moderncc.AST, name string) (*ir.Module, error
 				}
 			}
 		}
-		progress := false
+		// In name order, not map order. What gets emitted is the same set either
+		// way, but the order it is emitted in decides the order functions and data
+		// appear in the object and the numbers the interned string literals are
+		// given -- so iterating the map directly made this front end produce a
+		// different object for the same input on every run.
+		//
+		// It showed up on Lua and not on SQLite because of what reaches this loop:
+		// only internal-linkage definitions from #included files are emitted here,
+		// and cc/testdata/bench/lua/onelua.c is nothing but #includes of .c files,
+		// so every static function in Lua arrives this way. SQLite's amalgamation
+		// is one primary file, so the ordered walk above emits nearly all of it.
+		pending := make([]string, 0, len(need))
 		for sym := range need {
+			pending = append(pending, sym)
+		}
+		sort.Strings(pending)
+
+		progress := false
+		for _, sym := range pending {
 			if emitted[sym] {
 				continue
 			}
