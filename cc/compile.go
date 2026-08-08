@@ -142,6 +142,25 @@ unsigned long __atomic_or_fetch();
 unsigned long __atomic_xor_fetch();
 unsigned long __atomic_nand_fetch();
 
+/* The legacy __sync_* family has the same type-generic result and the same need
+ * for a wide declaration. These are what portable C uses when it cannot assume a
+ * compiler new enough for __atomic_*, and cg12 lowers them to the same
+ * intrinsics. The void ones (__sync_synchronize, __sync_lock_release) are left
+ * undeclared: they yield nothing, so an implicit int return narrows nothing. */
+unsigned long __sync_fetch_and_add();
+unsigned long __sync_fetch_and_sub();
+unsigned long __sync_fetch_and_and();
+unsigned long __sync_fetch_and_or();
+unsigned long __sync_fetch_and_xor();
+unsigned long __sync_add_and_fetch();
+unsigned long __sync_sub_and_fetch();
+unsigned long __sync_and_and_fetch();
+unsigned long __sync_or_and_fetch();
+unsigned long __sync_xor_and_fetch();
+unsigned long __sync_val_compare_and_swap();
+unsigned long __sync_lock_test_and_set();
+int __sync_bool_compare_and_swap();
+
 /* Likewise the rotate builtins return the width of their operand, which modernc
  * types as int for an undeclared use -- truncating a 64-bit rotate when its
  * result feeds a wider expression (Ruby's flonum encoding rotates the bits of a

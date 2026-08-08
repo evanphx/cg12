@@ -38,9 +38,6 @@ func TestBehaviourOnRealPrograms(t *testing.T) {
 
 	benchDir, err := filepath.Abs(filepath.Join("testdata", "bench"))
 	require.NoError(t, err)
-	supportSrc, err := filepath.Abs(filepath.Join("testdata", "behaviour", "support.c"))
-	require.NoError(t, err)
-
 	cases := []struct {
 		name string
 		// library is the big program under test, driver the small harness that
@@ -76,18 +73,16 @@ func TestBehaviourOnRealPrograms(t *testing.T) {
 
 			dir := t.TempDir()
 
-			// The driver and the support shim are built by the host compiler in
-			// every arm, so the only thing that differs between them is the object
-			// the compiler under test produced for the library.
+			// The driver is built by the host compiler in every arm, so the only
+			// thing that differs between them is the object the compiler under test
+			// produced for the library.
 			driverObj := filepath.Join(dir, "driver.o")
 			build(t, gcc, "-O2", "-I", tc.include, "-c", "-o", driverObj, tc.driver)
-			supportObj := filepath.Join(dir, "support.o")
-			build(t, gcc, "-O2", "-c", "-o", supportObj, supportSrc)
 
 			// The reference: the same library, built by the host compiler.
 			referenceObj := filepath.Join(dir, "reference.o")
 			build(t, gcc, "-O2", "-I", tc.include, "-c", "-o", referenceObj, tc.library)
-			want := runProgram(t, gcc, dir, "reference", referenceObj, driverObj, supportObj, tc.link)
+			want := runProgram(t, gcc, dir, "reference", referenceObj, driverObj, tc.link)
 			require.NotEmpty(t, want, "the reference build produced no output")
 			t.Logf("reference: %s", want)
 
@@ -113,7 +108,7 @@ func TestBehaviourOnRealPrograms(t *testing.T) {
 
 					libraryObj := filepath.Join(dir, name+".o")
 					require.NoError(t, os.WriteFile(libraryObj, code, 0o644))
-					got := runProgram(t, gcc, dir, name, libraryObj, driverObj, supportObj, tc.link)
+					got := runProgram(t, gcc, dir, name, libraryObj, driverObj, tc.link)
 					require.Equal(t, want, got)
 				})
 			}
@@ -132,10 +127,10 @@ func build(t *testing.T, gcc string, args ...string) {
 // -no-pie is required: cg12 emits absolute relocations against external data
 // (stdin and friends), which a position-independent executable cannot use. It is
 // passed to every arm so the reference is linked the same way.
-func runProgram(t *testing.T, gcc, dir, name, libraryObj, driverObj, supportObj string, link []string) string {
+func runProgram(t *testing.T, gcc, dir, name, libraryObj, driverObj string, link []string) string {
 	t.Helper()
 	bin := filepath.Join(dir, name)
-	args := append([]string{"-no-pie", "-o", bin, libraryObj, driverObj, supportObj}, link...)
+	args := append([]string{"-no-pie", "-o", bin, libraryObj, driverObj}, link...)
 	out, err := exec.Command(gcc, args...).CombinedOutput()
 	require.NoErrorf(t, err, "link %s: %s", name, out)
 

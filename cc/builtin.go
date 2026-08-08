@@ -185,7 +185,7 @@ func (g *gen) builtinCall(n *moderncc.PostfixExpression) (ir.Ref, bool) {
 	case "__atomic_load": // (ptr, ret_ptr, order): *ret_ptr = atomic load *ptr
 		suf, cls, width, ok := atomicWidth(args[0])
 		if !ok {
-			g.atomicUnsupported(name)
+			g.atomicBadWidth(name, args[0])
 			return ir.R, true
 		}
 		v := g.cur.Intrinsic("atomic.load."+suf, cls, g.genExpr(args[0]))
@@ -194,7 +194,7 @@ func (g *gen) builtinCall(n *moderncc.PostfixExpression) (ir.Ref, bool) {
 	case "__atomic_store": // (ptr, val_ptr, order): *ptr = *val_ptr
 		suf, _, width, ok := atomicWidth(args[0])
 		if !ok {
-			g.atomicUnsupported(name)
+			g.atomicBadWidth(name, args[0])
 			return ir.R, true
 		}
 		ptr := g.genExpr(args[0])
@@ -203,7 +203,7 @@ func (g *gen) builtinCall(n *moderncc.PostfixExpression) (ir.Ref, bool) {
 	case "__atomic_exchange": // (ptr, val_ptr, ret_ptr, order)
 		suf, cls, width, ok := atomicWidth(args[0])
 		if !ok {
-			g.atomicUnsupported(name)
+			g.atomicBadWidth(name, args[0])
 			return ir.R, true
 		}
 		ptr := g.genExpr(args[0])
@@ -214,7 +214,7 @@ func (g *gen) builtinCall(n *moderncc.PostfixExpression) (ir.Ref, bool) {
 	case "__atomic_compare_exchange": // (ptr, expected_ptr, desired_ptr, weak, s, f)
 		suf, cls, width, ok := atomicWidth(args[0])
 		if !ok {
-			g.atomicUnsupported(name)
+			g.atomicBadWidth(name, args[0])
 			return ir.R, true
 		}
 		ptr := g.genExpr(args[0])
@@ -227,6 +227,37 @@ func (g *gen) builtinCall(n *moderncc.PostfixExpression) (ir.Ref, bool) {
 	case "__atomic_thread_fence", "__atomic_signal_fence":
 		g.cur.IntrinsicVoid("atomic.fence")
 		return ir.R, true
+
+	// The legacy __sync_* family (see atomic.go). Every one is a full barrier and
+	// ignores any trailing arguments.
+	case "__sync_synchronize":
+		g.cur.IntrinsicVoid("atomic.fence")
+		return ir.R, true
+	case "__sync_fetch_and_add", "__sync_fetch_and_sub", "__sync_fetch_and_and",
+		"__sync_fetch_and_or", "__sync_fetch_and_xor":
+		return g.atomicFetchOp(strings.TrimPrefix(name, "__sync_fetch_and_"), args, false), true
+	case "__sync_add_and_fetch", "__sync_sub_and_fetch", "__sync_and_and_fetch",
+		"__sync_or_and_fetch", "__sync_xor_and_fetch":
+		op := strings.TrimSuffix(strings.TrimPrefix(name, "__sync_"), "_and_fetch")
+		return g.atomicFetchOp(op, args, true), true
+	case "__sync_val_compare_and_swap":
+		return g.syncCAS(args, false), true
+	case "__sync_bool_compare_and_swap":
+		return g.syncCAS(args, true), true
+	case "__sync_lock_test_and_set":
+		// Despite the name this is an exchange, not a test-and-set, and GCC gives it
+		// acquire semantics only. A full-barrier exchange is stronger, so it stands in.
+		return g.atomicXchg(args[0], args[1]), true
+	case "__sync_lock_release":
+		g.syncRelease(args[0])
+		return ir.R, true
+
+	case "__sync_fetch_and_nand", "__sync_nand_and_fetch",
+		"__atomic_fetch_nand", "__atomic_nand_fetch":
+		// Every other operation in both families maps to one atomic.* intrinsic;
+		// nand has none. Say so here rather than emitting a call to a symbol that
+		// does not exist and leaving the linker to explain it.
+		return g.fail("cc: %s is not supported: cg12's atomic intrinsics have no nand", name), true
 
 	case "__builtin_add_overflow", "__builtin_sub_overflow", "__builtin_mul_overflow":
 		return g.overflowBuiltin(name, args, false), true

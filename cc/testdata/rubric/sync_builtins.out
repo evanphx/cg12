@@ -1,0 +1,41 @@
+sc  fa  -3 -1
+uc  fa  200 44
+sh  fa  -300 -299
+uh  fa  65000 464
+si  fa  -7 -4
+ui  fa  4294967290 4
+sl  fa  1000 999
+ul  fa  1 4294967297
+sc  af  -128 -128
+uc  af  4 4
+sh  af  -32767 -32767
+sl  af  999 999
+and     3855 15
+or      3855 4095
+xor     3855 4080
+sub     99 99
+andaf   15 15
+oraf    4095 4095
+xoraf   4080 4080
+vcas hit  5 9
+vcas miss 9 9
+bcas hit  1 9
+bcas miss 0 9
+scas hit  -3 -8
+scas miss -8 -8
+sbcas hit 1 7
+hcas hit  -300 -400
+lcas hit  4294967296 7
+tas     3 1
+release 0
+tas sc  -5 1
+rel sc  0
+tas ul  99 1
+rel ul  0
+at fa   1000 999
+at ld   -3
+at ld h -300
+at st   -9
+at xchg -3 4
+at cas  1 -3 6
+at cas2 0 6 6
