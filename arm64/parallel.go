@@ -48,7 +48,17 @@ func compileFunction(f *ir.Func, opts Options, conventions calleeConventions, bu
 	// The memo's back-end half, when one is installed: the finished code is a
 	// pure function of the finished body, so a content key answers it outright.
 	// See arm64/codecache.go.
+	//
+	// Except under PIC, where it is not. There the code for a body depends on
+	// which symbols the surrounding MODULE defines -- the same function reaching
+	// the same global compiles to an adrp in a module that defines it and to a GOT
+	// load in one that does not -- and the key is the body alone. Rather than widen
+	// the key, PIC simply does not use the cache; no caller wants both today
+	// (cmd/memoc installs it, and goc does not ask for PIC).
 	cached, cacheKey, keyed := cachedFunctionCode(f)
+	if opts.PIC {
+		cached, keyed = nil, false
+	}
 	if cached != nil {
 		return cached, nil
 	}
@@ -64,7 +74,7 @@ func compileFunction(f *ir.Func, opts Options, conventions calleeConventions, bu
 	if err != nil {
 		return nil, fmt.Errorf("function %s: %w", f.Name, err)
 	}
-	mc, err := emitMachine(f, alloc, conventions, opts.GC, opts.TLSModel)
+	mc, err := emitMachine(f, alloc, conventions, opts)
 	if err != nil {
 		return nil, fmt.Errorf("function %s: %w", f.Name, err)
 	}

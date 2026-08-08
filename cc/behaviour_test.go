@@ -103,7 +103,8 @@ func TestBehaviourOnRealPrograms(t *testing.T) {
 					if optimize {
 						opt.OptimizeModule(module)
 					}
-					code, err := arm64.CompileObject(module)
+					// PIC because the link below is the host default, a PIE.
+					code, err := arm64.CompileObjectWith(module, arm64.Options{PIC: true})
 					require.NoError(t, err)
 
 					libraryObj := filepath.Join(dir, name+".o")
@@ -124,13 +125,16 @@ func build(t *testing.T, gcc string, args ...string) {
 
 // runProgram links one library object with the shared driver and runs it.
 //
-// -no-pie is required: cg12 emits absolute relocations against external data
-// (stdin and friends), which a position-independent executable cannot use. It is
-// passed to every arm so the reference is linked the same way.
+// The link is the host toolchain's default, which here is a position-independent
+// executable. That is deliberate: it is the link every other compiler on this
+// platform gets, and it only works because the backend reaches external data
+// through the GOT (arm64.Options.PIC). Before that it failed outright on Lua --
+// "unresolvable R_AARCH64_ADR_PREL_PG_HI21 relocation against symbol `stdin'" --
+// so this arm is what keeps the GOT path honest on a real program.
 func runProgram(t *testing.T, gcc, dir, name, libraryObj, driverObj string, link []string) string {
 	t.Helper()
 	bin := filepath.Join(dir, name)
-	args := append([]string{"-no-pie", "-o", bin, libraryObj, driverObj}, link...)
+	args := append([]string{"-o", bin, libraryObj, driverObj}, link...)
 	out, err := exec.Command(gcc, args...).CombinedOutput()
 	require.NoErrorf(t, err, "link %s: %s", name, out)
 

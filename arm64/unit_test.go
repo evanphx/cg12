@@ -965,7 +965,7 @@ func TestManagedFrameMetadataStartsAfterFrameAllocation(t *testing.T) {
 	require.NoError(t, lower(function, moduleConventions(function), TLSLocalExec))
 	allocation, err := regAlloc(function)
 	require.NoError(t, err)
-	machine, err := emitMachine(function, allocation, moduleConventions(function), nil, TLSLocalExec)
+	machine, err := emitMachine(function, allocation, moduleConventions(function), Options{})
 	require.NoError(t, err)
 
 	assert.GreaterOrEqual(t, machine.m.frameStart, 44)
@@ -1141,7 +1141,7 @@ func TestGoStackMapsDropDeadPointerBearingLocal(t *testing.T) {
 	require.NoError(t, lower(function, moduleConventions(function), TLSLocalExec))
 	allocation, err := regAlloc(function)
 	require.NoError(t, err)
-	machine, err := emitMachine(function, allocation, moduleConventions(function), nil, TLSLocalExec)
+	machine, err := emitMachine(function, allocation, moduleConventions(function), Options{})
 	require.NoError(t, err)
 
 	points := machine.m.goStackMapPoints()
@@ -1457,7 +1457,7 @@ func compileGoFunctionForStackMaps(t *testing.T, function *ir.Func) *machineCode
 	require.NoError(t, lower(function, moduleConventions(function), TLSLocalExec))
 	allocation, err := regAlloc(function)
 	require.NoError(t, err)
-	machine, err := emitMachine(function, allocation, moduleConventions(function), nil, TLSLocalExec)
+	machine, err := emitMachine(function, allocation, moduleConventions(function), Options{})
 	require.NoError(t, err)
 	return machine
 }

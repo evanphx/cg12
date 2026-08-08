@@ -235,7 +235,7 @@ func TestEmitterResolvesCallConventionAsLoweringDid(t *testing.T) {
 
 	allocation, err := regAlloc(caller)
 	require.NoError(t, err)
-	machine, err := emitMachine(caller, allocation, conventions, nil, TLSLocalExec)
+	machine, err := emitMachine(caller, allocation, conventions, Options{})
 	require.NoError(t, err)
 	require.NotNil(t, machine)
 

@@ -85,6 +85,11 @@ func symbolic(r obj.Reloc, w uint32) (string, bool) {
 		}
 		return "", false
 
+	case obj.R_AARCH64_ADR_GOT_PAGE:
+		return fmt.Sprintf("adrp x%d, :got:%s", rd, target), true
+	case obj.R_AARCH64_LD64_GOT_LO12_NC:
+		return fmt.Sprintf("ldr x%d, [x%d, #:got_lo12:%s]", rd, rn, target), true
+
 	case obj.R_AARCH64_TLSLE_ADD_TPREL_HI12:
 		return fmt.Sprintf("add x%d, x%d, #:tprel_hi12:%s, lsl #12", rd, rn, target), true
 	case obj.R_AARCH64_TLSLE_ADD_TPREL_LO12_NC:

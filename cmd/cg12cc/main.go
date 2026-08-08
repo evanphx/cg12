@@ -51,9 +51,8 @@ func main() {
 
 	d := parseArgs(os.Args[1:])
 	if len(d.sources) == 0 && !d.compileOnly {
-		// Pure link (or a job with no C sources): hand it to the host cc, but force
-		// a non-PIE link since cg12's objects are not position-independent.
-		os.Exit(runHostCC(forceNoPIE(os.Args[1:])))
+		// Pure link (or a job with no C sources): hand it to the host cc.
+		os.Exit(runHostCC(linkArgs(os.Args[1:])))
 	}
 
 	var objs []string
@@ -73,9 +72,8 @@ func main() {
 		return // objects already at their -o / derived paths
 	}
 
-	// Link: the produced objects, the object inputs, and the forwarded flags,
-	// forced non-PIE (cg12's objects are not position-independent).
-	args := forceNoPIE(d.passthru)
+	// Link: the produced objects, the object inputs, and the forwarded flags.
+	args := linkArgs(d.passthru)
 	if d.output != "" {
 		args = append(args, "-o", d.output)
 	}
@@ -202,10 +200,7 @@ func (d *driver) compile(src, obj string) error {
 	if d.verbose {
 		fmt.Fprintf(os.Stderr, "cg12cc: compiling %s -> %s\n", src, obj)
 	}
-	target := cc.TargetARM64
-	if os.Getenv("CG12_TARGET") == "amd64" {
-		target = cc.TargetAMD64
-	}
+	target := targetArch()
 	mod, err := cc.CompileWith(src, string(text), cc.Options{
 		Target:      target,
 		IncludeDirs: d.includes,
@@ -231,7 +226,7 @@ func (d *driver) compile(src, obj string) error {
 	if target == cc.TargetAMD64 {
 		code, err = amd64.CompileObject(mod)
 	} else {
-		code, err = arm64.CompileObject(mod)
+		code, err = arm64.CompileObjectWith(mod, arm64.Options{PIC: true})
 	}
 	if err != nil {
 		return fmt.Errorf("%s: codegen: %w", src, err)
@@ -277,10 +272,39 @@ func runHostCC(args []string) int {
 	return 0
 }
 
-// forceNoPIE drops position-independent link/codegen flags and prepends -no-pie,
-// because cg12's objects reach external data with absolute/PC-relative
-// relocations rather than through the GOT, which a PIE link rejects.
-func forceNoPIE(args []string) []string {
+// targetArch is the machine being compiled for. It is driver-wide, so the link
+// step can ask the same question the compile step did.
+func targetArch() cc.Target {
+	if os.Getenv("CG12_TARGET") == "amd64" {
+		return cc.TargetAMD64
+	}
+	return cc.TargetARM64
+}
+
+// linkArgs prepares the flags handed to the host cc for the link.
+//
+// The arm64 backend emits position-independent code (arm64.Options.PIC), so an
+// ordinary PIE link works and the caller's own -pie/-fPIC flags are left alone.
+// The amd64 backend does not yet: it reaches every symbol with R_X86_64_PC32,
+// which a PIE rejects for anything binding outside the executable, exactly as the
+// aarch64 adrp did. So a cross-compile still has its position-independent flags
+// stripped and -no-pie forced, and will until amd64 grows GOTPCREL addressing.
+//
+// A shared library is stripped as well, whatever the target. arm64 PIC is the
+// executable model: a symbol this module defines is reached PC-relative, on the
+// assumption nothing interposes it at load time. That holds for an executable
+// and not for a .so, so a -shared job keeps the treatment it had before PIC
+// existed rather than getting a library that is subtly wrong under interposition.
+func linkArgs(args []string) []string {
+	shared := false
+	for _, a := range args {
+		if a == "-shared" {
+			shared = true
+		}
+	}
+	if targetArch() != cc.TargetAMD64 && !shared {
+		return args
+	}
 	out := []string{"-no-pie"}
 	for _, a := range args {
 		switch a {

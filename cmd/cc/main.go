@@ -35,6 +35,12 @@ func main() {
 	emitBPFELF := flag.Bool("bpf-elf", false, "compile to a loadable eBPF ELF object (.bpf.o)")
 	run := flag.Bool("run", false, "compile, link, and run; propagate the exit code")
 	optimize := flag.Bool("O", false, "run the cg12 optimizer before code generation")
+	// The host toolchain here is built --enable-default-pie, so the link this tool
+	// performs is a PIE link, and a PIE cannot reach an external data symbol with a
+	// PC-relative adrp. Without position-independent code any program that so much
+	// as names stdout fails to link. On by default for that reason; -fno-pic is for
+	// a caller who links -no-pie and would rather not pay the extra load.
+	noPIC := flag.Bool("fno-pic", false, "reach external symbols directly instead of through the GOT (needs -no-pie at link time)")
 	flag.Usage = usage
 	flag.Parse()
 
@@ -75,15 +81,15 @@ func main() {
 		check(err)
 		writeOut(outputPath(*out, input, ".bpf.o"), obj.ELF())
 	case *emitDis:
-		o, err := arm64.CompileToObject(mod)
+		o, err := arm64.CompileToObjectWith(mod, arm64.Options{PIC: !*noPIC})
 		check(err)
 		fmt.Print(arm64.Disassemble(o))
 	case *emitObj:
-		writeObject(mod, outputPath(*out, input, ".o"))
+		writeObject(mod, outputPath(*out, input, ".o"), !*noPIC)
 	default:
 		exe, cleanup := outputExe(*out, input, *run)
 		defer cleanup()
-		link(mod, exe)
+		link(mod, exe, !*noPIC)
 		if *run {
 			code := runProg(exe)
 			cleanup() // os.Exit runs no deferred calls
@@ -112,16 +118,16 @@ func outputExe(out, input string, run bool) (path string, cleanup func()) {
 }
 
 // writeObject compiles the module to an ELF object and writes it.
-func writeObject(mod *ir.Module, path string) {
-	code, err := arm64.CompileObject(mod)
+func writeObject(mod *ir.Module, path string, pic bool) {
+	code, err := arm64.CompileObjectWith(mod, arm64.Options{PIC: pic})
 	check(err)
 	writeOut(path, code)
 }
 
 // link compiles to a temporary object and links it into an executable with the
 // native toolchain (so libc is available).
-func link(mod *ir.Module, exe string) {
-	code, err := arm64.CompileObject(mod)
+func link(mod *ir.Module, exe string, pic bool) {
+	code, err := arm64.CompileObjectWith(mod, arm64.Options{PIC: pic})
 	check(err)
 	tmp, err := os.CreateTemp("", "cg12cc-*.o")
 	check(err)

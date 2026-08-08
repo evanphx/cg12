@@ -36,6 +36,16 @@ const (
 	R_AARCH64_LDST64_ABS_LO12_NC  = 286
 	R_AARCH64_LDST128_ABS_LO12_NC = 299
 
+	// The global offset table. A PC-relative adrp reaches a symbol only when the
+	// distance to it is fixed at static-link time, which is not so for a symbol
+	// that binds outside the executable: a position-independent executable is
+	// loaded at an address chosen at run time, and the linker rejects the adrp.
+	// Instead the loader writes the symbol's address into a GOT slot, the adrp
+	// reaches the slot (it is in this image, so that distance IS fixed), and a
+	// load reads the address out of it.
+	R_AARCH64_ADR_GOT_PAGE     = 311 // adrp: page of the symbol's GOT slot
+	R_AARCH64_LD64_GOT_LO12_NC = 312 // ldr: low 12 bits of that slot
+
 	// Thread-local storage, local-exec model: add the variable's offset from the
 	// thread pointer (read via MRS TPIDR_EL0).
 	// The pair is HI12 then LO12_NC: the offset is split across two adds. The

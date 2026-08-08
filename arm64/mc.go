@@ -32,6 +32,33 @@ type Options struct {
 	// thread pointer is fixed at link time. Initial-exec reads that offset from a
 	// GOT slot the loader fills, so it also works in a shared library.
 	TLSModel TLSModel
+
+	// PIC makes the emitter reach a symbol this module does not define through the
+	// global offset table instead of with a PC-relative adrp.
+	//
+	// Without it the object cannot be linked into a position-independent
+	// executable. The distance from the code to an external symbol is not known
+	// until the program is loaded, so the linker refuses the adrp outright:
+	//
+	//	relocation R_AARCH64_ADR_PREL_PG_HI21 against symbol `stdin@@GLIBC_2.17'
+	//	which may bind externally can not be used when making a shared object
+	//
+	// It costs one extra load per access, and only for symbols defined elsewhere:
+	// anything this module defines keeps the PC-relative form, which is already
+	// position-independent. That is the same split gcc -fPIE makes.
+	//
+	// This is the executable model, not the shared-library one. A symbol this
+	// module defines is assumed not to be interposed at load time, which holds for
+	// an executable but not for a .so, where -fPIC has to route even its own
+	// globals through the GOT.
+	PIC bool
+
+	// defined names the symbols this module emits, in linker form. It is resolved
+	// once, before any function is emitted, and only read afterwards -- the emit
+	// workers run concurrently. Nil means "assume nothing is defined here", which
+	// is the safe direction: routing a local symbol through the GOT costs a load,
+	// while reaching an external one directly fails the link.
+	defined map[string]bool
 }
 
 // TLSModel names a way of reaching a thread-local variable.
@@ -207,6 +234,15 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 	// let them disagree about a single call -- a worse failure than getting the
 	// convention wrong, because half the sequence would use each ABI.
 	conventions := newCalleeConventions(functions)
+	// The module's data is gathered here rather than after the emit loop because
+	// PIC needs to know what this object defines before the first instruction is
+	// emitted. The loop does not touch m.Data.
+	dataDefinitions := make([]*ir.Data, 0, len(m.Data)+len(bundle.loweredData))
+	dataDefinitions = append(dataDefinitions, m.Data...)
+	dataDefinitions = append(dataDefinitions, bundle.loweredData...)
+	if opts.PIC {
+		opts.defined = definedSymbols(functions, dataDefinitions, m.Aliases, bundle)
+	}
 	// Annotate managed functions with their stack pointer-word maps first. This is
 	// a pure IR-to-IR pass -- it reads only frontend IR and writes
 	// f.StackPointerWords, with no dependency on code emission or on anything the
@@ -278,9 +314,6 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 		m.Funcs = nil
 		runtime.GC()
 	}
-	dataDefinitions := make([]*ir.Data, 0, len(m.Data)+len(bundle.loweredData))
-	dataDefinitions = append(dataDefinitions, m.Data...)
-	dataDefinitions = append(dataDefinitions, bundle.loweredData...)
 	// The nosplit frame budget. Every frame in the module is now a number and
 	// every call edge has been recorded, which is the earliest point the walk can
 	// run -- and it runs before a byte of the object is committed, because a
@@ -326,6 +359,40 @@ func compileToObjectWithBundle(m *ir.Module, opts Options, bundle assemblyBundle
 		}
 	}
 	return o, nil
+}
+
+// definedSymbols names what this object will define, which is what decides
+// whether PIC can reach a symbol with a PC-relative adrp or has to go through
+// the GOT.
+//
+// It leans deliberately towards leaving names out. A name omitted here is only
+// reached one load more slowly; a name wrongly claimed produces an adrp against
+// something that binds elsewhere, which the linker refuses. So a data definition
+// the Plan 9 assembly sidecar owns is excluded -- that lands in a different
+// object -- and nothing is assumed about symbols created after this point.
+//
+// The exclusion mirrors addNeutralData, the platform-module data path. A
+// Go-runtime module lays its data out through finishGoModule instead, and this
+// has not been checked against that; nothing asks for PIC on the Go path today,
+// and anything that starts to should confirm the two agree first.
+func definedSymbols(functions []*ir.Func, data []*ir.Data, aliases []*ir.Alias, bundle assemblyBundle) map[string]bool {
+	defined := make(map[string]bool, len(functions)+len(data)+len(aliases))
+	for _, f := range functions {
+		if f != nil {
+			defined[sanitize(f.Name)] = true
+		}
+	}
+	for _, d := range data {
+		name := sanitize(d.Name)
+		if bundle.definitions[name] && !semanticDataDefinition(bundle.loweredData, d) {
+			continue // addNeutralData skips it: the sidecar object defines it
+		}
+		defined[name] = true
+	}
+	for _, a := range aliases {
+		defined[sanitize(a.Name)] = true
+	}
+	return defined
 }
 
 func applyAssemblyCallConventions(function *ir.Func, conventions map[string]ir.CallConvention) {
@@ -846,9 +913,14 @@ type mc struct {
 	alloc       *allocation
 	gc          GCStrategy
 	tlsModel    TLSModel
-	prog        *a64.Program
-	relocs      []obj.Reloc
-	allocTmp    map[uint32]int // fixed stack allocation temporary -> frame offset
+	// pic and defined answer one question per symbol reference: may this code
+	// reach the symbol with a PC-relative adrp, or must it read the address out
+	// of a GOT slot? See Options.PIC.
+	pic      bool
+	defined  map[string]bool
+	prog     *a64.Program
+	relocs   []obj.Reloc
+	allocTmp map[uint32]int // fixed stack allocation temporary -> frame offset
 	// stackAllocTmp includes pointer-bearing allocas as well as ordinary fixed
 	// allocas. It is used to turn a live alloca address into the pointer words
 	// contained by that alloca at each GC safepoint.
@@ -990,16 +1062,17 @@ func goRegisterPointerMask(function *ir.Func) uint16 {
 	return mask
 }
 
-func newEmitter(f *ir.Func, alloc *allocation, conventions calleeConventions, gc GCStrategy, tlsModel TLSModel) *mc {
+func newEmitter(f *ir.Func, alloc *allocation, conventions calleeConventions, opts Options) *mc {
 	frameLayout := computeFrame(f, alloc, conventions)
 	m := &mc{
-		f: f, conventions: conventions, alloc: alloc, gc: gc, tlsModel: tlsModel,
+		f: f, conventions: conventions, alloc: alloc, gc: opts.GC, tlsModel: opts.TLSModel,
+		pic: opts.PIC, defined: opts.defined,
 		prog: a64.NewProgram(), instrPC: map[*ir.Instr]uint64{},
 		frameLayout:   frameLayout,
 		allocTmp:      make(map[uint32]int),
 		stackAllocTmp: make(map[uint32]int),
 	}
-	m.frameless = framelessEligible(f, m.frameLayout, gc)
+	m.frameless = framelessEligible(f, m.frameLayout, opts.GC)
 	m.useCount = countTempUses(f)
 	m.preds = blockPreds(f)
 	for instruction, offset := range frameLayout.allocOff {
@@ -1043,10 +1116,10 @@ func (m *mc) emitBody() error {
 	return m.err
 }
 
-func emitMachine(f *ir.Func, alloc *allocation, conventions calleeConventions, gc GCStrategy, tlsModel TLSModel) (*machineCode, error) {
+func emitMachine(f *ir.Func, alloc *allocation, conventions calleeConventions, opts Options) (*machineCode, error) {
 	// Pass 1: tbz disabled (refTermPC nil), to measure real block/terminator
 	// offsets. See the refBlockPC/refTermPC comment for why these are an upper bound.
-	m1 := newEmitter(f, alloc, conventions, gc, tlsModel)
+	m1 := newEmitter(f, alloc, conventions, opts)
 	m1.gotTermPC = map[*ir.Block]int{}
 	if err := m1.emitBody(); err != nil {
 		return nil, err
@@ -1059,7 +1132,7 @@ func emitMachine(f *ir.Func, alloc *allocation, conventions calleeConventions, g
 	}
 
 	// Pass 2: tbz enabled, each fusion decided from the pass-1 distance.
-	m := newEmitter(f, alloc, conventions, gc, tlsModel)
+	m := newEmitter(f, alloc, conventions, opts)
 	m.refBlockPC, m.refTermPC = blockPC, m1.gotTermPC
 	if err := m.emitBody(); err != nil {
 		return nil, err
@@ -1071,7 +1144,7 @@ func emitMachine(f *ir.Func, alloc *allocation, conventions calleeConventions, g
 		}
 		// A fused tbz slipped out of range despite the upper-bound argument (should
 		// not happen). Re-emit with tbz disabled -- correctness over the fusion.
-		m = newEmitter(f, alloc, conventions, gc, tlsModel)
+		m = newEmitter(f, alloc, conventions, opts)
 		if err := m.emitBody(); err != nil {
 			return nil, err
 		}
@@ -1847,11 +1920,33 @@ func (m *mc) emitTLSOffset(r a64.Reg, c ir.Const) {
 	m.emit(a64.LdrImm(true, r, r, 0))
 }
 
+// indirect reports whether sym has to be reached through the GOT: under PIC,
+// every symbol this module does not itself define. See Options.PIC.
+func (m *mc) indirect(sym string) bool {
+	return m.pic && !m.defined[sym]
+}
+
+// gotAddr loads the address of sym into r out of its GOT slot. The adrp reaches
+// the slot rather than the symbol, which is what makes it work: the slot is in
+// this image, so the distance to it is fixed at link time even when the symbol's
+// own address is not known until the program is loaded.
+func (m *mc) gotAddr(r a64.Reg, sym string) {
+	m.reloc(sym, obj.R_AARCH64_ADR_GOT_PAGE)
+	m.emit(a64.Adrp(r, 0))
+	m.reloc(sym, obj.R_AARCH64_LD64_GOT_LO12_NC)
+	m.emit(a64.LdrImm(true, r, r, 0))
+}
+
 // materializeSym loads a symbol address (plus offset) into r via adrp/add,
 // recording the page and low-12 relocations.
 func (m *mc) materializeSym(r a64.Reg, c ir.Const) {
 	sym := sanitize(c.Sym)
-	if c.Thread {
+	if !c.Thread && m.indirect(sym) {
+		// The GOT holds the symbol's own address, so an offset cannot fold into the
+		// low-12 of an add against the page -- it is added to what the slot yielded.
+		// The tail below does exactly that.
+		m.gotAddr(r, sym)
+	} else if c.Thread {
 		// Only local-exec reaches here: the other models are lowered into ordinary
 		// instructions before selection, so the register allocator can see them.
 		// reg = thread_pointer + tprel(sym), which needs just this one register.

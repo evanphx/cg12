@@ -103,7 +103,9 @@ type asmb interface {
 	storeIdx(op ir.Op, val, base, index Reg, amode int32)
 	// loadSym/storeSym access a symbol at offset 0 with the low-12 bits folded into
 	// the access: `adrp page, sym; ldr/str [page, #:lo12:sym]`, no separate address
-	// add. page is a scratch register the adrp writes.
+	// add. page is a scratch register the adrp writes. Under PIC a symbol from
+	// outside this module instead has its address loaded into page from the GOT and
+	// is accessed through it (see Options.PIC).
 	loadSym(op ir.Op, cls ir.Cls, rd, page Reg, sym string)
 	storeSym(op ir.Op, val, page Reg, sym string)
 	// loadWB/storeWB fold a pointer advance into the access with pre/post-indexed
@@ -603,8 +605,20 @@ func (b *mcAsm) store(op ir.Op, val, base Reg, off uint32) {
 		b.fail("arm64: unsupported store %s", op)
 	}
 }
+
+// loadSym and storeSym access a global directly, folding the symbol's low bits
+// into the access itself so no address register is needed beyond the page.
+//
+// Under PIC a symbol from outside this module has no such fold: the GOT gives
+// the address in one piece, so the slot is loaded into the page register and the
+// access reads through it at offset zero, with no relocation of its own.
 func (b *mcAsm) loadSym(op ir.Op, cls ir.Cls, rd, page Reg, sym string) {
 	s := sanitize(sym)
+	if b.m.indirect(s) {
+		b.m.gotAddr(mreg(page), s)
+		b.load(op, cls, rd, page, 0)
+		return
+	}
 	b.m.reloc(s, obj.R_AARCH64_ADR_PREL_PG_HI21)
 	b.prog.Emit(a64.Adrp(mreg(page), 0))
 	b.m.reloc(s, ldstLo12Reloc(accessWidth(op)))
@@ -612,6 +626,11 @@ func (b *mcAsm) loadSym(op ir.Op, cls ir.Cls, rd, page Reg, sym string) {
 }
 func (b *mcAsm) storeSym(op ir.Op, val, page Reg, sym string) {
 	s := sanitize(sym)
+	if b.m.indirect(s) {
+		b.m.gotAddr(mreg(page), s)
+		b.store(op, val, page, 0)
+		return
+	}
 	b.m.reloc(s, obj.R_AARCH64_ADR_PREL_PG_HI21)
 	b.prog.Emit(a64.Adrp(mreg(page), 0))
 	b.m.reloc(s, ldstLo12Reloc(accessWidth(op)))
