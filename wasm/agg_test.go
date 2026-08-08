@@ -41,7 +41,7 @@ func TestE2EAggregateReturnAndArg(t *testing.T) {
 	da, db := dr.Param("a", ir.ClsW), dr.Param("b", ir.ClsW)
 	de := dr.Entry()
 	res := de.Call(ir.ClsP, dr.Sym("mkpair", 0), da, db)
-	lastInstr(de).RetAgg = pair
+	lastInstr(de).SetRetAgg(pair)
 	out := de.Call(ir.ClsW, dr.Sym("sumpair", 0), res)
 	lastInstr(de).SetAggArgs([]*ir.AggType{pair})
 	de.Ret(out)
@@ -58,7 +58,7 @@ func TestIndirectAggReturnUnsupported(t *testing.T) {
 	fp := f.Param("fp", ir.ClsP)
 	e := f.Entry()
 	e.Call(ir.ClsP, fp) // indirect callee
-	lastInstr(e).RetAgg = agg
+	lastInstr(e).SetRetAgg(agg)
 	e.Ret(f.Word(0))
 
 	_, err := wasm.CompileModule(m)

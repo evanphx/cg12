@@ -299,7 +299,7 @@ func (g *gen) genCall(n *moderncc.PostfixExpression) ir.Ref {
 	if ft != nil && isMemValue(ft.Result()) {
 		r := g.cur.Call(ir.ClsL, callee, args...)
 		call := g.lastInstr()
-		call.RetAgg = g.aggTypeOf(ft.Result())
+		call.SetRetAgg(g.aggTypeOf(ft.Result()))
 		call.SetAggArgs(aggArgs)
 		return r
 	}

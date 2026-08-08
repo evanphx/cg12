@@ -90,7 +90,7 @@ func (i *AggTypeInterner) InternFunc(function *Func) {
 	for _, block := range function.Blocks {
 		for index := range block.Instrs {
 			instruction := &block.Instrs[index]
-			instruction.RetAgg = i.Intern(instruction.RetAgg)
+			instruction.SetRetAgg(i.Intern(instruction.RetAgg()))
 			for argument := range instruction.AggArgs() {
 				instruction.AggArgs()[argument] = i.Intern(instruction.AggArgs()[argument])
 			}

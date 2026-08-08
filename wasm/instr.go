@@ -103,7 +103,7 @@ func (e *emitter) call(in *ir.Instr) {
 	callee := in.Args[0]
 	direct := callee.Kind == ir.RefConst && e.f.Consts[callee.ID].Kind == ir.ConstSym
 
-	if in.RetAgg != nil {
+	if in.RetAgg() != nil {
 		if !direct {
 			e.fail("wasm: indirect aggregate-returning calls are not supported")
 			return
@@ -122,7 +122,7 @@ func (e *emitter) call(in *ir.Instr) {
 		e.pushAddr(callee) // the table index (i32) sits above the arguments
 		e.line("call_indirect %s", e.callSig(in))
 	}
-	if in.RetAgg == nil {
+	if in.RetAgg() == nil {
 		e.store(in) // a scalar result; the aggregate result was set above
 	}
 }
@@ -140,7 +140,7 @@ func (e *emitter) frameAddr(off int) {
 // reuses the current frame and returns the callee's result. The shadow-stack
 // frame is released first, exactly as an ordinary return would.
 func (e *emitter) emitTailCall(in *ir.Instr) {
-	if in.RetAgg != nil {
+	if in.RetAgg() != nil {
 		e.fail("wasm: aggregate-returning tail call is not supported")
 		return
 	}

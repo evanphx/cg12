@@ -96,7 +96,7 @@ func TestDCEIntrinsicEffects(t *testing.T) {
 
 	assert.True(t, DCE(f))
 	require.Len(t, e.Instrs, 1)
-	assert.Equal(t, "stackrestore", e.Instrs[0].Intrin.Name, "stackrestore survives DCE")
+	assert.Equal(t, "stackrestore", e.Instrs[0].Intrin().Name, "stackrestore survives DCE")
 }
 
 func TestDCENoChange(t *testing.T) {

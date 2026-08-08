@@ -200,7 +200,10 @@ func CoalescePhis(f *ir.Func) {
 			for k := range in.Args {
 				rename(&in.Args[k])
 			}
-			rename(&in.ClosureContext)
+			if context := in.ClosureContext(); !context.IsNone() {
+				rename(&context)
+				in.SetClosureContext(context)
+			}
 			for k := range in.Defs() {
 				rename(&in.Defs()[k])
 			}

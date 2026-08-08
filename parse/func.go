@@ -258,8 +258,8 @@ func (p *parser) parseAsm(b *ir.Block, resName string, cls ir.Cls) {
 	instruction := ir.Instr{
 		Op:  ir.OAsm,
 		Cls: cls,
-		Asm: &ir.AsmOp{Template: template},
 	}
+	instruction.SetAsm(&ir.AsmOp{Template: template})
 	p.expectPunct("(")
 	for p.err == nil && !p.acceptPunct(")") {
 		p.expectPunct("(")
@@ -269,8 +269,8 @@ func (p *parser) parseAsm(b *ir.Block, resName string, cls ir.Cls) {
 			p.fail("unsupported inline-assembly constraint %q", constraint)
 			return
 		}
-		instruction.Asm.Ops = append(instruction.Asm.Ops, kind)
-		instruction.Asm.Regs = append(instruction.Asm.Regs, register)
+		instruction.Asm().Ops = append(instruction.Asm().Ops, kind)
+		instruction.Asm().Regs = append(instruction.Asm().Regs, register)
 
 		if output {
 			p.expectPunct(",")
@@ -321,11 +321,11 @@ func (p *parser) parseAsm(b *ir.Block, resName string, cls ir.Cls) {
 	for p.err == nil {
 		switch {
 		case p.acceptWord("exact"):
-			instruction.Asm.ExactClobbers = true
+			instruction.Asm().ExactClobbers = true
 		case p.acceptWord("clobbers"):
 			p.expectPunct("(")
 			for p.err == nil && !p.acceptPunct(")") {
-				instruction.Asm.Clobbers = append(instruction.Asm.Clobbers, p.expect(tStr, "clobber name").s)
+				instruction.Asm().Clobbers = append(instruction.Asm().Clobbers, p.expect(tStr, "clobber name").s)
 				if !p.acceptPunct(",") {
 					p.expectPunct(")")
 					break
@@ -390,7 +390,8 @@ func (p *parser) parseAsmValue() ir.Ref {
 // values intrinsics carry (the registry does not record per-operand classes).
 func (p *parser) parseIntrinsic(b *ir.Block, resName string, cls ir.Cls) {
 	name := p.expectWord()
-	in := ir.Instr{Op: ir.OIntrinsic, Cls: cls, Intrin: &ir.IntrinOp{Name: name}}
+	in := ir.Instr{Op: ir.OIntrinsic, Cls: cls}
+	in.SetIntrin(&ir.IntrinOp{Name: name})
 	if resName != "" {
 		in.To = p.defTemp(resName, cls)
 	}
@@ -446,7 +447,8 @@ func (p *parser) parseCall(b *ir.Block, resName string, cls ir.Cls, tail bool) {
 			break
 		}
 	}
-	in := ir.Instr{Op: ir.OCall, Cls: cls, Args: args, RetAgg: p.callRetAgg, Tail: tail}
+	in := ir.Instr{Op: ir.OCall, Cls: cls, Args: args, Tail: tail}
+	in.SetRetAgg(p.callRetAgg)
 	if anyAgg {
 		in.SetAggArgs(aggArgs)
 	}

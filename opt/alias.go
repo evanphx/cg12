@@ -182,7 +182,7 @@ func (ai *aliasInfo) computeEscape() {
 			case in.Op == ir.OIntrinsic:
 				// An intrinsic escapes its pointer operands only if its registry
 				// entry says so (or it is unregistered, treated conservatively).
-				if e := ir.LookupIntrinsic(in.Intrin.Name); e == nil || e.EscapesArgs {
+				if e := ir.LookupIntrinsic(in.Intrin().Name); e == nil || e.EscapesArgs {
 					for _, a := range in.Args {
 						mark(a)
 					}

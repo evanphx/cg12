@@ -31,19 +31,14 @@ var clonedInstrFields = []string{
 	"Cmp",
 	"Aux",
 	"Amode",
-	"RetAgg",
 	"RetValues",
 	"Tail",
 	"Volatile",
 	"ClosureCall",
-	"ClosureContext",
 	"CallConv",
 	"CallConvSet",
-	"Asm",
-	"Intrin",
 	"Pos",
 	"Args",
-	"Blk",
 }
 
 // uncopiedInstrFields lists the fields cloneInstr deliberately does not assign
@@ -99,26 +94,26 @@ func TestCloneInstrCopiesEveryClonedField(t *testing.T) {
 	aggregate := &ir.AggType{Name: "agg"}
 
 	original := ir.Instr{
-		Op:             ir.OCall,
-		Cls:            ir.ClsL,
-		To:             temp,
-		Cmp:            ir.CmpNe,
-		Aux:            9,
-		Amode:          3,
-		RetAgg:         aggregate,
-		RetValues:      true,
-		Tail:           true,
-		Volatile:       true,
-		ClosureCall:    true,
-		ClosureContext: context,
-		CallConv:       ir.CallConvGoInternal,
-		CallConvSet:    true,
-		Asm:            &ir.AsmOp{Template: "nop"},
-		Intrin:         &ir.IntrinOp{Name: "intrinsic"},
-		Pos:            ir.SrcPos{File: 1, Line: 2, Col: 3},
-		Args:           []ir.Ref{function.Long(0), temp},
-		Blk:            entry,
+		Op:          ir.OCall,
+		Cls:         ir.ClsL,
+		To:          temp,
+		Cmp:         ir.CmpNe,
+		Aux:         9,
+		Amode:       3,
+		RetValues:   true,
+		Tail:        true,
+		Volatile:    true,
+		ClosureCall: true,
+		CallConv:    ir.CallConvGoInternal,
+		CallConvSet: true,
+		Pos:         ir.SrcPos{File: 1, Line: 2, Col: 3},
+		Args:        []ir.Ref{function.Long(0), temp},
 	}
+	original.SetClosureContext(context)
+	original.SetRetAgg(aggregate)
+	original.SetAsm(&ir.AsmOp{Template: "nop"})
+	original.SetIntrin(&ir.IntrinOp{Name: "intrinsic"})
+	original.SetBlk(entry)
 	original.AddDef(defined)
 	original.SetStackResult(slot, 16)
 	original.SetUnroll(4)
@@ -145,6 +140,11 @@ func TestCloneInstrCopiesEveryClonedField(t *testing.T) {
 	// The Extra-backed fields travel through the accessors rather than by
 	// copying the pointer, so check both that they arrived and that the clone
 	// got its own side table.
+	assert.Equal(t, context, clone.ClosureContext(), "ClosureContext")
+	assert.Equal(t, aggregate, clone.RetAgg(), "RetAgg")
+	assert.Equal(t, "nop", clone.Asm().Template, "Asm")
+	assert.Equal(t, "intrinsic", clone.Intrin().Name, "Intrin")
+	assert.Same(t, entry, clone.Blk(), "Blk")
 	assert.Equal(t, []ir.Ref{defined}, clone.Defs(), "Defs")
 	assert.Equal(t, slot, clone.StackResult(), "StackResult")
 	assert.Equal(t, int64(16), clone.StackResultOffset(), "StackResultOffset")

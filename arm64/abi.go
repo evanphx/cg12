@@ -178,13 +178,14 @@ func lowerAggArg(f *ir.Func, argRef ir.Ref, agg *ir.AggType, goInternal bool, a 
 		elemCls, elemSize = cls.elem, cls.elem.Size()
 	}
 	if onStack {
-		argSetup = append(argSetup, ir.Instr{
-			Op:     ir.OArg,
-			To:     ir.R,
-			Aux:    int64(stackOffset),
-			Args:   []ir.Ref{argRef},
-			RetAgg: agg,
-		})
+		stackedArg := ir.Instr{
+			Op:   ir.OArg,
+			To:   ir.R,
+			Aux:  int64(stackOffset),
+			Args: []ir.Ref{argRef},
+		}
+		stackedArg.SetRetAgg(agg)
+		argSetup = append(argSetup, stackedArg)
 		return argSetup, pins, nil
 	}
 

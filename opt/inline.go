@@ -727,7 +727,7 @@ func canInlineCall(caller *ir.Func, call *ir.Instr, callee *ir.Func) bool {
 	if !callee.HasClosureContext {
 		return true
 	}
-	return call.ClosureCall && !call.ClosureContext.IsNone()
+	return call.ClosureCall && !call.ClosureContext().IsNone()
 }
 
 // inlinableStructure reports whether callee can be inlined mechanically: it has a
@@ -791,10 +791,10 @@ func inlinableWithBudget(callee *ir.Func, instructionBudget int) bool {
 // and therefore change program semantics. This is the same restriction used by
 // the Go compiler for internal/runtime/sys.GetCallerPC and GetCallerSP.
 func isCallerFrameIntrinsic(instruction *ir.Instr) bool {
-	if instruction.Op != ir.OIntrinsic || instruction.Intrin == nil {
+	if instruction.Op != ir.OIntrinsic || instruction.Intrin() == nil {
 		return false
 	}
-	switch instruction.Intrin.Name {
+	switch instruction.Intrin().Name {
 	case "getcallerpc", "getcallersp":
 		return true
 	default:
@@ -1161,7 +1161,7 @@ func aggOffset(f *ir.Func, base ir.Ref, off int, out *[]ir.Instr) ir.Ref {
 }
 
 func inlineClosureContext(caller *ir.Func, call ir.Instr) ir.Ref {
-	context := call.ClosureContext
+	context := call.ClosureContext()
 	if context.Kind != ir.RefTemp {
 		return context
 	}
@@ -1199,26 +1199,28 @@ func cloneInstr(caller *ir.Func, in *ir.Instr, mapRef func(ir.Ref) ir.Ref, mapBl
 	// crypto/tls's Config.time() returning a garbage time.Time once Config.time
 	// was inlined. See TestInlineKeepsCallConvention.
 	out := ir.Instr{
-		Op:             in.Op,
-		Cls:            in.Cls,
-		To:             mapRef(in.To),
-		Cmp:            in.Cmp,
-		Aux:            in.Aux,
-		Amode:          in.Amode,
-		RetAgg:         in.RetAgg,
-		RetValues:      in.RetValues,
-		Tail:           in.Tail,
-		Volatile:       in.Volatile,
-		ClosureCall:    in.ClosureCall,
-		ClosureContext: mapRef(in.ClosureContext),
-		CallConv:       in.CallConv,
-		CallConvSet:    in.CallConvSet,
-		Asm:            in.Asm,
-		Intrin:         in.Intrin,
-		Pos:            in.Pos,
+		Op:          in.Op,
+		Cls:         in.Cls,
+		To:          mapRef(in.To),
+		Cmp:         in.Cmp,
+		Aux:         in.Aux,
+		Amode:       in.Amode,
+		RetValues:   in.RetValues,
+		Tail:        in.Tail,
+		Volatile:    in.Volatile,
+		ClosureCall: in.ClosureCall,
+		CallConv:    in.CallConv,
+		CallConvSet: in.CallConvSet,
+		Pos:         in.Pos,
 	}
-	if in.Blk != nil {
-		out.Blk = mapBlock(in.Blk)
+	out.SetRetAgg(in.RetAgg())
+	out.SetAsm(in.Asm())
+	out.SetIntrin(in.Intrin())
+	if in.Blk() != nil {
+		out.SetBlk(mapBlock(in.Blk()))
+	}
+	if context := in.ClosureContext(); !context.IsNone() {
+		out.SetClosureContext(mapRef(context))
 	}
 	for _, a := range in.Args {
 		out.Args = append(out.Args, mapRef(a))

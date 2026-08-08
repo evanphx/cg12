@@ -131,7 +131,7 @@ func TestObjAggReturn(t *testing.T) {
 	f, e := entry(m)
 	r := e.Call(ir.ClsL, f.Sym("mk", 0), f.Word(7), f.Word(35))
 	call := &e.Instrs[len(e.Instrs)-1]
-	call.RetAgg = pair
+	call.SetRetAgg(pair)
 	lo := e.Load(ir.ClsW, r)
 	hi := e.Load(ir.ClsW, e.Add(ir.ClsL, r, f.Long(4)))
 	e.Ret(e.Sub(ir.ClsW, e.Add(ir.ClsW, lo, hi), f.Word(42)))
@@ -170,7 +170,7 @@ func TestObjAggMemoryArgReturn(t *testing.T) {
 	// s = mkbig(10) -> {10,11,12,13,14,15}; then sumbig(s) == 75.
 	s := e.Call(ir.ClsL, f.Sym("mkbig", 0), f.Word(10))
 	mkcall := &e.Instrs[len(e.Instrs)-1]
-	mkcall.RetAgg = big
+	mkcall.SetRetAgg(big)
 	r := e.Call(ir.ClsW, f.Sym("sumbig", 0), s)
 	sumcall := &e.Instrs[len(e.Instrs)-1]
 	sumcall.SetAggArgs([]*ir.AggType{big})

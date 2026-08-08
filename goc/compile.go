@@ -6544,7 +6544,7 @@ func (g *gen) annotateABICall(instruction *ir.Instr, signature *types.Signature,
 	}
 	instruction.SetAggArgs(aggregateArgs)
 	if signature.Results().Len() > 0 {
-		instruction.RetAgg = g.goABIAggregate(signature.Results().At(0).Type())
+		instruction.SetRetAgg(g.goABIAggregate(signature.Results().At(0).Type()))
 	}
 }
 
@@ -6734,15 +6734,17 @@ func (g *gen) callWithSignature(resultClass ir.Cls, callee ir.Ref, arguments []i
 		result = g.cur.Call(resultClass, callee, arguments...)
 	}
 	instruction := &g.cur.Instrs[len(g.cur.Instrs)-1]
-	instruction.ClosureCall, instruction.ClosureContext = g.consumeClosureCall()
+	var closureContext ir.Ref
+	instruction.ClosureCall, closureContext = g.consumeClosureCall()
+	instruction.SetClosureContext(closureContext)
 	if instruction.ClosureCall {
 		instruction.CallConv = ir.CallConvGoInternal
 		instruction.CallConvSet = true
 	}
 	instruction.SetArgGroups(argumentGroups)
 	instruction.SetAggArgs(aggregateArguments)
-	if signature.Results().Len() > 0 && instruction.RetAgg == nil {
-		instruction.RetAgg = g.goABIAggregate(signature.Results().At(0).Type())
+	if signature.Results().Len() > 0 && instruction.RetAgg() == nil {
+		instruction.SetRetAgg(g.goABIAggregate(signature.Results().At(0).Type()))
 	}
 	g.clearTransientInterfaceCallArguments(transientArguments, signature, receiverType)
 	return result
@@ -6754,7 +6756,9 @@ func (g *gen) callVoidWithSignature(callee ir.Ref, arguments []ir.Ref, signature
 	arguments, argumentGroups, aggregateArguments := g.flattenCallArguments(arguments, signature, receiverType)
 	g.cur.CallVoid(callee, arguments...)
 	instruction := &g.cur.Instrs[len(g.cur.Instrs)-1]
-	instruction.ClosureCall, instruction.ClosureContext = g.consumeClosureCall()
+	var closureContext ir.Ref
+	instruction.ClosureCall, closureContext = g.consumeClosureCall()
+	instruction.SetClosureContext(closureContext)
 	if instruction.ClosureCall {
 		instruction.CallConv = ir.CallConvGoInternal
 		instruction.CallConvSet = true

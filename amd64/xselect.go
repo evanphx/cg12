@@ -154,7 +154,7 @@ func (s *xsel) selectCore(in *ir.Instr) bool {
 		s.b.allocNSP(d, size)
 		commit()
 	case ir.OIntrinsic:
-		switch in.Intrin.Name {
+		switch in.Intrin().Name {
 		case "stacksave":
 			d, commit := s.gpDst(in.To)
 			s.b.movFromSP(d)
@@ -173,7 +173,7 @@ func (s *xsel) selectCore(in *ir.Instr) bool {
 			s.b.callerSP(d)
 			commit()
 		default:
-			s.b.fail("amd64: unsupported intrinsic %q", in.Intrin.Name)
+			s.b.fail("amd64: unsupported intrinsic %q", in.Intrin().Name)
 		}
 	case ir.OGetReg:
 		src := regLoc(Reg(in.Arg(0).ID), in.Cls.Size(), in.Cls.IsFloat())
@@ -182,7 +182,7 @@ func (s *xsel) selectCore(in *ir.Instr) bool {
 		dst := regLoc(Reg(in.Arg(1).ID), in.Cls.Size(), in.Cls.IsFloat())
 		s.b.move(dst, s.b.refLoc(in.Arg(0)))
 	case ir.OBlockAddr:
-		s.b.blockAddrLea(gpScratch0, in.Blk)
+		s.b.blockAddrLea(gpScratch0, in.Blk())
 		s.b.move(s.b.refLoc(in.To), regLoc(gpScratch0, 8, false))
 	default:
 		return false

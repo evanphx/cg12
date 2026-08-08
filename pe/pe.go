@@ -998,7 +998,7 @@ func (e *engine) execData(in *ir.Instr) {
 	case ir.OCmp:
 		e.set(in.To, e.compare(in))
 	case ir.OBlockAddr:
-		e.set(in.To, value{kind: vBlockAddr, blk: in.Blk})
+		e.set(in.To, value{kind: vBlockAddr, blk: in.Blk()})
 	case ir.OCall:
 		name := e.calleeName(in)
 		switch name {
@@ -1097,7 +1097,7 @@ func (e *engine) residualCall(in *ir.Instr, name string) {
 // interpreter's call, so its by-value struct arguments and result use the same ABI.
 func (e *engine) tagCall(in *ir.Instr) {
 	last := &e.cur.Instrs[len(e.cur.Instrs)-1]
-	last.RetAgg = in.RetAgg
+	last.SetRetAgg(in.RetAgg())
 	last.SetAggArgs(in.AggArgs())
 }
 

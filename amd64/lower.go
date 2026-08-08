@@ -67,7 +67,7 @@ func lowerTailCalls(f *ir.Func) error {
 			}
 			continue
 		}
-		if call.RetAgg != nil {
+		if call.RetAgg() != nil {
 			return fmt.Errorf("amd64: aggregate-returning tail call is not supported")
 		}
 		b.Jmp = ir.Jmp{Kind: ir.JmpRet} // the callee provides the return value
@@ -213,10 +213,10 @@ func lowerCalls(f *ir.Func) error {
 
 			// A MEMORY-class result reserves rdi for the sret buffer pointer, ahead of
 			// the arguments.
-			retMem := in.RetAgg != nil && classifyAgg(in.RetAgg).memory
+			retMem := in.RetAgg() != nil && classifyAgg(in.RetAgg()).memory
 			if retMem {
 				buf := f.NewTemp("", ir.ClsL)
-				out = append(out, ir.Instr{Op: ir.OAlloc16, Cls: ir.ClsL, To: buf, Args: []ir.Ref{f.Long(int64(classifyAgg(in.RetAgg).size))}})
+				out = append(out, ir.Instr{Op: ir.OAlloc16, Cls: ir.ClsL, To: buf, Args: []ir.Ref{f.Long(int64(classifyAgg(in.RetAgg()).size))}})
 				pin := newPinned(f, argGP[0], ir.ClsL)
 				a.ngrn = 1
 				argSetup = append(argSetup, ir.Instr{Op: ir.OArg, Cls: ir.ClsL, To: pin, Args: []ir.Ref{buf}})
@@ -245,8 +245,8 @@ func lowerCalls(f *ir.Func) error {
 				// no result
 			case retMem:
 				// handled above (result buffer)
-			case in.RetAgg != nil:
-				callTo, callCls, callDefs, post = lowerAggResultReg(f, in.To, in.RetAgg, &out)
+			case in.RetAgg() != nil:
+				callTo, callCls, callDefs, post = lowerAggResultReg(f, in.To, in.RetAgg(), &out)
 			default:
 				pres := newPinned(f, retReg(in.Cls), in.Cls)
 				callTo, callCls = pres, in.Cls
@@ -261,7 +261,7 @@ func lowerCalls(f *ir.Func) error {
 			out = append(out, ir.Instr{
 				Op: ir.OCall, Args: append([]ir.Ref{callee}, pins...),
 				Aux: int64(a.stackBytes()), To: callTo, Cls: callCls, Extra: &ir.InstrExtra{Defs: callDefs},
-				Tail: in.Tail, ClosureCall: in.ClosureCall, ClosureContext: in.ClosureContext,
+				Tail: in.Tail, ClosureCall: in.ClosureCall,
 				Pos: in.Pos, Inl: in.Inl,
 			})
 			out = append(out, post...)

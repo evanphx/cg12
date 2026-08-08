@@ -213,8 +213,8 @@ func (mc *Machine) doIRCall(fr *frame, in *ir.Instr, f *ir.Func) error {
 	// A by-value aggregate result is returned as a pointer into the callee's
 	// now-freed stack; copy it into caller storage that outlives the call before
 	// anything can reuse those bytes.
-	if in.RetAgg != nil {
-		size, align := in.RetAgg.Layout()
+	if in.RetAgg() != nil {
+		size, align := in.RetAgg().Layout()
 		buf := mc.stackAlloc(uint64(size), uint64(align))
 		if err := mc.copyMem(buf, ret.u64(), size); err != nil {
 			return err

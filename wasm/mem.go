@@ -175,7 +175,7 @@ func funcNeedsFrame(f *ir.Func, funcs map[string]*ir.Func) bool {
 	for _, b := range f.Blocks {
 		for i := range b.Instrs {
 			in := &b.Instrs[i]
-			if in.Op.IsAlloc() || (in.Op == ir.OCall && in.RetAgg != nil) {
+			if in.Op.IsAlloc() || (in.Op == ir.OCall && in.RetAgg() != nil) {
 				return true
 			}
 			if in.Op == ir.OCall {

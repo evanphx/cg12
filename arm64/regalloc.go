@@ -575,7 +575,7 @@ func frameEscapingAllocations(f *ir.Func, allocationsOf allocationAddresses) map
 			}
 			// A closure environment is read outside Args, and handing one to a
 			// callee publishes it exactly as an ordinary operand would.
-			note(instruction.ClosureContext, false)
+			note(instruction.ClosureContext(), false)
 		}
 		note(block.Jmp.Arg, addressOnlyTerminatorOperand(block.Jmp.Kind))
 		for _, argument := range block.Jmp.Args {

@@ -45,8 +45,8 @@ func TestRoundTripIntrinsic(t *testing.T) {
 	require.NoError(t, err)
 	in := m2.Funcs[0].Start.Instrs
 	require.Len(t, in, 2)
-	assert.Equal(t, "stacksave", in[0].Intrin.Name)
-	assert.Equal(t, "stackrestore", in[1].Intrin.Name)
+	assert.Equal(t, "stacksave", in[0].Intrin().Name)
+	assert.Equal(t, "stackrestore", in[1].Intrin().Name)
 }
 
 func TestRoundTripInlineAssembly(t *testing.T) {
@@ -59,8 +59,8 @@ func TestRoundTripInlineAssembly(t *testing.T) {
 		{Kind: ir.AsmRegIn, Ref: input},
 	})
 	instruction := &entry.Instrs[len(entry.Instrs)-1]
-	instruction.Asm.ExactClobbers = true
-	instruction.Asm.Clobbers = []string{"cc", "memory"}
+	instruction.Asm().ExactClobbers = true
+	instruction.Asm().Clobbers = []string{"cc", "memory"}
 	entry.Ret(outputs[0])
 
 	roundTrip(t, module)
@@ -69,10 +69,10 @@ func TestRoundTripInlineAssembly(t *testing.T) {
 	require.NoError(t, err)
 	assembly := parsed.Funcs[0].Entry().Instrs[0]
 	require.NotNil(t, assembly.Asm)
-	assert.Equal(t, "add %w0, %w1, #1", assembly.Asm.Template)
-	assert.Equal(t, []ir.AsmOperandKind{ir.AsmRegOut, ir.AsmRegIn}, assembly.Asm.Ops)
-	assert.True(t, assembly.Asm.ExactClobbers)
-	assert.Equal(t, []string{"cc", "memory"}, assembly.Asm.Clobbers)
+	assert.Equal(t, "add %w0, %w1, #1", assembly.Asm().Template)
+	assert.Equal(t, []ir.AsmOperandKind{ir.AsmRegOut, ir.AsmRegIn}, assembly.Asm().Ops)
+	assert.True(t, assembly.Asm().ExactClobbers)
+	assert.Equal(t, []string{"cc", "memory"}, assembly.Asm().Clobbers)
 }
 
 func TestRoundTripAtomics(t *testing.T) {
@@ -91,9 +91,9 @@ func TestRoundTripAtomics(t *testing.T) {
 	m2, err := parse.Parse(m.String())
 	require.NoError(t, err)
 	in := m2.Funcs[0].Start.Instrs
-	assert.Equal(t, "atomic.store.l", in[0].Intrin.Name)
-	assert.Equal(t, "atomic.add.l", in[1].Intrin.Name)
-	assert.Equal(t, "atomic.fence", in[2].Intrin.Name)
+	assert.Equal(t, "atomic.store.l", in[0].Intrin().Name)
+	assert.Equal(t, "atomic.add.l", in[1].Intrin().Name)
+	assert.Equal(t, "atomic.fence", in[2].Intrin().Name)
 }
 
 func TestRoundTripLoopWithPhis(t *testing.T) {

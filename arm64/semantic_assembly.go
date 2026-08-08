@@ -80,8 +80,8 @@ func lowerSemanticFunction(module *ir.Module, source *plan9sem.Func, policy sema
 	block := function.Entry()
 	results := block.Asm(template, specs)
 	assembly := &block.Instrs[len(block.Instrs)-1]
-	assembly.Asm.ExactClobbers = true
-	assembly.Asm.Clobbers = semanticClobbers(source)
+	assembly.Asm().ExactClobbers = true
+	assembly.Asm().Clobbers = semanticClobbers(source)
 	if len(source.Signature.Results) > 0 {
 		if len(results) != 1 {
 			return nil, fmt.Errorf("assembly result was not bound")

@@ -30,7 +30,7 @@ func (mc *Machine) execInstr(fr *frame, in *ir.Instr) error {
 	case in.Op == ir.OVaArg:
 		return mc.execVaArg(fr, in)
 	case in.Op == ir.OBlockAddr:
-		addr, ok := mc.blockAddr[in.Blk]
+		addr, ok := mc.blockAddr[in.Blk()]
 		if !ok {
 			return mc.trapf("block address of a block whose address was not taken at load")
 		}
@@ -54,7 +54,7 @@ func (mc *Machine) execInstr(fr *frame, in *ir.Instr) error {
 // primitives the interpreter can model; an unknown one is a trap rather than a
 // silent no-op.
 func (mc *Machine) execIntrinsic(fr *frame, in *ir.Instr) error {
-	switch in.Intrin.Name {
+	switch in.Intrin().Name {
 	case "stacksave":
 		fr.vals[in.To.ID] = ptrVal(mc.sp)
 		return nil
@@ -73,21 +73,21 @@ func (mc *Machine) execIntrinsic(fr *frame, in *ir.Instr) error {
 		}
 		return nil
 	}
-	if strings.HasPrefix(in.Intrin.Name, "float.") {
+	if strings.HasPrefix(in.Intrin().Name, "float.") {
 		a, err := mc.evalRef(fr, in.Arg(0))
 		if err != nil {
 			return err
 		}
-		res, ok := floatMathOp(in.Intrin.Name, a)
+		res, ok := floatMathOp(in.Intrin().Name, a)
 		if !ok {
-			return mc.trapf("interp: unknown float intrinsic %q", in.Intrin.Name)
+			return mc.trapf("interp: unknown float intrinsic %q", in.Intrin().Name)
 		}
 		if !in.To.IsNone() {
 			fr.vals[in.To.ID] = res
 		}
 		return nil
 	}
-	if strings.HasPrefix(in.Intrin.Name, "atomic.") {
+	if strings.HasPrefix(in.Intrin().Name, "atomic.") {
 		args := make([]Value, len(in.Args))
 		for i := range in.Args {
 			v, err := mc.evalRef(fr, in.Arg(i))
@@ -96,7 +96,7 @@ func (mc *Machine) execIntrinsic(fr *frame, in *ir.Instr) error {
 			}
 			args[i] = v
 		}
-		res, hasResult, err := mc.atomicOp(in.Intrin.Name, args)
+		res, hasResult, err := mc.atomicOp(in.Intrin().Name, args)
 		if err != nil {
 			return err
 		}
@@ -105,7 +105,7 @@ func (mc *Machine) execIntrinsic(fr *frame, in *ir.Instr) error {
 		}
 		return nil
 	}
-	return mc.trapf("interp: unknown intrinsic %q", in.Intrin.Name)
+	return mc.trapf("interp: unknown intrinsic %q", in.Intrin().Name)
 }
 
 // evalValueOp evaluates a pure (result-producing, side-effect-free) op.

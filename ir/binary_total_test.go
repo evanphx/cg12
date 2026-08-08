@@ -465,36 +465,36 @@ func TestInstrRoundTripsEveryField(t *testing.T) {
 			StackResult:       Ref{Kind: RefTemp, ID: 4},
 			StackResultOffset: 8,
 			Unroll:            3,
+			ClosureContext:    Ref{Kind: RefTemp, ID: 3},
+			RetAgg:            agg,
+			Blk:               &Block{Name: "target"},
+			Intrin:            &IntrinOp{Name: "stacksave"},
+			Asm: &AsmOp{
+				Template:      "movl %k1, %k0",
+				Ops:           []AsmOperandKind{AsmRegOut, AsmRegIn},
+				ExactClobbers: true,
+				Regs:          []string{"", "a"},
+				Clobbers:      []string{"cc"},
+			},
 		},
-		RetAgg:         agg,
-		RetValues:      true,
-		Pos:            SrcPos{File: 1, Line: 2, Col: 3},
-		Tail:           true,
-		Volatile:       true,
-		ClosureCall:    true,
-		ClosureContext: Ref{Kind: RefTemp, ID: 3},
-		Asm: &AsmOp{
-			Template:      "movl %k1, %k0",
-			Ops:           []AsmOperandKind{AsmRegOut, AsmRegIn},
-			ExactClobbers: true,
-			Regs:          []string{"", "a"},
-			Clobbers:      []string{"cc"},
-		},
+		RetValues:   true,
+		Pos:         SrcPos{File: 1, Line: 2, Col: 3},
+		Tail:        true,
+		Volatile:    true,
+		ClosureCall: true,
 		Inl: &InlineSite{
 			Callee: "inner",
 			Call:   SrcPos{File: 1, Line: 9, Col: 1},
 			Parent: &InlineSite{Callee: "outer", Call: SrcPos{File: 1, Line: 4, Col: 2}},
 		},
-		Blk:    &Block{Name: "target"},
-		Intrin: &IntrinOp{Name: "stacksave"},
 	}
 	allFieldsSet(t, in)
 	// The carried structs need the same treatment: a field added to one of them
 	// is a field the encoder can drop just as quietly, and enumerating only
 	// Instr's own fields does not see it.
-	allFieldsSet(t, *in.Asm)
+	allFieldsSet(t, *in.Asm())
 	allFieldsSet(t, *in.Inl, "Parent") // the innermost site has no parent to set
-	allFieldsSet(t, *in.Intrin)
+	allFieldsSet(t, *in.Intrin())
 	// InstrExtra carries the fields only OCall and OAsm populate. It is behind a
 	// pointer to keep them off the other ~90% of instructions, which puts it in
 	// exactly the position this file exists to guard: a field added to it is a
@@ -505,15 +505,16 @@ func TestInstrRoundTripsEveryField(t *testing.T) {
 
 	// Blk is compared by name: the decoder rebuilds blocks, so it is a different
 	// pointer to the same block.
-	require.Equal(t, in.Blk.Name, got.Blk.Name)
-	in.Blk, got.Blk = nil, nil
+	require.Equal(t, in.Blk().Name, got.Blk().Name)
+	in.Extra.Blk, got.Extra.Blk = nil, nil
 	// AggType likewise round-trips through the module's type table by identity.
-	require.Equal(t, in.RetAgg.Name, got.RetAgg.Name)
+	require.Equal(t, in.RetAgg().Name, got.RetAgg().Name)
 	require.Len(t, got.AggArgs(), 1)
 	require.Len(t, got.ArgGroups(), 1)
 	require.Equal(t, in.ArgGroups()[0].Type.Name, got.ArgGroups()[0].Type.Name)
 	in.Extra.ArgGroups[0].Type, got.Extra.ArgGroups[0].Type = nil, nil
-	in.Extra.AggArgs, got.Extra.AggArgs, in.RetAgg, got.RetAgg = nil, nil, nil, nil
+	in.Extra.AggArgs, got.Extra.AggArgs = nil, nil
+	in.Extra.RetAgg, got.Extra.RetAgg = nil, nil
 
 	require.Equal(t, in, got)
 }
@@ -557,12 +558,12 @@ func TestTempRoundTripsEveryField(t *testing.T) {
 func roundTripInstr(t *testing.T, in Instr) Instr {
 	t.Helper()
 	m := NewModule()
-	m.AddType(in.RetAgg)
+	m.AddType(in.RetAgg())
 	f := m.NewFunc("f", ClsW)
 	for i := 0; i < 5; i++ {
 		f.NewTemp("t", ClsW)
 	}
-	target := f.NewBlock(in.Blk.Name)
+	target := f.NewBlock(in.Blk().Name)
 	target.RetVoid()
 	e := f.Entry()
 	e.Instrs = append(e.Instrs, in)

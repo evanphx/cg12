@@ -258,14 +258,14 @@ func verifyInstr(f *Func, b *Block, in *Instr) error {
 	// the two an emitter dereferences without asking.
 	switch in.Op {
 	case OAsm:
-		if in.Asm == nil {
+		if in.Asm() == nil {
 			return where("no template: an inline asm is its template, and there is no default")
 		}
-		if len(in.Asm.Regs) != 0 && len(in.Asm.Regs) != len(in.Asm.Ops) {
-			return where("%d operands but %d register constraints", len(in.Asm.Ops), len(in.Asm.Regs))
+		if len(in.Asm().Regs) != 0 && len(in.Asm().Regs) != len(in.Asm().Ops) {
+			return where("%d operands but %d register constraints", len(in.Asm().Ops), len(in.Asm().Regs))
 		}
 	case OBlockAddr:
-		if in.Blk == nil {
+		if in.Blk() == nil {
 			return where("no target block: the address of a label needs the label")
 		}
 	case OSel:
@@ -273,11 +273,11 @@ func verifyInstr(f *Func, b *Block, in *Instr) error {
 			return where("select needs 3 operands (cond, a, b), has %d", len(in.Args))
 		}
 	case OIntrinsic:
-		if in.Intrin == nil {
+		if in.Intrin() == nil {
 			return where("no name: an intrinsic is dispatched by name, and there is no default")
 		}
-		if LookupIntrinsic(in.Intrin.Name) == nil {
-			return where("unknown intrinsic %q (not registered)", in.Intrin.Name)
+		if LookupIntrinsic(in.Intrin().Name) == nil {
+			return where("unknown intrinsic %q (not registered)", in.Intrin().Name)
 		}
 	case OLifeStart, OLifeEnd:
 		if len(in.Args) != 1 {
@@ -292,7 +292,7 @@ func verifyInstr(f *Func, b *Block, in *Instr) error {
 			return err
 		}
 	}
-	if err := verifyRef(f, b, in.Op.String(), in.ClosureContext); err != nil {
+	if err := verifyRef(f, b, in.Op.String(), in.ClosureContext()); err != nil {
 		return err
 	}
 	if err := verifyRef(f, b, in.Op.String(), in.To); err != nil {

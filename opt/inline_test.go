@@ -153,7 +153,7 @@ func TestInlineMapsClosureContextToCallSiteValue(t *testing.T) {
 	caller.Entry().CallVoid(caller.Sym("callClosure", 0))
 	call := &caller.Entry().Instrs[0]
 	call.ClosureCall = true
-	call.ClosureContext = value
+	call.SetClosureContext(value)
 	caller.Entry().RetVoid()
 
 	require.True(t, opt.Inline(module))
@@ -737,7 +737,7 @@ func TestInlineAggregateReturn(t *testing.T) {
 		gx := g.Param("x", ir.ClsW)
 		ge := g.Entry()
 		r := ge.Call(ir.ClsL, g.Sym("mk", 0), gx)
-		ge.Instrs[len(ge.Instrs)-1].RetAgg = pair
+		ge.Instrs[len(ge.Instrs)-1].SetRetAgg(pair)
 		lo := ge.Load(ir.ClsW, r)
 		hi := ge.Load(ir.ClsW, ge.Add(ir.ClsL, r, g.Long(4)))
 		ge.Ret(ge.Add(ir.ClsW, lo, hi))

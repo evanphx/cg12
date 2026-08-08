@@ -1367,7 +1367,7 @@ func TestFrameEscapingAllocationsKeepPublishedAddressesConservative(t *testing.T
 				entry.CallVoid(function.Sym("invoke", 0))
 				call := &entry.Instrs[len(entry.Instrs)-1]
 				call.ClosureCall = true
-				call.ClosureContext = local
+				call.SetClosureContext(local)
 			},
 			escaping: true,
 		},
@@ -2142,7 +2142,7 @@ func TestGoStackMapsOmitAggregateResultHomeAtItsOwnCall(t *testing.T) {
 	function.ManagedFrame = true
 	entry := function.Entry()
 	home := entry.Call(ir.ClsP, function.Sym("maketext", 0))
-	entry.Instrs[len(entry.Instrs)-1].RetAgg = stringType
+	entry.Instrs[len(entry.Instrs)-1].SetRetAgg(stringType)
 	// The home is read after the second call, so it is live across both and the
 	// difference between them is only whether it has been written yet.
 	entry.CallVoid(function.Sym("observe", 0))

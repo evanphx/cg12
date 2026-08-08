@@ -43,6 +43,31 @@ type InstrExtra struct {
 	StackResult       Ref
 	StackResultOffset int64
 
+	// RetAgg is the aggregate type of an OCall's result (the result temporary is
+	// a pointer to it), or nil for a scalar result.
+	RetAgg *AggType
+
+	// Blk names the target block of an OBlockAddr (the address of a label taken
+	// with the &&label extension), whose result is that block's code address.
+	Blk *Block
+
+	// Asm carries an OAsm's inline-assembly template and operand layout.
+	Asm *AsmOp
+
+	// Intrin carries an OIntrinsic's dispatch name (the intrinsic being invoked).
+	Intrin *IntrinOp
+
+	// ClosureContext is the source-level closure object placed in the dedicated
+	// closure register for a ClosureCall. Keeping it explicit lets the inliner
+	// replace a callee's incoming closure register with the caller's ordinary SSA
+	// value.
+	//
+	// Only a closure call has one. Measured with `ccstat -instr-census` on a -O
+	// compile of the SQLite amalgamation: of 250,002 instructions, none carried
+	// one, and it was costing eight bytes on every one of them plus four more in
+	// the padding that followed it.
+	ClosureContext Ref
+
 	// Unroll is the recursion depth the inliner marks an OCall with while it
 	// decides how far to unroll a cycle. It is transient: opt clears it when the
 	// unroller is done, and nothing outside opt reads it.
@@ -100,6 +125,90 @@ func (in *Instr) StackResultOffset() int64 {
 func (in *Instr) SetStackResult(slot Ref, offset int64) {
 	e := in.extra()
 	e.StackResult, e.StackResultOffset = slot, offset
+}
+
+// ClosureContext reports the closure object a closure call passes in the
+// dedicated register, or R.
+func (in *Instr) ClosureContext() Ref {
+	if in.Extra == nil {
+		return R
+	}
+	return in.Extra.ClosureContext
+}
+
+// SetClosureContext records the closure object a closure call passes.
+//
+// Setting R on an instruction that has no InstrExtra allocates nothing, so the
+// passes that clear a context they never set stay free.
+func (in *Instr) SetClosureContext(context Ref) {
+	if context.IsNone() && in.Extra == nil {
+		return
+	}
+	in.extra().ClosureContext = context
+}
+
+// RetAgg reports the aggregate type of a call's by-value result, or nil.
+func (in *Instr) RetAgg() *AggType {
+	if in.Extra == nil {
+		return nil
+	}
+	return in.Extra.RetAgg
+}
+
+// SetRetAgg records the aggregate type of a call's by-value result.
+func (in *Instr) SetRetAgg(aggregate *AggType) {
+	if aggregate == nil && in.Extra == nil {
+		return
+	}
+	in.extra().RetAgg = aggregate
+}
+
+// Blk reports the target block of an OBlockAddr, or nil.
+func (in *Instr) Blk() *Block {
+	if in.Extra == nil {
+		return nil
+	}
+	return in.Extra.Blk
+}
+
+// SetBlk records the target block of an OBlockAddr.
+func (in *Instr) SetBlk(block *Block) {
+	if block == nil && in.Extra == nil {
+		return
+	}
+	in.extra().Blk = block
+}
+
+// Asm reports an OAsm's inline-assembly template and operand layout, or nil.
+func (in *Instr) Asm() *AsmOp {
+	if in.Extra == nil {
+		return nil
+	}
+	return in.Extra.Asm
+}
+
+// SetAsm records an OAsm's template and operand layout.
+func (in *Instr) SetAsm(asm *AsmOp) {
+	if asm == nil && in.Extra == nil {
+		return
+	}
+	in.extra().Asm = asm
+}
+
+// Intrin reports an OIntrinsic's dispatch name, or nil.
+func (in *Instr) Intrin() *IntrinOp {
+	if in.Extra == nil {
+		return nil
+	}
+	return in.Extra.Intrin
+}
+
+// SetIntrin records an OIntrinsic's dispatch name.
+func (in *Instr) SetIntrin(intrinsic *IntrinOp) {
+	if intrinsic == nil && in.Extra == nil {
+		return
+	}
+	in.extra().Intrin = intrinsic
 }
 
 // extra returns this instruction's InstrExtra, allocating one if it has none.

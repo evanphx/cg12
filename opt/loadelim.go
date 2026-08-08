@@ -78,7 +78,7 @@ func LoadElim(f *ir.Func) bool {
 				// too, because an atomic acquire load synchronizes-with another
 				// thread and can make a previously-cached value stale. One that
 				// touches no memory (stacksave) is transparent.
-				if e := ir.LookupIntrinsic(in.Intrin.Name); e == nil || e.WritesMemory || e.ReadsMemory {
+				if e := ir.LookupIntrinsic(in.Intrin().Name); e == nil || e.WritesMemory || e.ReadsMemory {
 					avail = nil
 				}
 			}

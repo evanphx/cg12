@@ -30,7 +30,7 @@ func (c *compiler) emitInstr(in *ir.Instr) {
 		c.emit(mkABC(bcBlit, ir.ClsL, 0, c.refReg(in.Arg(0)), c.refReg(in.Arg(1)), uint16(in.Aux)))
 		return
 	case in.Op == ir.OIntrinsic:
-		ii := intrinInfo{name: in.Intrin.Name, dst: c.dst(in)}
+		ii := intrinInfo{name: in.Intrin().Name, dst: c.dst(in)}
 		for _, a := range in.Args {
 			ii.args = append(ii.args, c.refReg(a))
 		}
@@ -45,7 +45,7 @@ func (c *compiler) emitInstr(in *ir.Instr) {
 		c.emit(mkABC(bcVaArg, in.Cls, 0, c.dst(in), c.refReg(in.Arg(0)), 0))
 		return
 	case in.Op == ir.OBlockAddr:
-		addr, ok := c.mc.blockAddr[in.Blk]
+		addr, ok := c.mc.blockAddr[in.Blk()]
 		if !ok {
 			c.fail("block address of a block whose address was not taken at load")
 			return
@@ -121,7 +121,7 @@ func (c *compiler) emitCall(in *ir.Instr) {
 		argBase: c.argBase,
 		nArgs:   len(args),
 		aggArgs: in.AggArgs(),
-		retAgg:  in.RetAgg,
+		retAgg:  in.RetAgg(),
 	}
 	if !in.To.IsNone() {
 		site.hasResult = true

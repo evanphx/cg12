@@ -22,7 +22,7 @@ func asmPrecolor(f *ir.Func) error {
 			if in.Op != ir.OAsm {
 				continue
 			}
-			for _, letter := range in.Asm.Regs {
+			for _, letter := range in.Asm().Regs {
 				if letter != "" {
 					return fmt.Errorf("arm64: inline-asm fixed-register constraint %q is not supported", letter)
 				}
@@ -30,7 +30,7 @@ func asmPrecolor(f *ir.Func) error {
 			// A clobber list is a promise the allocator keeps. Honouring the names we
 			// recognise and passing over the rest would keep exactly the promises
 			// that needed no keeping, and break the one that did.
-			for _, name := range in.Asm.Clobbers {
+			for _, name := range in.Asm().Clobbers {
 				if _, ok := asmClobberReg(name); !ok {
 					return fmt.Errorf("arm64: inline-asm clobbers %q, which is not a register this backend knows", name)
 				}
@@ -137,11 +137,11 @@ func expandAsm(tmpl string, vals []asmVal) (string, error) {
 // keeps -- honouring the ones we recognise and ignoring the rest would keep
 // exactly the promises that need no keeping.
 func asmClobberRegs(in *ir.Instr) []Reg {
-	if in.Asm == nil {
+	if in.Asm() == nil {
 		return nil
 	}
 	var out []Reg
-	for _, name := range in.Asm.Clobbers {
+	for _, name := range in.Asm().Clobbers {
 		if r, ok := asmClobberReg(name); ok && r >= 0 {
 			out = append(out, r)
 		}

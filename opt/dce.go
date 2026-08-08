@@ -82,7 +82,7 @@ func hasSideEffect(in *ir.Instr) bool {
 		// An intrinsic's effects come from its registry entry. It matters (must be
 		// kept) if it has a side effect or writes memory; an unregistered name is
 		// treated conservatively.
-		e := ir.LookupIntrinsic(in.Intrin.Name)
+		e := ir.LookupIntrinsic(in.Intrin().Name)
 		return e == nil || e.SideEffect || e.WritesMemory
 	case op == ir.OAsm:
 		return true // inline asm is volatile: it may read/write memory and registers

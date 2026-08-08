@@ -460,13 +460,14 @@ func (a *argAssigner) assignStack(size, alignment int) int {
 func lowerGoAggregateParam(f *ir.Func, parameter *ir.Temp, assigner *argAssigner) (parameters, reconstruction []ir.Instr, err error) {
 	parts, onStack, stackOffset := assignGoAggregate(assigner, parameter.Agg)
 	if onStack {
-		return []ir.Instr{{
-			Op:     ir.OPar,
-			Cls:    ir.ClsL,
-			To:     parameter.Ref(),
-			Aux:    int64(stackOffset),
-			RetAgg: parameter.Agg,
-		}}, nil, nil
+		stackedPar := ir.Instr{
+			Op:  ir.OPar,
+			Cls: ir.ClsL,
+			To:  parameter.Ref(),
+			Aux: int64(stackOffset),
+		}
+		stackedPar.SetRetAgg(parameter.Agg)
+		return []ir.Instr{stackedPar}, nil, nil
 	}
 
 	slot := f.AllocAggregate(parameter.Agg, &reconstruction)
@@ -535,14 +536,15 @@ func lowerGoValueParams(f *ir.Func, parameters []*ir.Temp, aggregate *ir.AggType
 func lowerGoAggregateArg(f *ir.Func, argument ir.Ref, aggregate *ir.AggType, assigner *argAssigner, out *[]ir.Instr, setup []ir.Instr, pins []ir.Ref) ([]ir.Instr, []ir.Ref, error) {
 	parts, onStack, stackOffset := assignGoAggregate(assigner, aggregate)
 	if onStack {
-		setup = append(setup, ir.Instr{
-			Op:     ir.OArg,
-			Cls:    ir.ClsL,
-			To:     ir.R,
-			Args:   []ir.Ref{argument},
-			Aux:    int64(stackOffset),
-			RetAgg: aggregate,
-		})
+		stackedArg := ir.Instr{
+			Op:   ir.OArg,
+			Cls:  ir.ClsL,
+			To:   ir.R,
+			Args: []ir.Ref{argument},
+			Aux:  int64(stackOffset),
+		}
+		stackedArg.SetRetAgg(aggregate)
+		setup = append(setup, stackedArg)
 		return setup, pins, nil
 	}
 	for _, part := range parts {
@@ -917,7 +919,7 @@ func aapcsCallStackBytes(f *ir.Func, call *ir.Instr) int {
 		argumentIndex++
 	}
 
-	if call.RetAgg != nil && classifyAgg(call.RetAgg).kind == aggMemory {
+	if call.RetAgg() != nil && classifyAgg(call.RetAgg()).kind == aggMemory {
 		homes = append(homes, goABISpill{size: 8, alignment: 8})
 	}
 

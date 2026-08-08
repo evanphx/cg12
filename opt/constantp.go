@@ -17,7 +17,7 @@ func ResolveConstantP(f *ir.Func) bool {
 	for _, b := range f.Blocks {
 		for i := range b.Instrs {
 			in := &b.Instrs[i]
-			if in.Op != ir.OIntrinsic || in.Intrin == nil || in.Intrin.Name != "constant_p" {
+			if in.Op != ir.OIntrinsic || in.Intrin() == nil || in.Intrin().Name != "constant_p" {
 				continue
 			}
 			v := int64(0)
@@ -27,7 +27,7 @@ func ResolveConstantP(f *ir.Func) bool {
 			// Replace the marker with a copy of the answer; copy-propagation and the
 			// following fold carry it into the branch that consumed it.
 			in.Op = ir.OCopy
-			in.Intrin = nil
+			in.SetIntrin(nil)
 			in.Args = []ir.Ref{f.ConstInt(in.Cls, v)}
 			changed = true
 		}

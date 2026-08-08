@@ -457,7 +457,7 @@ func split128(v *big.Int) (lo, hi int64) {
 func (g *gen) ti3(fn string, a, b ir.Ref) ir.Ref {
 	r := g.cur.Call(ir.ClsL, g.fn.Sym(fn, 0), a, b)
 	call := g.lastInstr()
-	call.RetAgg = g.int128Agg()
+	call.SetRetAgg(g.int128Agg())
 	call.SetAggArgs([]*ir.AggType{g.int128Agg(), g.int128Agg()})
 	return r
 }
@@ -466,7 +466,7 @@ func (g *gen) ti3(fn string, a, b ir.Ref) ir.Ref {
 // 128-bit result (the float-to-int128 conversions).
 func (g *gen) ti3Scalar(fn string, v ir.Ref) ir.Ref {
 	r := g.cur.Call(ir.ClsL, g.fn.Sym(fn, 0), v)
-	g.lastInstr().RetAgg = g.int128Agg()
+	g.lastInstr().SetRetAgg(g.int128Agg())
 	return r
 }
 
@@ -479,7 +479,7 @@ func (g *gen) ti3ShiftAddr(fn string, addr ir.Ref, rn moderncc.ExpressionNode) i
 	n := g.cur.Copy(ir.ClsW, g.genExpr(rn)) // the shift count is an int
 	r := g.cur.Call(ir.ClsL, g.fn.Sym(fn, 0), addr, n)
 	call := g.lastInstr()
-	call.RetAgg = g.int128Agg()
+	call.SetRetAgg(g.int128Agg())
 	call.SetAggArgs([]*ir.AggType{g.int128Agg(), nil})
 	return r
 }

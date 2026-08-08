@@ -126,14 +126,14 @@ func New(m *ir.Module, opts ...Option) (*Machine, error) {
 		for _, b := range f.Blocks {
 			for i := range b.Instrs {
 				in := &b.Instrs[i]
-				if in.Op != ir.OBlockAddr || in.Blk == nil {
+				if in.Op != ir.OBlockAddr || in.Blk() == nil {
 					continue
 				}
-				if _, ok := mc.blockAddr[in.Blk]; ok {
+				if _, ok := mc.blockAddr[in.Blk()]; ok {
 					continue
 				}
-				mc.blockAddr[in.Blk] = mc.textNext
-				mc.blockAt[mc.textNext] = in.Blk
+				mc.blockAddr[in.Blk()] = mc.textNext
+				mc.blockAt[mc.textNext] = in.Blk()
 				mc.textNext += 16
 			}
 		}

@@ -76,9 +76,9 @@ type Instr struct {
 	// one.
 	Extra *InstrExtra
 
-	// RetAgg is the aggregate type of an OCall's result (the result temporary is
-	// a pointer to it), or nil for a scalar result.
-	RetAgg *AggType
+	// RetAgg moved to InstrExtra: only a call returning a by-value aggregate has
+	// one, and no instruction in the optimiser carried one on the workload it was
+	// measured against.
 
 	// RetValues means To and Defs are the scalar parts of RetAgg rather than To
 	// being an address at which the aggregate result is reconstructed.
@@ -120,27 +120,20 @@ type Instr struct {
 	// reserves an additional spill word for that register in the outgoing frame.
 	//
 	// Declared with the other single-byte fields at the top of the struct.
-	// ClosureContext is the source-level closure object placed in the dedicated
-	// register for a ClosureCall. Keeping it explicit lets the inliner replace a
-	// callee's incoming closure register with the caller's ordinary SSA value.
-	ClosureContext Ref
+	//
+	// ClosureContext moved to InstrExtra: only a closure call carries one, and no
+	// instruction in the optimiser did on the workload it was measured against.
 
-	// Blk names the target block of an OBlockAddr (the address of a label taken
-	// with the &&label extension), whose result is that block's code address.
-	Blk *Block
-
-	// Inl records inline provenance: when the inliner splices a callee's body in,
-	// each cloned instruction points at the InlineSite describing which function
-	// it came from and where it was called. nil for ordinary (non-inlined) code.
-	// Backends turn it into DWARF DW_TAG_inlined_subroutine records.
+	// Blk, Asm and Intrin moved to InstrExtra: one opcode each populates them,
+	// and none of the 250,002 instructions of a -O compile of the SQLite
+	// amalgamation carried a Blk or an Asm, while 39 carried an Intrin.
+	//
+	// Inl did not move, though it is the same shape of rarely-set pointer. It is
+	// set on 21.63% of instructions, and an InstrExtra costs 96 bytes against the
+	// eight this saves, so moving it would cost memory rather than save it. That
+	// is measurable with `ccstat -instr-census`, and was measured before the rest
+	// of them were moved.
 	Inl *InlineSite
-
-	// Asm carries an OAsm's inline-assembly template and operand layout.
-	Asm *AsmOp
-
-	// Intrin carries an OIntrinsic's dispatch name (the intrinsic being invoked).
-	// nil for every other op.
-	Intrin *IntrinOp
 
 	// Amode is four-byte aligned and sits here, next to Pos and the one-byte
 	// fields, so it packs into what would otherwise be tail padding.
@@ -164,12 +157,13 @@ type Instr struct {
 // Uses returns every SSA value read by the instruction, including operands
 // carried outside Args for ABI purposes.
 func (in *Instr) Uses() []Ref {
-	if in.ClosureContext.IsNone() {
+	context := in.ClosureContext()
+	if context.IsNone() {
 		return in.Args
 	}
 	uses := make([]Ref, 0, len(in.Args)+1)
 	uses = append(uses, in.Args...)
-	uses = append(uses, in.ClosureContext)
+	uses = append(uses, context)
 	return uses
 }
 
@@ -217,7 +211,7 @@ type AsmOp struct {
 // AsmRegOuts returns the register-output result temporaries in %N order (To then
 // Defs).
 func (in *Instr) AsmRegOuts() []Ref {
-	if in.Asm == nil || in.To.Kind != RefTemp {
+	if in.Asm() == nil || in.To.Kind != RefTemp {
 		return nil
 	}
 	return append([]Ref{in.To}, in.Defs()...)

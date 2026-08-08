@@ -74,7 +74,7 @@ func TestPrintAggregates(t *testing.T) {
 	r := e.Call(ClsL, f.Sym("g", 0), pr)
 	ci := &e.Instrs[len(e.Instrs)-1]
 	ci.SetAggArgs([]*AggType{pair})
-	ci.RetAgg = pair
+	ci.SetRetAgg(pair)
 	_ = r
 	e.RetVoid()
 

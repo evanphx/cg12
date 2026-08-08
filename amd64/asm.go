@@ -53,7 +53,7 @@ func asmPrecolor(f *ir.Func) error {
 			// A clobber list is a promise the allocator keeps; a name it cannot
 			// resolve is one it cannot keep, and passing over it silently keeps
 			// exactly the promises that needed no keeping.
-			for _, name := range b.Instrs[i].Asm.Clobbers {
+			for _, name := range b.Instrs[i].Asm().Clobbers {
 				if _, ok := asmClobberReg(name); !ok {
 					return fmt.Errorf("amd64: inline-asm clobbers %q, which is not a register this backend knows", name)
 				}
@@ -71,10 +71,10 @@ func asmPrecolor(f *ir.Func) error {
 			outs := in.AsmRegOuts()
 			oc, ac := 0, 0
 			var pre []ir.Instr // copies materializing fixed inputs, emitted before the asm
-			for opi, kind := range in.Asm.Ops {
+			for opi, kind := range in.Asm().Ops {
 				letter := ""
-				if opi < len(in.Asm.Regs) {
-					letter = in.Asm.Regs[opi]
+				if opi < len(in.Asm().Regs) {
+					letter = in.Asm().Regs[opi]
 				}
 				switch kind {
 				case ir.AsmRegOut, ir.AsmRegInOut:
@@ -238,11 +238,11 @@ func memn(base Reg, disp int32) string {
 
 // asmClobberRegs is the registers an inline-asm template declares it writes.
 func asmClobberRegs(in *ir.Instr) []Reg {
-	if in.Asm == nil {
+	if in.Asm() == nil {
 		return nil
 	}
 	var out []Reg
-	for _, name := range in.Asm.Clobbers {
+	for _, name := range in.Asm().Clobbers {
 		if r, ok := asmClobberReg(name); ok && r >= 0 {
 			out = append(out, r)
 		}

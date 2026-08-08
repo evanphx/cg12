@@ -388,8 +388,8 @@ func addRuntimeCoverageWrite(function *ir.Func, block *ir.Block, address ir.Ref,
 		{Kind: ir.AsmRegIn, Ref: function.Long(int64(size))},
 	})
 	assembly := &block.Instrs[len(block.Instrs)-1]
-	assembly.Asm.ExactClobbers = true
-	assembly.Asm.Clobbers = []string{"x0", "x1", "x2", "x8", "memory", "cc"}
+	assembly.Asm().ExactClobbers = true
+	assembly.Asm().Clobbers = []string{"x0", "x1", "x2", "x8", "memory", "cc"}
 }
 
 func runtimeCoverageChunkName(chunk int) string {

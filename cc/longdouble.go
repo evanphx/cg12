@@ -99,7 +99,7 @@ func (g *gen) softcall(fn string, retQuad bool, retCls ir.Cls, args ...quadArg) 
 	if retQuad {
 		r := g.cur.Call(ir.ClsL, callee, refs...)
 		call := g.lastInstr()
-		call.RetAgg = g.quadAgg()
+		call.SetRetAgg(g.quadAgg())
 		call.SetAggArgs(aggArgs)
 		return r
 	}

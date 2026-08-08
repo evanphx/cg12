@@ -66,9 +66,9 @@ func TestAtomicBuilder(t *testing.T) {
 	e.RetVoid()
 
 	// The width and operation live in the name.
-	assert.Equal(t, "atomic.store.l", e.Instrs[1].Intrin.Name)
+	assert.Equal(t, "atomic.store.l", e.Instrs[1].Intrin().Name)
 	assert.True(t, e.Instrs[1].To.IsNone(), "a store yields nothing")
-	assert.Equal(t, "atomic.add.l", e.Instrs[2].Intrin.Name)
+	assert.Equal(t, "atomic.add.l", e.Instrs[2].Intrin().Name)
 	assert.Equal(t, got, e.Instrs[2].To, "an RMW returns the previous value")
 }
 
@@ -89,11 +89,11 @@ func TestIntrinsicBuilder(t *testing.T) {
 	save := e.Instrs[0]
 	assert.Equal(t, OIntrinsic, save.Op)
 	require.NotNil(t, save.Intrin)
-	assert.Equal(t, "stacksave", save.Intrin.Name)
+	assert.Equal(t, "stacksave", save.Intrin().Name)
 	assert.Equal(t, RefTemp, save.To.Kind, "stacksave yields a value")
 
 	restore := e.Instrs[1]
-	assert.Equal(t, "stackrestore", restore.Intrin.Name)
+	assert.Equal(t, "stackrestore", restore.Intrin().Name)
 	assert.True(t, restore.To.IsNone(), "stackrestore yields nothing")
 	assert.Equal(t, sp, restore.Arg(0))
 }
@@ -131,10 +131,10 @@ func TestIntrinsicBinaryRoundTrip(t *testing.T) {
 
 	in := got.Funcs[0].Start.Instrs
 	require.Len(t, in, 2)
-	require.NotNil(t, in[0].Intrin)
-	assert.Equal(t, "stacksave", in[0].Intrin.Name)
-	require.NotNil(t, in[1].Intrin)
-	assert.Equal(t, "stackrestore", in[1].Intrin.Name)
+	require.NotNil(t, in[0].Intrin())
+	assert.Equal(t, "stacksave", in[0].Intrin().Name)
+	require.NotNil(t, in[1].Intrin())
+	assert.Equal(t, "stackrestore", in[1].Intrin().Name)
 }
 
 func TestVerifyIntrinsicPayload(t *testing.T) {

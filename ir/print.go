@@ -201,8 +201,8 @@ func (f *Func) printPos(sb *strings.Builder, pos, last SrcPos) SrcPos {
 func (f *Func) printInstr(sb *strings.Builder, in *Instr) {
 	sb.WriteByte('\t')
 	if (in.Op.HasResult() || in.Op == OIntrinsic) && !in.To.IsNone() {
-		if in.Op == OCall && in.RetAgg != nil {
-			fmt.Fprintf(sb, "%s =:%s ", f.refString(in.To), in.RetAgg.Name)
+		if in.Op == OCall && in.RetAgg() != nil {
+			fmt.Fprintf(sb, "%s =:%s ", f.refString(in.To), in.RetAgg().Name)
 		} else {
 			fmt.Fprintf(sb, "%s =%s ", f.refString(in.To), in.Cls)
 		}
@@ -214,16 +214,16 @@ func (f *Func) printInstr(sb *strings.Builder, in *Instr) {
 	}
 	if in.Op == OBlockAddr {
 		name := "?"
-		if in.Blk != nil {
-			name = in.Blk.Name
+		if in.Blk() != nil {
+			name = in.Blk().Name
 		}
 		fmt.Fprintf(sb, " @%s\n", name)
 		return
 	}
 	if in.Op == OIntrinsic {
 		name := "?"
-		if in.Intrin != nil {
-			name = in.Intrin.Name
+		if in.Intrin() != nil {
+			name = in.Intrin().Name
 		}
 		sb.WriteByte(' ')
 		sb.WriteString(name)
@@ -260,17 +260,17 @@ func (f *Func) printInstr(sb *strings.Builder, in *Instr) {
 }
 
 func (f *Func) printAsm(sb *strings.Builder, in *Instr) {
-	fmt.Fprintf(sb, " %q (", in.Asm.Template)
+	fmt.Fprintf(sb, " %q (", in.Asm().Template)
 	outputs := in.AsmRegOuts()
 	outputIndex := 0
 	argumentIndex := 0
-	for index, kind := range in.Asm.Ops {
+	for index, kind := range in.Asm().Ops {
 		if index > 0 {
 			sb.WriteString(", ")
 		}
 		register := ""
-		if index < len(in.Asm.Regs) {
-			register = in.Asm.Regs[index]
+		if index < len(in.Asm().Regs) {
+			register = in.Asm().Regs[index]
 		}
 		constraint := asmConstraint(kind, register)
 		fmt.Fprintf(sb, "(%q", constraint)
@@ -290,12 +290,12 @@ func (f *Func) printAsm(sb *strings.Builder, in *Instr) {
 		sb.WriteByte(')')
 	}
 	sb.WriteByte(')')
-	if in.Asm.ExactClobbers {
+	if in.Asm().ExactClobbers {
 		sb.WriteString(" exact")
 	}
-	if len(in.Asm.Clobbers) > 0 {
+	if len(in.Asm().Clobbers) > 0 {
 		sb.WriteString(" clobbers(")
-		for index, clobber := range in.Asm.Clobbers {
+		for index, clobber := range in.Asm().Clobbers {
 			if index > 0 {
 				sb.WriteString(", ")
 			}

@@ -69,10 +69,10 @@ func TestCopyPreservesFixedRegisterMove(t *testing.T) {
 	entry.CallVoid(f.Sym("invoke", 0))
 	call := &entry.Instrs[1]
 	call.ClosureCall = true
-	call.ClosureContext = context
+	call.SetClosureContext(context)
 	entry.RetVoid()
 
 	assert.False(t, Copy(f))
 	assert.Equal(t, ir.OCopy, entry.Instrs[0].Op)
-	assert.Equal(t, context, entry.Instrs[1].ClosureContext)
+	assert.Equal(t, context, entry.Instrs[1].ClosureContext())
 }

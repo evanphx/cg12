@@ -21,8 +21,8 @@ func ThreadJumps(f *ir.Func) {
 			externalEntry[b] = true
 		}
 		for k := range b.Instrs {
-			if in := &b.Instrs[k]; in.Op == ir.OBlockAddr && in.Blk != nil {
-				externalEntry[in.Blk] = true
+			if in := &b.Instrs[k]; in.Op == ir.OBlockAddr && in.Blk() != nil {
+				externalEntry[in.Blk()] = true
 			}
 		}
 	}

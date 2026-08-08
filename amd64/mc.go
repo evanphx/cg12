@@ -1414,7 +1414,7 @@ func (m *mc) memAddr(addr ir.Ref, scratch Reg) (x64.Mem, func()) {
 // encoders this file uses, so a template only reaches instructions we can encode
 // and says so plainly when it does not.
 func (m *mc) emitAsm(in *ir.Instr) {
-	asm := in.Asm
+	asm := in.Asm()
 	vals := make([]asmVal, len(asm.Ops))
 	// Two pools, because an operand's register has to come from the file its class
 	// lives in: a double in a GP register is not a double. They are counted

@@ -37,7 +37,9 @@ func applySubst(f *ir.Func, s subst) {
 			for j := range in.Args {
 				in.Args[j] = s.resolve(in.Args[j])
 			}
-			in.ClosureContext = s.resolve(in.ClosureContext)
+			if context := in.ClosureContext(); !context.IsNone() {
+				in.SetClosureContext(s.resolve(context))
+			}
 		}
 		b.Jmp.Arg = s.resolve(b.Jmp.Arg)
 		for index := range b.Jmp.Args {

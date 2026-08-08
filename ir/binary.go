@@ -348,7 +348,7 @@ func collectTypes(m *Module) ([]*AggType, map[*AggType]int) {
 		for _, b := range f.Blocks {
 			for i := range b.Instrs {
 				in := &b.Instrs[i]
-				add(in.RetAgg)
+				add(in.RetAgg())
 				for _, a := range in.AggArgs() {
 					add(a)
 				}
@@ -744,7 +744,7 @@ func (e *enc) encInstr(in *Instr, blockRef func(*Block)) {
 	for _, r := range in.Defs() {
 		e.ref(r)
 	}
-	e.typeRef(in.RetAgg)
+	e.typeRef(in.RetAgg())
 	e.boolean(in.RetValues)
 	e.ref(in.StackResult())
 	e.iv(in.StackResultOffset())
@@ -752,11 +752,11 @@ func (e *enc) encInstr(in *Instr, blockRef func(*Block)) {
 	e.boolean(in.Tail)
 	e.boolean(in.Volatile)
 	e.boolean(in.ClosureCall)
-	e.ref(in.ClosureContext)
-	e.asmOp(in.Asm)
-	e.intrinOp(in.Intrin)
+	e.ref(in.ClosureContext())
+	e.asmOp(in.Asm())
+	e.intrinOp(in.Intrin())
 	e.inlineSite(in.Inl)
-	blockRef(in.Blk) // OBlockAddr target (nil for every other op)
+	blockRef(in.Blk()) // OBlockAddr target (nil for every other op)
 }
 
 // intrinOp encodes an OIntrinsic's dispatch name, or its absence.
@@ -1194,7 +1194,7 @@ func (d *dec) decInstr(blockRef func() *Block) Instr {
 		}
 		in.SetDefs(defs)
 	}
-	in.RetAgg = d.typeRef()
+	in.SetRetAgg(d.typeRef())
 	in.RetValues = d.boolean()
 	if slot, offset := d.ref(), d.iv(); !slot.IsNone() || offset != 0 {
 		in.SetStackResult(slot, offset)
@@ -1203,11 +1203,11 @@ func (d *dec) decInstr(blockRef func() *Block) Instr {
 	in.Tail = d.boolean()
 	in.Volatile = d.boolean()
 	in.ClosureCall = d.boolean()
-	in.ClosureContext = d.ref()
-	in.Asm = d.asmOp()
-	in.Intrin = d.intrinOp()
+	in.SetClosureContext(d.ref())
+	in.SetAsm(d.asmOp())
+	in.SetIntrin(d.intrinOp())
 	in.Inl = d.inlineSite()
-	in.Blk = blockRef()
+	in.SetBlk(blockRef())
 	return in
 }
 

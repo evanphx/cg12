@@ -316,6 +316,13 @@ func compile(path, source string, options cc.Options, optimize bool) *run {
 		}
 	})
 	result.objectSHA = fmt.Sprintf("%x", sha256.Sum256(encoded))
+	// The module is held for the whole run, which is what cmd/cc does: its mod
+	// is live until writeObject returns. That choice is visible in the live-heap
+	// column -- the backend and elf-encode rows read about 133 MiB with the
+	// module pinned and about 16 MiB without, because the IR becomes collectable
+	// the moment nothing names it. Pinning is the honest one, since the driver
+	// being modelled pins it too, but the two are not comparable, so a live-heap
+	// figure from before this was written is not a figure to diff against.
 	result.module = module
 	return result
 }
@@ -409,12 +416,12 @@ func reportInstrCensus(module *ir.Module) {
 						alone[name]++
 					}
 				}
-				note("Blk", in.Blk != nil)
-				note("Asm", in.Asm != nil)
-				note("Intrin", in.Intrin != nil)
-				note("RetAgg", in.RetAgg != nil)
+				note("Blk", in.Blk() != nil)
+				note("Asm", in.Asm() != nil)
+				note("Intrin", in.Intrin() != nil)
+				note("RetAgg", in.RetAgg() != nil)
 				note("Inl", in.Inl != nil)
-				note("ClosureContext", !in.ClosureContext.IsNone())
+				note("ClosureContext", !in.ClosureContext().IsNone())
 				note("Aux", in.Aux != 0)
 				note("Amode", in.Amode != 0)
 			}

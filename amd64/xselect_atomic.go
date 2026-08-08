@@ -16,10 +16,10 @@ import (
 // recognize is handed back to the chain deliberately, so it still reaches that
 // failure and reports itself rather than being silently dropped.
 func selectAtomic(s *xsel, in *ir.Instr) bool {
-	if in.Op != ir.OIntrinsic || in.Intrin == nil {
+	if in.Op != ir.OIntrinsic || in.Intrin() == nil {
 		return false
 	}
-	base, bytes, ok := atomicNameParts(in.Intrin.Name)
+	base, bytes, ok := atomicNameParts(in.Intrin().Name)
 	if !ok {
 		return false
 	}

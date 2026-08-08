@@ -48,10 +48,10 @@ TEXT ·Load(SB), NOSPLIT, $0-12
 
 	assembly := function.Entry().Instrs[0]
 	require.Equal(t, ir.OAsm, assembly.Op)
-	require.NotContains(t, assembly.Asm.Template, "(FP)")
-	require.Contains(t, assembly.Asm.Template, "mov x0, %x1")
-	require.Contains(t, assembly.Asm.Template, "mov %w0, w0")
-	require.Contains(t, assembly.Asm.Template, "ldar w0, [x0]")
+	require.NotContains(t, assembly.Asm().Template, "(FP)")
+	require.Contains(t, assembly.Asm().Template, "mov x0, %x1")
+	require.Contains(t, assembly.Asm().Template, "mov %w0, w0")
+	require.Contains(t, assembly.Asm().Template, "ldar w0, [x0]")
 
 	module := ir.NewModule()
 	module.Funcs = functions
@@ -140,7 +140,7 @@ TEXT ·three(SB), NOSPLIT, $0-16
 	require.NoError(t, err)
 	function := functions[0]
 	require.Len(t, function.Params, 3)
-	template := function.Entry().Instrs[0].Asm.Template
+	template := function.Entry().Instrs[0].Asm().Template
 	require.Contains(t, template, "mov %w0, w0")
 	require.Contains(t, template, "str w0, [%x2]")
 	require.Contains(t, template, "str w0, [%x3]")

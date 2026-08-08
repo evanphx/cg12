@@ -98,7 +98,7 @@ func (g *gen) genAsm(as *moderncc.AsmStatement) {
 	}
 	res := g.cur.Asm(tmpl, specs)
 	if len(clobbers) > 0 {
-		g.cur.Instrs[len(g.cur.Instrs)-1].Asm.Clobbers = clobbers
+		g.cur.Instrs[len(g.cur.Instrs)-1].Asm().Clobbers = clobbers
 	}
 	// res holds the register-output temporaries in order; store each back to its
 	// lvalue. Memory outputs ("=m") are written by the asm directly.

@@ -98,8 +98,8 @@ func stabilizeClosureContext(function *ir.Func) {
 					block.Instrs[index].Args[argumentIndex] = saved
 				}
 			}
-			if block.Instrs[index].ClosureContext == incoming {
-				block.Instrs[index].ClosureContext = saved
+			if block.Instrs[index].ClosureContext() == incoming {
+				block.Instrs[index].SetClosureContext(saved)
 			}
 		}
 		if block.Jmp.Arg == incoming {
@@ -958,7 +958,7 @@ func lowerTailCalls(f *ir.Func) error {
 			}
 			continue
 		}
-		if call.RetAgg != nil {
+		if call.RetAgg() != nil {
 			return fmt.Errorf("arm64: aggregate-returning tail call is not supported")
 		}
 		b.Jmp = ir.Jmp{Kind: ir.JmpRet} // the callee provides the return value
@@ -1036,13 +1036,14 @@ func lowerParams(f *ir.Func, retBuf ir.Ref) error {
 		if !onStack {
 			return fmt.Errorf("arm64: internal error: Go ABI result buffer assigned to registers")
 		}
-		pars = append(pars, ir.Instr{
-			Op:     ir.OPar,
-			Cls:    ir.ClsL,
-			To:     retBuf,
-			Aux:    int64(resultOffset),
-			RetAgg: f.RetAgg,
-		})
+		resultPar := ir.Instr{
+			Op:  ir.OPar,
+			Cls: ir.ClsL,
+			To:  retBuf,
+			Aux: int64(resultOffset),
+		}
+		resultPar.SetRetAgg(f.RetAgg)
+		pars = append(pars, resultPar)
 	}
 	prefix := append(pars, recon...)
 	f.Start.Instrs = append(prefix, f.Start.Instrs...)
@@ -1089,13 +1090,14 @@ func lowerAggParam(f *ir.Func, p *ir.Temp, a *argAssigner) (pars, recon []ir.Ins
 	if onStack {
 		// The aggregate sits in the incoming argument area; the parameter is its
 		// address (emitStackParam takes the address for aggregate temps).
-		return []ir.Instr{{
-			Op:     ir.OPar,
-			Cls:    ir.ClsL,
-			To:     p.Ref(),
-			Aux:    int64(off),
-			RetAgg: p.Agg,
-		}}, nil, nil
+		stackedPar := ir.Instr{
+			Op:  ir.OPar,
+			Cls: ir.ClsL,
+			To:  p.Ref(),
+			Aux: int64(off),
+		}
+		stackedPar.SetRetAgg(p.Agg)
+		return []ir.Instr{stackedPar}, nil, nil
 	}
 
 	// Reconstruct: allocate a slot, store each incoming register into it, and
@@ -1279,16 +1281,16 @@ func lowerCalls(f *ir.Func, conventions calleeConventions) error {
 			switch {
 			case in.To.IsNone():
 				// no result
-			case in.RetAgg != nil:
+			case in.RetAgg() != nil:
 				if goInternal {
 					var err error
 					if in.RetValues {
 						destinations := append([]ir.Ref{in.To}, in.Defs()...)
 						callTo, callCls, callDefs, argSetup, pins, post, stackResult, stackResultOffset, resultEnd, err =
-							lowerGoValueResult(f, destinations, in.RetAgg, resultEnd, &out, argSetup, pins)
+							lowerGoValueResult(f, destinations, in.RetAgg(), resultEnd, &out, argSetup, pins)
 					} else {
 						callTo, callCls, callDefs, argSetup, pins, post, stackResult, stackResultOffset, resultEnd, err =
-							lowerGoAggregateResult(f, in.To, in.RetAgg, resultEnd, &out, argSetup, pins)
+							lowerGoAggregateResult(f, in.To, in.RetAgg(), resultEnd, &out, argSetup, pins)
 					}
 					if err != nil {
 						return err
@@ -1297,13 +1299,13 @@ func lowerCalls(f *ir.Func, conventions calleeConventions) error {
 					var err error
 					destinations := append([]ir.Ref{in.To}, in.Defs()...)
 					callTo, callCls, callDefs, argSetup, pins, post, err =
-						lowerAAPCSValueResult(f, destinations, in.RetAgg, &a, &out, argSetup, pins)
+						lowerAAPCSValueResult(f, destinations, in.RetAgg(), &a, &out, argSetup, pins)
 					if err != nil {
 						return err
 					}
 				} else {
 					callTo, callCls, callDefs, argSetup, pins, post =
-						lowerAggResult(f, in.To, in.RetAgg, &a, &out, argSetup, pins)
+						lowerAggResult(f, in.To, in.RetAgg(), &a, &out, argSetup, pins)
 				}
 			default:
 				pres := newPinned(f, retReg(in.Cls), in.Cls)
@@ -1333,7 +1335,7 @@ func lowerCalls(f *ir.Func, conventions calleeConventions) error {
 			loweredCall := ir.Instr{
 				Op: ir.OCall, Args: append([]ir.Ref{callee}, pins...),
 				Aux: int64(stackBytes), To: callTo, Cls: callCls, Extra: &ir.InstrExtra{Defs: callDefs},
-				Tail: in.Tail, ClosureCall: in.ClosureCall, ClosureContext: in.ClosureContext,
+				Tail: in.Tail, ClosureCall: in.ClosureCall,
 				Pos: in.Pos, Inl: in.Inl,
 				CallConv: ir.CallConvPlatform, CallConvSet: true,
 			}
@@ -1341,7 +1343,7 @@ func lowerCalls(f *ir.Func, conventions calleeConventions) error {
 				loweredCall.CallConv = ir.CallConvGoInternal
 			}
 			if !stackResult.IsNone() {
-				loweredCall.RetAgg = in.RetAgg
+				loweredCall.SetRetAgg(in.RetAgg())
 				loweredCall.SetStackResult(stackResult, int64(stackResultOffset))
 			}
 			out = append(out, loweredCall)

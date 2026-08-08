@@ -85,8 +85,8 @@ func makeKey(in *ir.Instr, sub subst) valueKey {
 		a, b = b, a
 	}
 	name := ""
-	if in.Op == ir.OIntrinsic && in.Intrin != nil {
-		name = in.Intrin.Name
+	if in.Op == ir.OIntrinsic && in.Intrin() != nil {
+		name = in.Intrin().Name
 	}
 	return valueKey{op: in.Op, cls: in.Cls, cmp: in.Cmp, name: name, a: a, b: b}
 }
@@ -120,7 +120,7 @@ func gvnEligible(op ir.Op) bool {
 // value key (makeKey) canonicalises only two.
 func movable(in *ir.Instr) bool {
 	if in.Op == ir.OIntrinsic {
-		e := ir.LookupIntrinsic(in.Intrin.Name)
+		e := ir.LookupIntrinsic(in.Intrin().Name)
 		return e != nil && e.Pure && len(in.Args) <= 2
 	}
 	return gvnEligible(in.Op)

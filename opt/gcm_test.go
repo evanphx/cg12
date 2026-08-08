@@ -90,7 +90,7 @@ func TestGCMPreservesFixedRegisterMoveAtCallSite(t *testing.T) {
 	invoke.CallVoid(f.Sym("call", 0))
 	call := &invoke.Instrs[1]
 	call.ClosureCall = true
-	call.ClosureContext = context
+	call.SetClosureContext(context)
 	invoke.Goto(done)
 	done.RetVoid()
 

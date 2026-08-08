@@ -138,8 +138,8 @@ func (e *emitter) planFrame() {
 				off = alignUp(off, allocAlign(in.Op))
 				e.allocOff[in] = off
 				off += e.allocBytes(in)
-			case in.Op == ir.OCall && in.RetAgg != nil:
-				sz, _ := in.RetAgg.Layout()
+			case in.Op == ir.OCall && in.RetAgg() != nil:
+				sz, _ := in.RetAgg().Layout()
 				off = alignUp(off, 16)
 				e.retBufOff[in] = off
 				off += sz

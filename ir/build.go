@@ -492,18 +492,17 @@ func (b *Block) lifetime(op Op, addr Ref) {
 // result (class cls). For an intrinsic that yields no value use IntrinsicVoid.
 func (b *Block) Intrinsic(name string, cls Cls, args ...Ref) Ref {
 	res := b.fn.newTemp("", cls)
-	b.Instrs = append(b.Instrs, Instr{
-		Op: OIntrinsic, Cls: cls, To: res, Args: args,
-		Intrin: &IntrinOp{Name: name}, Pos: b.curPos,
-	})
+	intrinsic := Instr{Op: OIntrinsic, Cls: cls, To: res, Args: args, Pos: b.curPos}
+	intrinsic.SetIntrin(&IntrinOp{Name: name})
+	b.Instrs = append(b.Instrs, intrinsic)
 	return res
 }
 
 // IntrinsicVoid invokes the named intrinsic for effect only.
 func (b *Block) IntrinsicVoid(name string, args ...Ref) {
-	b.Instrs = append(b.Instrs, Instr{
-		Op: OIntrinsic, Args: args, Intrin: &IntrinOp{Name: name}, Pos: b.curPos,
-	})
+	intrinsic := Instr{Op: OIntrinsic, Args: args, Pos: b.curPos}
+	intrinsic.SetIntrin(&IntrinOp{Name: name})
+	b.Instrs = append(b.Instrs, intrinsic)
 }
 
 // StackSave captures the current stack pointer, and StackRestore sets it back to
@@ -688,11 +687,12 @@ type AsmSpec struct {
 // A fresh result temporary is allocated for each register-output operand; those
 // temporaries are returned in order (the first becomes To, the rest Defs).
 func (b *Block) Asm(template string, specs []AsmSpec) []Ref {
-	in := Instr{Op: OAsm, Pos: b.curPos, Asm: &AsmOp{Template: template}}
+	in := Instr{Op: OAsm, Pos: b.curPos}
+	in.SetAsm(&AsmOp{Template: template})
 	var outs []Ref
 	for _, s := range specs {
-		in.Asm.Ops = append(in.Asm.Ops, s.Kind)
-		in.Asm.Regs = append(in.Asm.Regs, s.Reg)
+		in.Asm().Ops = append(in.Asm().Ops, s.Kind)
+		in.Asm().Regs = append(in.Asm().Regs, s.Reg)
 		if s.Kind == AsmRegOut || s.Kind == AsmRegInOut {
 			t := b.fn.newTemp("", s.Cls)
 			outs = append(outs, t)
@@ -731,12 +731,12 @@ func (b *Block) callAggregate(aggregate *AggType, classes []Cls, callee Ref, con
 		Op:          OCall,
 		Cls:         classes[0],
 		Args:        append([]Ref{callee}, args...),
-		RetAgg:      aggregate,
 		RetValues:   true,
 		Pos:         b.curPos,
 		CallConv:    convention,
 		CallConvSet: conventionSet,
 	}
+	instruction.SetRetAgg(aggregate)
 	results := make([]Ref, len(classes))
 	for index, class := range classes {
 		result := b.fn.newTemp("", class)
@@ -854,7 +854,9 @@ func (b *Block) Hlt() { b.Jmp = Jmp{Kind: JmpHlt} }
 // use as an indirect branch destination.
 func (b *Block) BlockAddr(target *Block) Ref {
 	res := b.fn.newTemp("", ClsP)
-	b.Instrs = append(b.Instrs, Instr{Op: OBlockAddr, Cls: ClsP, To: res, Blk: target, Pos: b.curPos})
+	blockAddress := Instr{Op: OBlockAddr, Cls: ClsP, To: res, Pos: b.curPos}
+	blockAddress.SetBlk(target)
+	b.Instrs = append(b.Instrs, blockAddress)
 	return res
 }
 

@@ -48,7 +48,7 @@ func exercise(word *uint32, wide *uint64) {
 	for _, block := range function.Blocks {
 		for _, instruction := range block.Instrs {
 			if instruction.Op == ir.OIntrinsic {
-				counts[instruction.Intrin.Name]++
+				counts[instruction.Intrin().Name]++
 			}
 			if instruction.Op == ir.OCall {
 				calleeReference := instruction.Arg(0)
@@ -221,8 +221,8 @@ func storePointer(address *unsafe.Pointer, value unsafe.Pointer) {
 	foundBarrierCall := false
 	for _, block := range function.Blocks {
 		for _, instruction := range block.Instrs {
-			if instruction.Op == ir.OIntrinsic && strings.HasPrefix(instruction.Intrin.Name, "atomic.") {
-				t.Errorf("pointer store bypassed its write-barrier call with %s", instruction.Intrin.Name)
+			if instruction.Op == ir.OIntrinsic && strings.HasPrefix(instruction.Intrin().Name, "atomic.") {
+				t.Errorf("pointer store bypassed its write-barrier call with %s", instruction.Intrin().Name)
 			}
 			if instruction.Op != ir.OCall {
 				continue
@@ -1410,11 +1410,11 @@ func TestCompileExecutableIncludesNativeRuntimeOverlay(t *testing.T) {
 			t.Fatalf("native runtime marker instructions = %d, want 1", len(function.Entry().Instrs))
 		}
 		instruction := function.Entry().Instrs[0]
-		if instruction.Op != ir.OAsm || instruction.Asm == nil {
+		if instruction.Op != ir.OAsm || instruction.Asm() == nil {
 			t.Fatalf("native runtime marker instruction = %v, want inline assembly", instruction.Op)
 		}
-		if instruction.Asm.Template != "mov %w0, #1" {
-			t.Fatalf("native runtime marker assembly = %q", instruction.Asm.Template)
+		if instruction.Asm().Template != "mov %w0, #1" {
+			t.Fatalf("native runtime marker assembly = %q", instruction.Asm().Template)
 		}
 		return
 	}

@@ -266,35 +266,35 @@ func (s *sel) selectData(in *ir.Instr) bool {
 		done()
 	case ir.OIntrinsic:
 		switch {
-		case in.Intrin.Name == "stacksave":
+		case in.Intrin().Name == "stacksave":
 			d, done := s.dst(in.To, 8)
 			s.b.movFromSP(d)
 			done()
-		case in.Intrin.Name == "stackrestore":
+		case in.Intrin().Name == "stackrestore":
 			s.b.movToSP(s.src(in.Args[0], 0, 8))
-		case in.Intrin.Name == "getcallerpc":
+		case in.Intrin().Name == "getcallerpc":
 			d, done := s.dst(in.To, 8)
 			s.b.callerPC(d)
 			done()
-		case in.Intrin.Name == "getcallersp":
+		case in.Intrin().Name == "getcallersp":
 			d, done := s.dst(in.To, 8)
 			s.b.callerSP(d)
 			done()
-		case strings.HasPrefix(in.Intrin.Name, "atomic."):
+		case strings.HasPrefix(in.Intrin().Name, "atomic."):
 			s.atomic(in)
-		case strings.HasPrefix(in.Intrin.Name, "float."):
+		case strings.HasPrefix(in.Intrin().Name, "float."):
 			s.floatMath(in)
-		case in.Intrin.Name == "constant_p":
+		case in.Intrin().Name == "constant_p":
 			// An unresolved __builtin_constant_p (normally settled by opt): 0 is sound.
 			d, done := s.dst(in.To, in.Cls.Size())
 			s.b.movImm(d, 0, in.Cls.Size() == 8)
 			done()
 		default:
-			s.b.fail("arm64: unsupported intrinsic %q", in.Intrin.Name)
+			s.b.fail("arm64: unsupported intrinsic %q", in.Intrin().Name)
 		}
 	case ir.OBlockAddr:
 		d, done := s.dst(in.To, 8)
-		s.b.adr(d, in.Blk)
+		s.b.adr(d, in.Blk())
 		done()
 
 	default:
@@ -519,7 +519,7 @@ func (s *sel) selArm(ref ir.Ref, slot, sz int) Reg {
 // load-exclusive / store-exclusive retry loop that repeats until the store
 // succeeds. Each read-modify-write yields the previous value.
 func (s *sel) atomic(in *ir.Instr) {
-	base, bytes := atomicParts(in.Intrin.Name)
+	base, bytes := atomicParts(in.Intrin().Name)
 	// bytes is the memory access width; a sub-word access still uses a W register
 	// and computes in W, so the register width (w64/regSize) is separate.
 	w64 := bytes == 8
@@ -546,7 +546,7 @@ func (s *sel) atomic(in *ir.Instr) {
 	}
 
 	pressure := func() {
-		s.b.fail("arm64: atomic %q: not enough scratch registers under this register pressure", in.Intrin.Name)
+		s.b.fail("arm64: atomic %q: not enough scratch registers under this register pressure", in.Intrin().Name)
 	}
 
 	addr := s.src(in.Args[0], 0, 8)
@@ -708,10 +708,10 @@ func atomicParts(name string) (base string, bytes int) {
 // so register allocation must make the result interfere with its operands. The
 // single-instruction forms (load/store/fence) have no such constraint.
 func atomicHoldsResult(in *ir.Instr) bool {
-	if in.Op != ir.OIntrinsic || !strings.HasPrefix(in.Intrin.Name, "atomic.") {
+	if in.Op != ir.OIntrinsic || !strings.HasPrefix(in.Intrin().Name, "atomic.") {
 		return false
 	}
-	switch base, _ := atomicParts(in.Intrin.Name); base {
+	switch base, _ := atomicParts(in.Intrin().Name); base {
 	case "load", "store", "fence":
 		return false
 	}
@@ -894,7 +894,7 @@ func (s *sel) conv1(in *ir.Instr, emit func(rd, rn Reg)) {
 // function it implements is argued where the two are connected, in
 // goc/compile.go.
 func (s *sel) floatMath(in *ir.Instr) {
-	operation, width := floatMathParts(in.Intrin.Name)
+	operation, width := floatMathParts(in.Intrin().Name)
 	var op floatUnaryOp
 	switch operation {
 	case "sqrt":
@@ -912,11 +912,11 @@ func (s *sel) floatMath(in *ir.Instr) {
 	case "trunc":
 		op = fRoundZero
 	default:
-		s.b.fail("arm64: unsupported float intrinsic %q", in.Intrin.Name)
+		s.b.fail("arm64: unsupported float intrinsic %q", in.Intrin().Name)
 		return
 	}
 	if width != 4 && width != 8 {
-		s.b.fail("arm64: float intrinsic %q has no scalar width", in.Intrin.Name)
+		s.b.fail("arm64: float intrinsic %q has no scalar width", in.Intrin().Name)
 		return
 	}
 	rn := s.src(in.Args[0], 1, width)

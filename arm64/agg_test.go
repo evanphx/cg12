@@ -208,7 +208,7 @@ func TestCompileAggregateResultMemory(t *testing.T) {
 	e := f.Entry()
 	r := e.Call(ir.ClsL, f.Sym("mk", 0))
 	call := &e.Instrs[len(e.Instrs)-1]
-	call.RetAgg = big
+	call.SetRetAgg(big)
 	e.Ret(e.Load(ir.ClsL, r))
 
 	asm := disasmModule(t, m)

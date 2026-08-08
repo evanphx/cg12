@@ -2640,7 +2640,7 @@ func (m *mc) stackParam(in *ir.Instr) {
 	off := m.frameTop() + int(in.Aux) + stackLinkBytesFor(m.f.UsesGoInternalCallConvention())
 	t := m.f.Temps[in.To.ID]
 	if t.Agg != nil {
-		if in.RetAgg != nil {
+		if in.RetAgg() != nil {
 			if t.Reg != ir.NoReg {
 				m.frameAddr(mreg(Reg(t.Reg)), off)
 				return
@@ -2733,7 +2733,7 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 		m.adjustSP(true, stackBytes)
 	}
 	for _, a := range stackArgs {
-		if a.RetAgg != nil {
+		if a.RetAgg() != nil {
 			m.emitStackAggregateArgument(a, goInternal)
 			continue
 		}
@@ -2754,7 +2754,7 @@ func (m *mc) callSequence(b *ir.Block, i int) int {
 		m.materializeFrameAllocation(a)
 	}
 	m.emitCall(call)
-	if call.RetAgg != nil && !call.StackResult().IsNone() {
+	if call.RetAgg() != nil && !call.StackResult().IsNone() {
 		m.emitStackAggregateResult(call)
 	}
 	if dynamicAAPCSFrame {
@@ -2783,7 +2783,7 @@ func (m *mc) emitStackAggregateArgument(argument *ir.Instr, goInternal bool) {
 	if source != mcGP2 {
 		m.emit(a64.AddImm(true, mcGP2, source, 0))
 	}
-	size, _ := argument.RetAgg.Layout()
+	size, _ := argument.RetAgg().Layout()
 	destinationOffset := int(argument.Aux) + stackLinkBytesFor(goInternal)
 	m.emitStackAggregateCopy(mcSP, destinationOffset, mcGP2, 0, size)
 }
@@ -2793,7 +2793,7 @@ func (m *mc) emitStackAggregateResult(call *ir.Instr) {
 	if destination != mcGP2 {
 		m.emit(a64.AddImm(true, mcGP2, destination, 0))
 	}
-	size, _ := call.RetAgg.Layout()
+	size, _ := call.RetAgg().Layout()
 	m.emitStackAggregateCopy(mcGP2, 0, mcSP, goStackLinkSize+int(call.StackResultOffset()), size)
 }
 
@@ -3582,7 +3582,7 @@ func zeroSize(d *ir.Data) int {
 // external assembler. Only the mnemonics that assembler knows are available, and
 // anything else is reported rather than silently dropped.
 func (m *mc) emitAsm(in *ir.Instr) {
-	asm := in.Asm
+	asm := in.Asm()
 	vals := make([]asmVal, len(asm.Ops))
 	clobbered := make(map[Reg]bool)
 	for _, register := range asmClobberRegs(in) {
