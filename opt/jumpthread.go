@@ -150,6 +150,17 @@ func jumpThread(f *ir.Func, state map[*ir.Func]*jtState) bool {
 
 // findThreadCandidate returns the first threading opportunity in f, or ok=false.
 func findThreadCandidate(f *ir.Func, cfg *analysis.CFG, dom *analysis.DomTree) (threadCand, bool) {
+	// The dominance frontier is a property of the CFG, so it is the same for every
+	// candidate this scan considers -- but it is not cheap, and most scans never
+	// need it, since a candidate whose definitions do not escape is judged without
+	// it. Compute it at most once, and only if something asks.
+	var df map[*ir.Block]analysis.BlockSet
+	frontier := func() map[*ir.Block]analysis.BlockSet {
+		if df == nil {
+			df = cfg.DominanceFrontier(dom)
+		}
+		return df
+	}
 	for _, b := range f.Blocks {
 		if b == f.Start || !cfg.Reachable(b) {
 			continue
@@ -186,10 +197,66 @@ func findThreadCandidate(f *ir.Func, cfg *analysis.CFG, dom *analysis.DomTree) (
 			if target == nil || target == b {
 				continue
 			}
-			return threadCand{block: b, pred: p, target: target, env: env}, true
+			cand := threadCand{block: b, pred: p, target: target, env: env}
+			if !threadProfitable(f, frontier, cand) {
+				continue
+			}
+			return cand, true
 		}
 	}
 	return threadCand{}, false
+}
+
+// jtPhiBudget is the most a single thread may add in phi arguments before it is
+// judged not worth doing.
+//
+// The unit is what jtSize measures and what leaving SSA charges: one phi argument
+// becomes one copy. A thread saves a conditional branch and whatever it folds --
+// a handful of instructions -- so paying dozens of copies for it is a bad trade
+// however the branch was going to behave.
+//
+// The exact figure barely matters, which is the useful thing to know about it.
+// Sweeping 8, 24, 48, 96 and 256 moves sqlite3VdbeExec not at all (21 spills,
+// weight 13, at every one) and the emitted text of sqlite and lua by under a
+// tenth of a percent. The population is bimodal: a thread in a dispatch mesh
+// costs hundreds of phi arguments and a useful one costs a few, so anything in
+// this range separates them. 48 sits in the middle of the gap rather than at a
+// tuned edge, and nothing here is balanced on it.
+const jtPhiBudget = 48
+
+// threadProfitable reports whether a candidate is worth its SSA repair.
+//
+// Threading clones a block onto one edge, which gives every value the block
+// defines and that is used elsewhere a second reaching definition. Repairing that
+// puts a phi at each block in the iterated dominance frontier of the clone, and a
+// phi in a block with n predecessors is n copies once SSA is left. In an
+// interpreter's dispatch mesh those frontier blocks have hundreds of
+// predecessors, so one escaping value can cost hundreds of instructions to save
+// one branch -- which is how sqlite3VdbeExec ended up with seven .jt clones among
+// its ten hottest spills, each a duplicate of a value that was already losing its
+// register.
+//
+// The common case is free to judge: a block whose definitions do not escape needs
+// no reconstruction at all (the && merge, and most of what this pass fires on),
+// so the frontier is never computed for it. The frontier is only priced when
+// there is something to repair.
+func threadProfitable(f *ir.Func, frontierOf func() map[*ir.Block]analysis.BlockSet, c threadCand) bool {
+	esc := escapingDefs(f, c.block)
+	if len(esc) == 0 {
+		return true
+	}
+	// The clone's frontier is not known before the clone exists; the block's own
+	// is a lower bound on it, and a sound one to price against -- bp sits on an
+	// edge into b, so anything b's definitions reach, the clone's do too.
+	reach := analysis.IteratedFrontier(frontierOf(), analysis.BlockSet{c.block: true})
+	args := 0
+	for x := range reach {
+		args += len(x.Preds)
+		if len(esc)*args > jtPhiBudget {
+			return false // already over; no need to finish counting
+		}
+	}
+	return len(esc)*args <= jtPhiBudget
 }
 
 // isLoopHeader reports whether any predecessor of b is dominated by b (a back
