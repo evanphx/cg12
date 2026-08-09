@@ -439,3 +439,81 @@ func TestInlinePolicyGatesCompoundOnAnInterpreterShapedCaller(t *testing.T) {
 	Inline(m)
 	require.Equal(t, 1, callsIn(caller), "so the call stays")
 }
+
+// inlineRefusals must agree with the decision it explains.
+//
+// It is a deliberate second copy of the same predicates, written not to
+// short-circuit so a reader can see past the first refusal. A second copy drifts
+// unless something holds it: the rule is that the FIRST refusal it lists is
+// exactly what inlineDecision returns, and that it lists nothing when the call is
+// accepted. Every case in this file is run through both.
+func TestInlineRefusalsAgreeWithTheDecision(t *testing.T) {
+	check := func(t *testing.T, caller *ir.Func, call *ir.Instr, callee *ir.Func, sites int, accept func(*ir.Func) bool) {
+		t.Helper()
+		want := inlineDecision(caller, call, callee, sites, accept)
+		got := inlineRefusals(caller, call, callee, sites, accept)
+		if want == inlineAccept {
+			require.Empty(t, got, "the call is accepted, so nothing refuses it")
+			return
+		}
+		require.NotEmpty(t, got, "the call is refused, so something must refuse it")
+		require.Equal(t, want, got[0], "the first refusal is the decision")
+	}
+
+	t.Run("accepted", func(t *testing.T) {
+		m := ir.NewModule()
+		callee := leaf(m, "small", 2)
+		caller, call := callerOf(m, "c", callee)
+		check(t, caller, call, callee, 1, nil)
+	})
+
+	t.Run("indirect", func(t *testing.T) {
+		m := ir.NewModule()
+		callee := leaf(m, "small", 2)
+		caller, call := callerOf(m, "c", callee)
+		check(t, caller, call, nil, 1, nil)
+	})
+
+	t.Run("over the size limit", func(t *testing.T) {
+		m := ir.NewModule()
+		callee := leaf(m, "big", inlineSmallBudget+40)
+		caller, call := callerOf(m, "c", callee)
+		check(t, caller, call, callee, 1, nil)
+	})
+
+	t.Run("noinline", func(t *testing.T) {
+		m := ir.NewModule()
+		callee := leaf(m, "no", 2)
+		callee.NoInline = true
+		caller, call := callerOf(m, "c", callee)
+		check(t, caller, call, callee, 1, nil)
+	})
+
+	t.Run("variadic", func(t *testing.T) {
+		m := ir.NewModule()
+		callee := leaf(m, "va", 2)
+		callee.Variadic = true
+		caller, call := callerOf(m, "c", callee)
+		check(t, caller, call, callee, 1, nil)
+	})
+
+	t.Run("refused by the pass filter", func(t *testing.T) {
+		m := ir.NewModule()
+		callee := leaf(m, "other", 2)
+		caller, call := callerOf(m, "c", callee)
+		check(t, caller, call, callee, 1, func(*ir.Func) bool { return false })
+	})
+
+	// And the case the whole thing exists for: several rules at once. The first is
+	// still the decision, and the rest are what a single-reason census hid.
+	t.Run("several rules at once", func(t *testing.T) {
+		m := ir.NewModule()
+		callee := leaf(m, "manyfaults", inlineSmallBudget+40)
+		callee.Variadic = true
+		callee.NoInline = true
+		caller, call := callerOf(m, "c", callee)
+		check(t, caller, call, callee, 1, nil)
+		require.Greater(t, len(inlineRefusals(caller, call, callee, 1, nil)), 1,
+			"three rules refuse this call and the census must be able to say so")
+	})
+}

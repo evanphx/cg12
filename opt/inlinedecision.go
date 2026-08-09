@@ -3,6 +3,7 @@ package opt
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/evanphx/cg12/ir"
 )
@@ -175,6 +176,68 @@ func inlineStructureReason(callee *ir.Func) inlineReason {
 	return inlineAccept
 }
 
+// inlineRefusals lists EVERY rule that refuses this call site, in the order
+// [inlineDecision] would consult them, and is empty when the site is accepted.
+//
+// The diagnostic reported only the first refusal, which is the one number that
+// cannot answer the question anyone asks of it. Two gates rejecting a call look
+// exactly like one gate rejecting it, so "lift this rule and 23,758 sites open
+// up" reads off the census and is false: lifting the SCC gate on its own moved
+// nothing on any of the three workloads, because the sites behind it were
+// mostly refused for being variadic, or over budget, or both, as well. Lua's
+// luaO_pushfstring is three instructions with 270 call sites and was filed under
+// "recursion cycle"; it is also variadic and was never inlinable at all.
+//
+// What a reader actually wants is the sites blocked by ONE rule -- those are the
+// ones lifting it would free -- and that needs the whole set per site.
+//
+// It deliberately re-runs the checks rather than sharing code with
+// [inlineDecision], because a non-short-circuiting copy is the only way to see
+// past the first answer. [TestInlineRefusalsAgreeWithTheDecision] pins the copy
+// to the original: the first refusal listed here must be exactly what
+// inlineDecision returns, so the two cannot drift.
+func inlineRefusals(caller *ir.Func, call *ir.Instr, callee *ir.Func, sites int, accept func(*ir.Func) bool) []inlineReason {
+	var out []inlineReason
+	add := func(r inlineReason) { out = append(out, r) }
+
+	if callee == nil {
+		return []inlineReason{reasonIndirect} // nothing else is knowable
+	}
+	if isFrameScopedRuntimeCall(caller, call) {
+		add(reasonFrameScoped)
+	}
+	if callee.HasClosureContext && !(call.ClosureCall && !call.ClosureContext().IsNone()) {
+		add(reasonClosureCtx)
+	}
+	if accept != nil && !accept(callee) {
+		add(reasonOtherPass)
+	}
+	if len(call.Args)-1 != len(callee.Params) {
+		add(reasonArity)
+	}
+	if callee.NoInline {
+		add(reasonNoInlineAttr)
+	}
+	if r := inlineStructureReason(callee); r != inlineAccept {
+		add(r) // structure is itself a chain; its first answer is enough
+	}
+	// Size is bypassed for a mandatory or cost-model-selected callee, so it is not
+	// a refusal for one however big it is.
+	if !callee.NoInline && !callee.ForceInline && !callee.CostInline {
+		if sites < 1 {
+			sites = 1
+		}
+		budget := inlineOnceBudget / sites
+		if budget < inlineSmallBudget {
+			budget = inlineSmallBudget
+		}
+		if funcSize(callee) > budget {
+			add(reasonOverSizeLimit)
+		}
+	}
+	return out
+}
+
 // lookupCallee resolves a call's target without recording the consultation.
 //
 // directCallee is the inliner's choke point for reading another function and
@@ -232,13 +295,20 @@ func reportInlineDecisions(caller *ir.Func, cg *callGraph, scc *sccInfo, sites m
 				name = callee.Name
 				size = funcSize(callee)
 			}
-			r := inlineDecision(caller, in, callee, sites[callee], accept)
+			refusals := inlineRefusals(caller, in, callee, sites[callee], accept)
 			if callee != nil && scc.recursive[callee] {
-				r = reasonRecursive
+				refusals = append([]inlineReason{reasonRecursive}, refusals...)
 			}
+			// Every rule that refuses the site, not just the first: one refusal here
+			// means lifting that rule would free this call, and several means it
+			// would not. The census downstream counts both.
 			verdict := "INLINE"
-			if r != inlineAccept {
-				verdict = string(r)
+			if len(refusals) > 0 {
+				parts := make([]string, len(refusals))
+				for i, r := range refusals {
+					parts[i] = string(r)
+				}
+				verdict = strings.Join(parts, " + ")
 			}
 			fmt.Fprintf(os.Stderr, "inline %s -> %-40s size=%-5d sites=%-4d %s\n",
 				caller.Name, name, size, sites[callee], verdict)

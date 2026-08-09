@@ -99,19 +99,32 @@ report() {
 		printf 'functions    %s\n' "$(nm "$obj" | grep -cE ' [Tt] ')"
 		printf 'calls        %s\n' "$(objdump -d "$obj" | grep -cE '\s(bl|blr)\s')"
 
-		echo 'decisions (evaluations, not sites):'
-		grep -- '->' "$why" | sed 's/.*sites=[0-9]* *//' | sort | uniq -c | sort -rn |
-			awk '{n=$1; $1=""; sub(/^ /,""); printf "  %8d  %s\n", n, $0}'
+		# A verdict is either INLINE or every rule that refused, joined by " + ".
+		# Two columns, because they answer different questions: "blocks" counts a
+		# rule wherever it fires, and "alone" counts only where it is the single
+		# thing standing in the way. Lifting a rule frees the second number, never
+		# the first -- lifting the SCC gate on a census that only knew the first
+		# looked like 23,758 sites and moved nothing.
+		grep -- '->' "$why" | sed 's/.*sites=[0-9]* *//' >"$why.verdicts"
+		echo 'decisions (evaluations, not call sites):'
+		printf '  %8d  INLINE\n' "$(grep -cx 'INLINE' "$why.verdicts")"
+		awk -F ' \\+ ' '
+			$0 == "INLINE" { next }
+			{ for (i = 1; i <= NF; i++) blocks[$i]++; if (NF == 1) alone[$1]++ }
+			END { for (r in blocks) printf "%8d %8d %s\n", blocks[r], alone[r] + 0, r }
+		' "$why.verdicts" | sort -rn |
+			awk '{n=$1; a=$2; $1=""; $2=""; sub(/^  /,""); printf "  %8d  (%6d alone)  %s\n", n, a, $0}'
 
-		echo "top refused callees per rule (site count at the time):"
-		grep -- '->' "$why" | sed 's/.*sites=[0-9]* *//' | sort -u | while read -r reason; do
-			[ "$reason" = "INLINE" ] && continue
-			printf '  %s\n' "$reason"
-			grep -- '->' "$why" | grep -F -- "$reason" |
-				awk '{print $4, $5, $6}' | sed 's/size=//;s/sites=//' | sort -u |
-				sort -k3 -rn | head -"$TOPN" |
-				awk '{printf "      %-36s size=%-6s sites=%s\n", $1, $2, $3}'
-		done
+		echo "top callees each rule is the ONLY thing blocking (site count at the time):"
+		awk -F ' \\+ ' 'NF == 1 && $0 != "INLINE" { print }' "$why.verdicts" | sort -u |
+			while read -r reason; do
+				printf '  %s\n' "$reason"
+				grep -- '->' "$why" | awk -v r="$reason" -F ' \\+ ' 'NF == 1' |
+					grep -F -- "$reason" |
+					awk '{print $4, $5, $6}' | sed 's/size=//;s/sites=//' | sort -u |
+					sort -k3 -rn | head -"$TOPN" |
+					awk '{printf "      %-36s size=%-6s sites=%s\n", $1, $2, $3}'
+			done
 	done
 }
 
