@@ -312,6 +312,7 @@ func (g *gen) genCall(n *moderncc.PostfixExpression) ir.Ref {
 					aggArgs = append(aggArgs, nil)
 				}
 				aggArgs[i] = g.aggTypeOf(byValT)
+				v = g.argCopy(v, byValT)
 			}
 		case pt != nil:
 			v = g.rval(an, pt)

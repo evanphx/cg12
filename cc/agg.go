@@ -227,3 +227,44 @@ func (g *gen) checkPackedBitfield(t moderncc.Type) {
 		}
 	}
 }
+
+// argCopy gives a by-value memory argument its own storage, and returns the
+// address of that copy.
+//
+// A memory value -- a struct, union, long double or complex -- is represented by
+// the address of its storage, so passing one hands the callee a pointer. What the
+// callee then has is a pointer to whatever the argument expression named, which
+// on the caller's side is usually a live variable. C says otherwise: the
+// parameter is the callee's own object, and assigning to it must not be visible
+// to the caller. Without this copy, a callee that wrote to its parameter wrote
+// through to the caller's variable.
+//
+// Only the arguments a target passes indirectly need it, and only those are
+// copied. AAPCS64 passes a composite larger than 16 bytes by handing over a
+// pointer (rule C.12), so the callee holds this one for its whole run; anything
+// that fits in registers is loaded during argument setup and the callee never
+// sees the address. System V on amd64 copies the bytes into the outgoing stack
+// area itself, so nothing there needs a copy from here.
+//
+// Copying regardless would be correct and is much more expensive than it sounds:
+// QuickJS passes its 16-byte JSValue almost everywhere, and giving those a copy
+// they do not need grew its text by 215KB, 21%.
+//
+// An aggregate over 16 bytes that AAPCS64 still passes in registers -- a
+// homogeneous float aggregate, four doubles say -- is copied needlessly here.
+// Recognising those means repeating the backend's classification in the front
+// end, and the C that has one is rare enough not to be worth it; a copy nobody
+// reads is slow, not wrong.
+func (g *gen) argCopy(src ir.Ref, t moderncc.Type) ir.Ref {
+	size := int(t.Size())
+	if size == 0 || g.target != TargetARM64 || size <= aapcs64MaxRegisterAgg {
+		return src
+	}
+	dst := g.allocAligned(t, size)
+	g.copyAgg(dst, src, size)
+	return dst
+}
+
+// aapcs64MaxRegisterAgg is the largest composite AAPCS64 will put in registers.
+// Anything bigger is passed as a pointer to the caller's copy.
+const aapcs64MaxRegisterAgg = 16
