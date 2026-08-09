@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 )
 
@@ -25,22 +26,45 @@ const (
 
 func sortStrings(s []string) { sort.Strings(s) }
 
-// Save writes the store.
+// Save writes the store, atomically.
+//
+// It writes a temporary beside the destination and renames it into place, rather
+// than truncating the destination and filling it. The difference is not
+// theoretical: goc compiles a package set in parallel and every one of those
+// processes shares this path, so an in-place write is readable by another
+// process while it is half a file. That is how a corrupt memo gets made, and a
+// corrupt memo used to be fatal rather than a miss -- the capability matrix
+// failed 64 subtests with "makeslice: len out of range" out of memo.Load.
+//
+// Rename is atomic within a directory, so a reader sees either the old file or
+// the new one. Concurrent writers still race to be last, which is harmless: the
+// entries are content-keyed, so whichever wins holds a valid store.
 func (s *Store) Save(path string) error {
-	out, err := os.Create(path)
+	temporary, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".*")
 	if err != nil {
 		return err
 	}
-	w := bufio.NewWriterSize(out, 1<<20)
+	name := temporary.Name()
+	w := bufio.NewWriterSize(temporary, 1<<20)
 	if err := s.writeTo(w); err != nil {
-		out.Close()
+		temporary.Close()
+		os.Remove(name)
 		return err
 	}
 	if err := w.Flush(); err != nil {
-		out.Close()
+		temporary.Close()
+		os.Remove(name)
 		return err
 	}
-	return out.Close()
+	if err := temporary.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 func (s *Store) writeTo(w *bufio.Writer) error {
@@ -148,7 +172,11 @@ func Load(path string) (*Store, error) {
 		return NewStore(), nil
 	}
 	copy(store.Data[:], r.bytes(32))
-	count := r.uvarint()
+	// Bounded the same way: an entry cannot be shorter than a byte, so a count
+	// past the remaining bytes is a corrupt file rather than a long one. Without
+	// this the loop below runs on a garbage count until the reader errors, which
+	// it does -- but only after appending that many entries.
+	count := r.count()
 	for i := uint64(0); i < count; i++ {
 		e := &Entry{}
 		e.Name = r.str()
@@ -158,7 +186,7 @@ func Load(path string) (*Store, error) {
 		e.Recursive = r.boolean()
 		e.Dropped = r.boolean()
 		e.Body = r.blob()
-		deps := r.uvarint()
+		deps := r.count()
 		e.Deps = make([]Dep, 0, deps)
 		for j := uint64(0); j < deps; j++ {
 			var d Dep
@@ -167,7 +195,7 @@ func Load(path string) (*Store, error) {
 			d.Recursive = r.boolean()
 			e.Deps = append(e.Deps, d)
 		}
-		spliced := r.uvarint()
+		spliced := r.count()
 		e.Spliced = make([]string, 0, spliced)
 		for j := uint64(0); j < spliced; j++ {
 			e.Spliced = append(e.Spliced, r.str())
@@ -176,6 +204,13 @@ func Load(path string) (*Store, error) {
 			return nil, fmt.Errorf("memo: %s: %w", path, r.err)
 		}
 		store.Put(e)
+	}
+	// The loop's own error check only runs when the loop runs, so a count that was
+	// itself rejected would otherwise return a valid, empty store: a corrupt file
+	// reported as an intact one that happens to know nothing. The caller treats
+	// both as a miss, but only one of them is true.
+	if r.err != nil {
+		return nil, fmt.Errorf("memo: %s: %w", path, r.err)
 	}
 	return store, nil
 }
@@ -187,9 +222,15 @@ type reader struct {
 }
 
 func (r *reader) bytes(n int) []byte {
-	if r.err != nil || r.pos+n > len(r.data) {
+	// n comes from the file, so it is only a length if the file is intact. A
+	// corrupt one gives a huge or negative n, and the old guard allocated it
+	// anyway on the way out -- make([]byte, n) with a garbage n panics, which
+	// turned "this cache entry is unusable" into a failed build. The overflow
+	// check matters too: pos+n wraps negative for a large n and passes a plain
+	// bounds test.
+	if r.err != nil || n < 0 || n > len(r.data)-r.pos {
 		r.err = io.ErrUnexpectedEOF
-		return make([]byte, n)
+		return nil
 	}
 	out := r.data[r.pos : r.pos+n]
 	r.pos += n
@@ -210,7 +251,7 @@ func (r *reader) uvarint() uint64 {
 }
 
 func (r *reader) blob() []byte {
-	n := r.uvarint()
+	n := r.count()
 	b := r.bytes(int(n))
 	out := make([]byte, len(b))
 	copy(out, b)
@@ -219,4 +260,20 @@ func (r *reader) blob() []byte {
 
 func (r *reader) str() string { return string(r.blob()) }
 
-func (r *reader) boolean() bool { return r.bytes(1)[0] != 0 }
+// count reads a length that the reader is about to allocate from. A count larger
+// than the bytes that remain cannot be honest, so it is rejected before anything
+// is sized by it -- the three make() calls in Load are otherwise reachable with
+// whatever number a truncated file happens to end on.
+func (r *reader) count() uint64 {
+	n := r.uvarint()
+	if r.err != nil || n > uint64(len(r.data)-r.pos) {
+		r.err = io.ErrUnexpectedEOF
+		return 0
+	}
+	return n
+}
+
+func (r *reader) boolean() bool {
+	b := r.bytes(1)
+	return len(b) == 1 && b[0] != 0
+}
