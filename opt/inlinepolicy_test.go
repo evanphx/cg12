@@ -57,7 +57,7 @@ func callerOf(m *ir.Module, name string, callee *ir.Func) (*ir.Func, *ir.Instr) 
 // decide runs the real decision for the one call in caller.
 func decide(t *testing.T, caller *ir.Func, call *ir.Instr, callee *ir.Func, sites int) inlineReason {
 	t.Helper()
-	return inlineDecision(caller, call, callee, sites, nil)
+	return inlineDecision(caller, call, callee, sites, nil, false)
 }
 
 // A small single-site callee inlines. This is the baseline every other case is a
@@ -325,6 +325,19 @@ func TestInlinePolicyOverBudgetCallerStillTakesTinyLeaves(t *testing.T) {
 	})
 }
 
+// allocsIn counts the stack slots a function reserves.
+func allocsIn(f *ir.Func) int {
+	n := 0
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			if b.Instrs[i].Op.IsAlloc() {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 // callsIn counts the calls left in a function.
 func callsIn(f *ir.Func) int {
 	n := 0
@@ -358,41 +371,30 @@ func TestInlinePolicyReasonsAreDistinct(t *testing.T) {
 	}
 }
 
-// What the gates cost together, measured on an interpreter.
+// A by-value aggregate parameter no longer refuses a callee, and the gates that
+// remain still compound.
 //
-// QuickJS's JS_CallInternal is the hot function of the workload in
-// cc/testdata/perf/quickjs_bench.c, and cg12 compiles that workload to code 5.3x
-// slower than clang's -- against 1.31x on SQLite and 1.24x on Lua, so it is not a
-// uniformly slower compiler, it is one particular shape it handles badly.
-// CG12_INLINE_WHY on that function says why. Of its 3362 call sites:
+// QuickJS's JS_CallInternal is the hot function of cc/testdata/perf/quickjs_bench.c,
+// and cg12 compiles that workload to code 5.3x slower than clang's -- against
+// 1.31x on SQLite and 1.24x on Lua. Asked with a census that reports every rule
+// refusing a site rather than only the first, the by-value aggregate parameter
+// was the single largest thing in the way and the only one of the three programs
+// it touched at all: it was the sole refusal on 16,050 QuickJS call sites,
+// against 7 on SQLite and none on Lua. JSValue is 16 bytes and passed by value
+// throughout, so JS_DupValue (437 sites), set_value (294) and JS_IsException
+// (283) all wore it.
 //
-//	1526  callee is in a recursion cycle
-//	1276  callee takes a by-value aggregate parameter
-//	 472  INLINE
-//	  51  callee is not a direct call to a module function
-//	  23  callee is larger than its size budget
-//	  14  callee is marked noinline
+// It was never a cost judgement. inlinableStructure's comment said the splice
+// "does not model" such a parameter, and spliceCall now does: the parameter gets
+// its own storage and the argument is copied into it, which is what an actual
+// call would give it.
 //
-// and above all of them, the caller-level verdict: 8198 instructions against
-// inlineCallerInstrBudget's 2000, so only the tiny-leaf exemption applies at all
-// and it stops after inlineTinyLeafBudget. The callees being refused are the
-// engine's primitives -- JS_DupValue at 437 sites, JS_FreeValue at 406,
-// set_value at 294, JS_IsException at 283 -- each a refcount bump or a tag test
-// that gcc turns into two instructions.
-//
-// Three gates therefore have to move together, and this test is here so that
-// lifting any one of them alone is not mistaken for a fix: a tiny leaf that takes
-// an aggregate parameter is refused for the aggregate, so raising the caller
-// budget changes nothing about it, and the reverse holds too.
-//
-// The aggregate gate looks the most tractable of the three. Splicing binds a
-// parameter straight to its argument (tempMap[p.ID] = args[k] in spliceCall),
-// which for an aggregate would hand the callee the caller's own object to write
-// to -- the same value-semantics rule that cc.argCopy exists for. The pieces to
-// do it properly are already here: ir has OBlit, Func.AllocAggregate reserves the
-// slot, and ExpandSmallCopies runs before the second mem2reg, so a 16-byte copy
-// would be expanded and promoted back out of memory rather than left behind.
-func TestInlinePolicyGatesCompoundOnAnInterpreterShapedCaller(t *testing.T) {
+// The lesson that outlived it is that the remaining gates still compound, so
+// lifting one and measuring no change does not mean it was not a gate. Lifting
+// the recursion-cycle refusal on its own moved none of the three workloads,
+// because most of what sat behind it was refused for being variadic or over
+// budget as well.
+func TestInlinePolicyAggregateParameterNoLongerRefuses(t *testing.T) {
 	// aggLeaf is JS_IsException's shape: tiny, a leaf, and taking its argument as
 	// a by-value aggregate.
 	aggLeaf := func(m *ir.Module, n string) *ir.Func {
@@ -404,40 +406,53 @@ func TestInlinePolicyGatesCompoundOnAnInterpreterShapedCaller(t *testing.T) {
 		return f
 	}
 
-	overBudgetCaller := func(m *ir.Module, calleeName string) (*ir.Func, *ir.Instr) {
-		f := m.NewFunc("interp", ir.ClsW)
-		p := f.Param("p", ir.ClsL)
-		e := f.Entry()
-		v := p
-		for i := 0; i < inlineCallerInstrBudget+16; i++ {
-			v = e.Add(ir.ClsL, v, f.Long(1))
-		}
-		e.Ret(e.Call(ir.ClsW, f.Sym(calleeName, 0), v))
-		for i := range e.Instrs {
-			if e.Instrs[i].Op == ir.OCall {
-				return f, &e.Instrs[i]
-			}
-		}
-		panic("no call emitted")
-	}
+	t.Run("it inlines", func(t *testing.T) {
+		m := ir.NewModule()
+		callee := aggLeaf(m, "JS_IsException")
+		caller, call := callerOf(m, "interp", callee)
+		require.Equal(t, inlineAccept, decide(t, caller, call, callee, 283),
+			"an aggregate parameter is copied in, not refused")
+		require.Empty(t, inlineRefusals(caller, call, callee, 283, nil, false))
+	})
 
-	m := ir.NewModule()
-	callee := aggLeaf(m, "JS_IsException")
-	caller, call := overBudgetCaller(m, callee.Name)
+	// The copy is made where it can be observed and skipped where it cannot. A
+	// callee that only reads its parameter reads the caller's object directly and
+	// costs nothing; copying those regardless cost QuickJS 17.6% of its text and
+	// pushed eleven of the Go runtime's nosplit chains past their frame budget.
+	t.Run("a read-only parameter is not copied", func(t *testing.T) {
+		m := ir.NewModule()
+		callee := aggLeaf(m, "reader")
+		caller, _ := callerOf(m, "interp", callee)
+		require.True(t, Inline(m))
+		require.Zero(t, callsIn(caller), "the callee should have been spliced in")
+		require.Zero(t, allocsIn(caller), "reading needs no copy of its own")
+	})
 
-	require.LessOrEqual(t, funcSize(callee), inlineTinyLeafSize,
-		"the premise: this callee is small enough for the over-budget exemption")
-	require.True(t, inlineCallerOverBudget(caller),
-		"the premise: this caller is past the ceiling, like JS_CallInternal")
+	t.Run("a written parameter gets storage of its own", func(t *testing.T) {
+		m := ir.NewModule()
+		callee := m.NewFunc("writer", ir.ClsW)
+		pv := callee.Param("v", ir.ClsL)
+		callee.Temp(pv).Agg = &ir.AggType{Name: "JSValue", Size: 16, Align: 8, Opaque: true}
+		e := callee.Entry()
+		e.Store(callee.Word(7), pv) // assigns to its own parameter
+		e.Ret(e.Load(ir.ClsW, pv))
 
-	// The aggregate parameter is the reason, not the size and not the budget. A
-	// reader who raised inlineCallerInstrBudget on the strength of the caller
-	// verdict would see no change at all here.
-	require.Equal(t, reasonAggParam, decide(t, caller, call, callee, 283),
-		"the aggregate parameter decides it, whatever the caller's size")
+		caller, _ := callerOf(m, "interp", callee)
+		require.True(t, Inline(m))
+		require.Zero(t, callsIn(caller), "the callee should have been spliced in")
+		require.NotZero(t, allocsIn(caller),
+			"the callee writes to its parameter, so it must not write to the caller's object")
+	})
 
-	Inline(m)
-	require.Equal(t, 1, callsIn(caller), "so the call stays")
+	// And the gates that remain still compound: two refusals look like one to
+	// anything that reports only the first.
+	t.Run("remaining gates still compound", func(t *testing.T) {
+		m := ir.NewModule()
+		callee := aggLeaf(m, "vararg")
+		callee.Variadic = true
+		caller, call := callerOf(m, "interp", callee)
+		require.Equal(t, reasonVariadic, decide(t, caller, call, callee, 283))
+	})
 }
 
 // inlineRefusals must agree with the decision it explains.
@@ -450,8 +465,8 @@ func TestInlinePolicyGatesCompoundOnAnInterpreterShapedCaller(t *testing.T) {
 func TestInlineRefusalsAgreeWithTheDecision(t *testing.T) {
 	check := func(t *testing.T, caller *ir.Func, call *ir.Instr, callee *ir.Func, sites int, accept func(*ir.Func) bool) {
 		t.Helper()
-		want := inlineDecision(caller, call, callee, sites, accept)
-		got := inlineRefusals(caller, call, callee, sites, accept)
+		want := inlineDecision(caller, call, callee, sites, accept, false)
+		got := inlineRefusals(caller, call, callee, sites, accept, false)
 		if want == inlineAccept {
 			require.Empty(t, got, "the call is accepted, so nothing refuses it")
 			return
@@ -513,7 +528,7 @@ func TestInlineRefusalsAgreeWithTheDecision(t *testing.T) {
 		callee.NoInline = true
 		caller, call := callerOf(m, "c", callee)
 		check(t, caller, call, callee, 1, nil)
-		require.Greater(t, len(inlineRefusals(caller, call, callee, 1, nil)), 1,
+		require.Greater(t, len(inlineRefusals(caller, call, callee, 1, nil, false)), 1,
 			"three rules refuse this call and the census must be able to say so")
 	})
 }

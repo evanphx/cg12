@@ -75,7 +75,7 @@ const (
 // the first reason reported is the one that would have rejected the call before.
 // That matters for a diagnostic: a call failing four gates should name the one
 // nearest the front, since that is the one to address.
-func inlineDecision(caller *ir.Func, call *ir.Instr, callee *ir.Func, sites int, accept func(*ir.Func) bool) inlineReason {
+func inlineDecision(caller *ir.Func, call *ir.Instr, callee *ir.Func, sites int, accept func(*ir.Func) bool, noSplitChain bool) inlineReason {
 	if callee == nil {
 		return reasonIndirect
 	}
@@ -91,20 +91,22 @@ func inlineDecision(caller *ir.Func, call *ir.Instr, callee *ir.Func, sites int,
 	if len(call.Args)-1 != len(callee.Params) {
 		return reasonArity
 	}
-	return calleeInlineReason(callee, sites)
+	// A nosplit chain's frame is a byte budget this pass cannot see, so the
+	// capability that grows frames is declined anywhere such a chain reaches.
+	return calleeInlineReason(callee, sites, !noSplitChain)
 }
 
 // calleeInlineReason is the part of the decision that depends only on the callee:
 // its attributes, its structure, and its size against the budget for the number
 // of sites it is called from.
-func calleeInlineReason(callee *ir.Func, sites int) inlineReason {
+func calleeInlineReason(callee *ir.Func, sites int, aggParams bool) inlineReason {
 	// noinline is honoured before everything, so a cold slow-path helper stays a
 	// call and out of the hot inlined body. It also wins over ForceInline: the two
 	// are mutually exclusive, and "do not inline" is the safe resolution.
 	if callee.NoInline {
 		return reasonNoInlineAttr
 	}
-	if r := inlineStructureReason(callee); r != inlineAccept {
+	if r := inlineStructureReason(callee, aggParams); r != inlineAccept {
 		return r
 	}
 	if callee.ForceInline || callee.CostInline {
@@ -124,7 +126,15 @@ func calleeInlineReason(callee *ir.Func, sites int) inlineReason {
 }
 
 // inlineStructureReason is inlinableStructure with its answer named.
-func inlineStructureReason(callee *ir.Func) inlineReason {
+//
+// aggParams says whether the asking pass can splice a by-value aggregate
+// parameter. Only [spliceCall] under the general inliner can: it gives the
+// parameter storage of its own and copies the argument in, which is what an
+// actual call would do and what the callee's writes to its own parameter require.
+// The other callers -- the pre-escape scans, the unroller,
+// InlineIntoNoSplitCallers -- have not been measured against it and pass false,
+// which is exactly what they did before the copy-in existed.
+func inlineStructureReason(callee *ir.Func, aggParams bool) inlineReason {
 	if callee.Start == nil {
 		return reasonNoBody
 	}
@@ -137,9 +147,11 @@ func inlineStructureReason(callee *ir.Func) inlineReason {
 	if callee.RetAgg != nil && os.Getenv("CG12_NO_AGGINLINE") != "" {
 		return reasonAggReturn
 	}
-	for _, p := range callee.Params {
-		if p.Agg != nil {
-			return reasonAggParam
+	if !aggParams {
+		for _, p := range callee.Params {
+			if p.Agg != nil {
+				return reasonAggParam
+			}
 		}
 	}
 	hasRet := false
@@ -196,7 +208,7 @@ func inlineStructureReason(callee *ir.Func) inlineReason {
 // past the first answer. [TestInlineRefusalsAgreeWithTheDecision] pins the copy
 // to the original: the first refusal listed here must be exactly what
 // inlineDecision returns, so the two cannot drift.
-func inlineRefusals(caller *ir.Func, call *ir.Instr, callee *ir.Func, sites int, accept func(*ir.Func) bool) []inlineReason {
+func inlineRefusals(caller *ir.Func, call *ir.Instr, callee *ir.Func, sites int, accept func(*ir.Func) bool, noSplitChain bool) []inlineReason {
 	var out []inlineReason
 	add := func(r inlineReason) { out = append(out, r) }
 
@@ -218,7 +230,7 @@ func inlineRefusals(caller *ir.Func, call *ir.Instr, callee *ir.Func, sites int,
 	if callee.NoInline {
 		add(reasonNoInlineAttr)
 	}
-	if r := inlineStructureReason(callee); r != inlineAccept {
+	if r := inlineStructureReason(callee, !noSplitChain); r != inlineAccept {
 		add(r) // structure is itself a chain; its first answer is enough
 	}
 	// Size is bypassed for a mandatory or cost-model-selected callee, so it is not
@@ -295,7 +307,7 @@ func reportInlineDecisions(caller *ir.Func, cg *callGraph, scc *sccInfo, sites m
 				name = callee.Name
 				size = funcSize(callee)
 			}
-			refusals := inlineRefusals(caller, in, callee, sites[callee], accept)
+			refusals := inlineRefusals(caller, in, callee, sites[callee], accept, cg.noSplitReach[caller])
 			if callee != nil && scc.recursive[callee] {
 				refusals = append([]inlineReason{reasonRecursive}, refusals...)
 			}

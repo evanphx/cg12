@@ -770,7 +770,7 @@ func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.F
 			if callee != nil && scc.recursive[callee] {
 				continue // part of a recursion cycle
 			}
-			if inlineDecision(caller, in, callee, sites[callee], accept) == inlineAccept {
+			if inlineDecision(caller, in, callee, sites[callee], accept, cg.noSplitReach[caller]) == inlineAccept {
 				return b, i, callee
 			}
 		}
@@ -810,13 +810,19 @@ func canInlineCall(caller *ir.Func, call *ir.Instr, callee *ir.Func) bool {
 }
 
 // inlinableStructure reports whether callee can be inlined mechanically: it has a
-// body and a return to splice into, and neither a variadic signature nor a by-value
-// aggregate parameter or result (which the splice does not model). Recursion is not
-// checked here -- it is a call-graph property handled by the SCC classification in
-// findInlinable. Whether an inlinable callee is worth inlining is a separate cost
-// decision (worthInlining).
+// body and a return to splice into, and neither a variadic signature nor a
+// by-value aggregate result. Recursion is not checked here -- it is a call-graph
+// property handled by the SCC classification in findInlinable. Whether an
+// inlinable callee is worth inlining is a separate cost decision (worthInlining).
+//
+// It answers for the passes that splice without going through [inlineDecision]:
+// the pre-escape scans, the unroller, and InlineIntoNoSplitCallers. Those still
+// refuse a by-value aggregate parameter. Only the general inliner gives such a
+// parameter storage of its own, and only it has been measured against what that
+// costs a nosplit frame -- doing it on these paths as well put the Go runtime's
+// nosplit chains 384 bytes over their limit.
 func inlinableStructure(callee *ir.Func) bool {
-	return inlineStructureReason(callee) == inlineAccept
+	return inlineStructureReason(callee, false) == inlineAccept
 }
 
 func inlinable(callee *ir.Func) bool {
@@ -867,7 +873,7 @@ func isFrameScopedRuntimeCall(function *ir.Func, instruction *ir.Instr) bool {
 // inlines a large body cheaply because the original is then dead, while a body copied
 // into many sites must be small to be worth the duplication.
 func worthInlining(callee *ir.Func, sites int) bool {
-	return calleeInlineReason(callee, sites) == inlineAccept
+	return calleeInlineReason(callee, sites, false) == inlineAccept
 }
 
 // spliceCall replaces the call at caller block b, instruction idx, with a clone
@@ -995,6 +1001,40 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 	cont.Instrs = append(cont.Instrs, b.Instrs[idx+1:]...)
 	cont.Jmp = b.Jmp
 	b.Instrs = b.Instrs[:idx:idx]
+
+	// A by-value aggregate parameter arrives as the address of its storage, so
+	// binding it straight to the argument the way a scalar parameter is bound
+	// would hand the callee the caller's own object. The callee may assign to its
+	// parameter -- it is an ordinary local variable as far as the source language
+	// is concerned -- and those writes must not be visible to the caller. So the
+	// parameter gets its own storage here, exactly as an actual call would give it
+	// (cc.argCopy does the same thing at a call this pass leaves alone).
+	//
+	// This is why aggregate-parameter callees were refused outright, and it was
+	// the single largest thing blocking QuickJS: 16,050 of its call sites had this
+	// as their only refusal, JSValue being 16 bytes and passed by value
+	// everywhere. JS_DupValue (437 sites), set_value (294) and JS_IsException
+	// (283) are all this shape.
+	//
+	// The copy is usually not paid for. The slot is a fresh local, and where the
+	// callee only reads its parameter -- a tag test, a refcount bump -- nothing
+	// takes its address, so the following mem2reg promotes it back into registers
+	// and the loads and stores go away. Where the callee does leak the address the
+	// copy stays, and is the price of being correct.
+	//
+	// The pre-call block dominates every cloned block, so definitions placed here
+	// are in scope throughout the body.
+	for k, p := range callee.Params {
+		if p.Agg == nil || !aggParamIsWritten(callee, p) {
+			continue // read-only: the argument itself is already the callee's view
+		}
+		size, _ := p.Agg.Layout()
+		slot := caller.AllocAggregate(p.Agg, &b.Instrs)
+		if size > 0 {
+			aggCopy(caller, slot, args[k], size, &b.Instrs)
+		}
+		tempMap[p.ID] = slot
+	}
 
 	// The aggregate result buffer is allocated in the pre-call block, which
 	// dominates every cloned block and cont, so it is a legal definition of result.
@@ -1147,6 +1187,91 @@ func spliceCall(caller *ir.Func, b *ir.Block, idx int, callee *ir.Func, cg *call
 			}
 		}
 	}
+}
+
+// aggParamIsWritten reports whether the callee could observe a write through a
+// by-value aggregate parameter, and so needs its own copy of it.
+//
+// Copying unconditionally is correct and expensive. It cost QuickJS 17.6% of its
+// text, and it broke the Go runtime outright: an extra stack slot per inlined
+// aggregate parameter pushed eleven nosplit chains past their budget, with
+// runtime_sysMemStat_add's frame reaching 352 bytes. Most of these parameters are
+// only read -- a tag test, a refcount field, a struct member -- and a read needs
+// no copy, because reading the caller's object and reading a copy of it give the
+// same answer.
+//
+// Unlike a real call, where the callee is opaque and cc.argCopy has to assume the
+// worst, inlining has the body in hand and can look. The rule is deliberately
+// crude: follow the parameter through address arithmetic, and require every use
+// of an address derived from it to be the address operand of a load. Anything
+// else -- a store through it or of it, a call argument, a phi, a return -- means
+// the address reached somewhere this cannot see, so the copy is made.
+func aggParamIsWritten(callee *ir.Func, p *ir.Temp) bool {
+	// Addresses derived from the parameter, to a fixpoint: address arithmetic can
+	// cross blocks, and one forward pass would miss a loop-carried offset.
+	derived := map[uint32]bool{uint32(p.ID): true}
+	for changed := true; changed; {
+		changed = false
+		for _, b := range callee.Blocks {
+			for i := range b.Instrs {
+				in := &b.Instrs[i]
+				if in.To.IsNone() || in.To.Kind != ir.RefTemp || derived[in.To.ID] {
+					continue
+				}
+				if in.Op != ir.OAdd && in.Op != ir.OSub && in.Op != ir.OCopy {
+					continue
+				}
+				for _, a := range in.Args {
+					if a.Kind == ir.RefTemp && derived[a.ID] {
+						derived[in.To.ID] = true
+						changed = true
+						break
+					}
+				}
+			}
+		}
+	}
+
+	uses := func(r ir.Ref) bool { return r.Kind == ir.RefTemp && derived[r.ID] }
+	for _, b := range callee.Blocks {
+		for _, ph := range b.Phis {
+			for _, a := range ph.Args {
+				if uses(a) {
+					return true // merged with something else; stop following it
+				}
+			}
+		}
+		for i := range b.Instrs {
+			in := &b.Instrs[i]
+			switch {
+			case in.Op.IsLoad():
+				// Args[0] is the address being read; derived anywhere else is not a read.
+				for j := 1; j < len(in.Args); j++ {
+					if uses(in.Args[j]) {
+						return true
+					}
+				}
+			case in.Op == ir.OAdd || in.Op == ir.OSub || in.Op == ir.OCopy || in.Op.IsLifetime():
+				// Address arithmetic, followed above, and lifetime markers, which read
+				// the address but neither write through it nor leak it.
+			default:
+				for _, a := range in.Args {
+					if uses(a) {
+						return true
+					}
+				}
+			}
+		}
+		if uses(b.Jmp.Arg) {
+			return true
+		}
+		for _, a := range b.Jmp.Args {
+			if uses(a) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // aggCopy appends chunked load/store instructions copying size bytes from src to

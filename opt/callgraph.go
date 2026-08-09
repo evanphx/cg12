@@ -11,6 +11,42 @@ type callGraph struct {
 	byName  map[string]*ir.Func
 	callees map[*ir.Func][]*ir.Func // deduplicated direct callees
 	selfRec map[*ir.Func]bool       // has a direct call to itself
+	// noSplitReach is every function a nosplit function can reach, itself
+	// included. Growing any of them grows a nosplit chain's frame.
+	noSplitReach map[*ir.Func]bool
+}
+
+// markNoSplitReach fills noSplitReach: the transitive closure of the callees of
+// every nosplit function.
+//
+// A nosplit function may not grow its stack, so the whole chain below it has to
+// fit in a fixed budget the backend measures in bytes ([FrameBudget]). This pass
+// counts instructions and cannot see a frame, so the only safe thing it can say
+// about that budget is "do not spend it". The direct caller is not enough:
+// growing a function that is merely reachable from a nosplit one grows the chain
+// the moment it is inlined upward. Enabling aggregate-parameter inlining without
+// this pushed eleven of the Go runtime's nosplit chains over their limit, and
+// gating only on the immediate caller left it 200 bytes over.
+//
+// In C the set is empty -- nothing is nosplit -- so the C workloads keep the
+// whole capability.
+func (cg *callGraph) markNoSplitReach() {
+	cg.noSplitReach = make(map[*ir.Func]bool)
+	var walk func(*ir.Func)
+	walk = func(f *ir.Func) {
+		if cg.noSplitReach[f] {
+			return
+		}
+		cg.noSplitReach[f] = true
+		for _, g := range cg.callees[f] {
+			walk(g)
+		}
+	}
+	for _, f := range cg.funcs {
+		if f.NoSplit {
+			walk(f)
+		}
+	}
 }
 
 // buildCallGraph derives the direct-call graph of m.
@@ -46,6 +82,7 @@ func buildCallGraph(m *ir.Module) *callGraph {
 			}
 		}
 	}
+	cg.markNoSplitReach()
 	return cg
 }
 
