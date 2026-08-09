@@ -105,7 +105,7 @@ if [ "$WORKLOAD" = all ]; then
 	[ "$ALL" = 1 ] && pass+=(-all)
 	[ -n "$REF" ] && pass+=(-ref "$REF")
 	status=0
-	for one in sqlite lua quickjs; do
+	for one in $(. "$ROOT/scripts/workloads.sh"; workload_names); do
 		echo
 		echo "################ $one"
 		"$0" -workload "$one" "${pass[@]}" || status=1
@@ -117,37 +117,13 @@ fi
 # two need on the include path, what the link needs, and -- where the program is
 # more than one translation unit -- the support files the host compiler builds in
 # every arm. SUPPORT and DEFINES are empty for the workloads that need neither.
-SUPPORT=()
-DEFINES=()
-case "$WORKLOAD" in
-sqlite)
-	SRC="$BENCH/sqlite3.c"
-	DRIVER="$ROOT/cc/testdata/perf/sqlite_bench.c"
-	INCLUDE="$BENCH"
-	LINK=(-lm -lpthread -ldl)
-	;;
-lua)
-	SRC="$BENCH/lua/onelua.c"
-	DRIVER="$ROOT/cc/testdata/perf/lua_bench.c"
-	INCLUDE="$BENCH/lua"
-	LINK=(-lm)
-	;;
-quickjs)
-	# quickjs.c and libregexp.c collide on two static names, so they cannot share
-	# a translation unit and the support files are built separately. The
-	# interpreter is all in quickjs.c, which is the part being measured.
-	SRC="$BENCH/quickjs/quickjs.c"
-	DRIVER="$ROOT/cc/testdata/perf/quickjs_bench.c"
-	INCLUDE="$BENCH/quickjs"
-	LINK=(-lm -lpthread)
-	SUPPORT=(libregexp.c libunicode.c cutils.c libbf.c)
-	DEFINES=(-D_GNU_SOURCE -DCONFIG_BIGNUM '-DCONFIG_VERSION="cg12"')
-	;;
-*)
-	echo "[bench-c] unknown workload $WORKLOAD (want sqlite, lua, quickjs or all)" >&2
+# The workload table is shared with inline-report.sh, so a timing number and a
+# decision census cannot be taken against different flags without saying so.
+. "$ROOT/scripts/workloads.sh"
+if ! workload_config "$WORKLOAD"; then
+	echo "[bench-c] unknown workload $WORKLOAD (want $(workload_names | tr ' ' ', ') or all)" >&2
 	exit 2
-	;;
-esac
+fi
 
 if [ ! -f "$SRC" ]; then
 	echo "[bench-c] $SRC is not present; run scripts/fetch-bench-c.sh" >&2
