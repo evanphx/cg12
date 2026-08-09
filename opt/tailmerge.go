@@ -62,13 +62,37 @@ func TailMerge(f *ir.Func) bool {
 		return false
 	}
 
+	// The class the phi carries has to come from the values being merged. It
+	// cannot come from f.Retty: that field is the return class only when the
+	// function returns a scalar, and an aggregate returned by value whose parts
+	// have not been scalarised (RetValues false) leaves Retty at its zero value
+	// while putting the *address* of the value in Jmp.Arg. A phi built from Retty
+	// was then ClsW, and the copies phi elimination inserts for it truncated a
+	// 64-bit frame address to 32 bits -- `add x16, x29, #0x78` followed by
+	// `mov w21, w16`. QuickJS returns JSValue by value throughout, so this hit 71
+	// of its functions and segfaulted the interpreter.
+	//
+	// A group whose members disagree has no single class and is not merged: the
+	// gap between ClsW and a 64-bit class is the truncation above, and the gap
+	// between ClsP and ClsM is a value the collector must trace merged with one
+	// it must not.
+	phiCls := f.Retty
+	if !void {
+		phiCls = f.ClassOf(group[0].Jmp.Arg)
+		for _, b := range group[1:] {
+			if f.ClassOf(b.Jmp.Arg) != phiCls {
+				return false
+			}
+		}
+	}
+
 	// Build the shared return block.
 	r := f.NewBlock("")
 	var phi *ir.Phi
 	if void {
 		r.Jmp = ir.Jmp{Kind: ir.JmpRet}
 	} else {
-		phi = &ir.Phi{Cls: f.Retty, To: f.NewTemp("", f.Retty)}
+		phi = &ir.Phi{Cls: phiCls, To: f.NewTemp("", phiCls)}
 		r.Phis = []*ir.Phi{phi}
 		r.Jmp = ir.Jmp{Kind: ir.JmpRet, Arg: phi.To}
 	}

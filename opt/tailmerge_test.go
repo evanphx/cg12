@@ -85,3 +85,79 @@ func TestTailMergeSkipsConflict(t *testing.T) {
 	require.False(t, opt.TailMerge(f), "conflicting returns must not merge")
 	require.Equal(t, 2, countRet(f))
 }
+
+// findPhi returns the sole phi in the function's return block.
+func retPhi(t *testing.T, f *ir.Func) *ir.Phi {
+	t.Helper()
+	for _, b := range f.Blocks {
+		if b.Jmp.Kind == ir.JmpRet && len(b.Phis) == 1 {
+			return b.Phis[0]
+		}
+	}
+	t.Fatal("no return block with a phi")
+	return nil
+}
+
+// aggRet builds a function that returns an aggregate by value in the
+// representation where the parts have NOT been scalarised: Jmp.Arg holds the
+// address of the value, and Retty -- documented as the return class only when
+// RetAgg is nil -- keeps its zero value.
+func aggRet(m *ir.Module, name string, retCls ir.Cls) (*ir.Func, ir.Ref, ir.Ref) {
+	f := m.NewFuncVoid(name).Export()
+	f.HasRet = true
+	f.RetAgg = &ir.AggType{Name: "Big", Size: 32, Align: 8, Opaque: true}
+	c := f.Param("c", ir.ClsL)
+	x, y := f.Param("x", retCls), f.Param("y", retCls)
+	e := f.Entry()
+	ba, bb, r1, r2 := f.NewBlock("A"), f.NewBlock("B"), f.NewBlock("r1"), f.NewBlock("r2")
+	e.Jnz(c, ba, bb)
+	ba.Goto(r1)
+	bb.Goto(r2)
+	r1.Ret(x)
+	r2.Ret(y)
+	return f, x, y
+}
+
+// The merged phi takes its class from the values it merges, not from f.Retty.
+//
+// Reading Retty unconditionally was a miscompile, not a tidiness problem. For an
+// aggregate returned by value the field is meaningless and reads as ClsW, so the
+// phi was 32 bits wide over 64-bit addresses and the copies phi elimination
+// inserts truncated them: `add x16, x29, #0x78` to compute a frame address,
+// then `mov w21, w16` to move half of it. QuickJS returns JSValue by value
+// throughout, which put this in 71 of its functions and segfaulted the
+// interpreter on startup.
+func TestTailMergePhiClassComesFromTheMergedValues(t *testing.T) {
+	m := ir.NewModule()
+	f, _, _ := aggRet(m, "aggret", ir.ClsP)
+	require.Zero(t, f.Retty, "the premise: an aggregate return leaves Retty unset")
+
+	require.True(t, opt.TailMerge(f), "two empty return blocks should merge")
+	phi := retPhi(t, f)
+	require.Equal(t, ir.ClsP, phi.Cls, "the phi merges addresses, so it is pointer-wide")
+	require.Equal(t, ir.ClsP, f.Temps[phi.To.ID].Cls, "and so is the temp it defines")
+	for i, a := range phi.Args {
+		require.Equal(t, phi.Cls, f.ClassOf(a), "phi argument %d", i)
+	}
+}
+
+// A group whose members return different classes has no single class to give the
+// phi, so it is not merged. Sharing one epilogue is worth less than a phi that
+// merges a value the collector must trace with one it must not, or a 32-bit
+// value with a 64-bit one.
+func TestTailMergeRefusesGroupsWithDisagreeingClasses(t *testing.T) {
+	m := ir.NewModule()
+	f := m.NewFunc("mixed", ir.ClsL).Export()
+	c := f.Param("c", ir.ClsL)
+	x, y := f.Param("x", ir.ClsL), f.Param("y", ir.ClsW)
+	e := f.Entry()
+	ba, bb, r1, r2 := f.NewBlock("A"), f.NewBlock("B"), f.NewBlock("r1"), f.NewBlock("r2")
+	e.Jnz(c, ba, bb)
+	ba.Goto(r1)
+	bb.Goto(r2)
+	r1.Ret(x)
+	r2.Ret(y)
+
+	require.False(t, opt.TailMerge(f), "a 32-bit and a 64-bit return do not share a phi")
+	require.Equal(t, 2, countRet(f), "both return blocks stay")
+}
