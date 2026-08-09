@@ -271,6 +271,73 @@ func TestInlinePolicyDiagnosticDoesNotRecordDependencies(t *testing.T) {
 	}
 }
 
+// A caller past the size ceiling still takes a tiny leaf. This is the one
+// exemption to the caller gate, and both of its conditions matter: without the
+// size limit or without the leaf requirement it becomes the change that was
+// measured and rejected -- SQLite 3.7% faster, Lua 4.7% slower with its
+// interpreter's spills going 71 to 130.
+func TestInlinePolicyOverBudgetCallerStillTakesTinyLeaves(t *testing.T) {
+	overBudget := func(m *ir.Module, calleeName string) *ir.Func {
+		f := m.NewFunc("huge", ir.ClsW)
+		p := f.Param("p", ir.ClsW)
+		e := f.Entry()
+		v := p
+		for i := 0; i < inlineCallerInstrBudget+16; i++ {
+			v = e.Add(ir.ClsW, v, f.Word(1))
+		}
+		e.Ret(e.Call(ir.ClsW, f.Sym(calleeName, 0), v))
+		return f
+	}
+
+	t.Run("a tiny leaf is inlined", func(t *testing.T) {
+		m := ir.NewModule()
+		leaf(m, "tiny", inlineTinyLeafSize)
+		caller := overBudget(m, "tiny")
+		require.True(t, inlineCallerOverBudget(caller), "the premise: this caller is over the ceiling")
+		require.True(t, Inline(m))
+		require.Zero(t, callsIn(caller), "the tiny leaf should have been folded in")
+	})
+
+	t.Run("one instruction over the size limit is not", func(t *testing.T) {
+		m := ir.NewModule()
+		leaf(m, "justbig", inlineTinyLeafSize+1)
+		caller := overBudget(m, "justbig")
+		require.False(t, Inline(m))
+		require.Equal(t, 1, callsIn(caller))
+	})
+
+	t.Run("a tiny NON-leaf is not", func(t *testing.T) {
+		// Small enough on its own, but it calls out of the module, so it can never
+		// become a leaf. That distinction is real: a callee whose own callee is
+		// inlinable gets flattened first and then qualifies on its own merits, which
+		// is why this uses a call the inliner can never remove rather than one it
+		// merely has not removed yet.
+		m := ir.NewModule()
+		mid := m.NewFunc("mid", ir.ClsW)
+		x := mid.Param("x", ir.ClsW)
+		me := mid.Entry()
+		me.Ret(me.Call(ir.ClsW, mid.Sym("external_not_in_module", 0), x))
+		require.LessOrEqual(t, funcSize(mid), inlineTinyLeafSize, "the premise: mid is tiny")
+
+		caller := overBudget(m, "mid")
+		Inline(m)
+		require.Equal(t, 1, callsIn(caller), "a non-leaf must not be exempt from the ceiling")
+	})
+}
+
+// callsIn counts the calls left in a function.
+func callsIn(f *ir.Func) int {
+	n := 0
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			if b.Instrs[i].Op == ir.OCall {
+				n++
+			}
+		}
+	}
+	return n
+}
+
 // The reasons must be distinct and non-empty, because they are the output of a
 // diagnostic: two gates sharing a string would send a reader to the wrong rule,
 // which is the failure mode this whole file exists to prevent.

@@ -392,11 +392,19 @@ func TestInlinePreservesFrameScopedRuntimeCallsite(t *testing.T) {
 	assert.Equal(t, 1, countCalls(module))
 }
 
+// A caller past the size ceiling refuses an ordinary callee. The callee here is
+// deliberately larger than inlineTinyLeafSize: a tiny leaf is exempt from this
+// (see TestInlinePolicyOverBudgetCallerStillTakesTinyLeaves), and using one here
+// would make this test assert the opposite of what it means to.
 func TestInlineSkipsOverBudgetCaller(t *testing.T) {
 	module := ir.NewModule()
 	callee := module.NewFunc("callee", ir.ClsW)
 	value := callee.Param("value", ir.ClsW)
-	callee.Entry().Ret(value)
+	calleeEntry := callee.Entry()
+	for i := 0; i < 12; i++ {
+		value = calleeEntry.Add(ir.ClsW, value, callee.Word(1))
+	}
+	calleeEntry.Ret(value)
 
 	caller := module.NewFunc("caller", ir.ClsW)
 	current := caller.Param("current", ir.ClsW)

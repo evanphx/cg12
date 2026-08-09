@@ -606,7 +606,7 @@ func findSplitCalleeToInline(caller *ir.Func, cg *callGraph, scc *sccInfo) (*ir.
 func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func]int, base map[*ir.Func]int) bool {
 	reportInlineDecisions(caller, cg, scc, sites, nil)
 	if inlineCallerOverBudget(caller) {
-		return false
+		return inlineTinyLeavesInto(caller, cg, scc, sites)
 	}
 	changed := false
 
@@ -661,6 +661,88 @@ func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func
 	}
 	return changed
 }
+
+// inlineTinyLeavesInto is the one thing a caller past the size ceiling still
+// accepts: a leaf callee small enough that the call sequence around it rivals
+// its body.
+//
+// inlineCallerInstrBudget exists because cloning even small helpers into a very
+// large function can push the rest of the pipeline over its memory budget, and
+// it is right about that for helpers in general. It was also refusing calls that
+// cost more than they saved to leave alone: profiling SQLite against gcc, seven
+// functions gcc had inlined away accounted for 37% of the runtime gap, and the
+// two hottest were five and six instructions -- a five-instruction function
+// reached through a call sequence, 40ms of a 4.5s run.
+//
+// Two conditions keep this from becoming the thing that was already tried and
+// rejected. The callee must be tiny, and it must currently be a leaf -- see
+// hasCallInBody for what that does and does not mean. Between them they admit
+// the case the profile pointed at, a helper whose body is smaller than the call
+// reaching it, and nothing else.
+//
+// Measured on three interpreters, which is the point -- the version without these
+// two conditions (lifting the ceiling and making the growth allowance
+// proportional) helped one and hurt another, so neither alone was evidence:
+//
+//	                       this rule            ceiling lifted wholesale
+//	sqlite   runtime       -2.8%                -3.7%
+//	sqlite   text          1,083,080 (smaller)  1,142,696 (+5.4%)
+//	sqlite   spills        21 -> 22             21 -> 58
+//	lua      object        byte-identical       +4.7% runtime, sort +29%
+//	lua      luaV_execute  71 -> 71 spills      71 -> 130 spills
+//	quickjs  text          949,752 (smaller)    989,192 (+4.1%)
+//
+// The leaf-and-tiny form takes most of the win and none of the cost: it does not
+// raise register pressure anywhere, and it makes every one of the three smaller
+// rather than larger.
+func inlineTinyLeavesInto(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func]int) bool {
+	changed := false
+	for n := 0; n < inlineTinyLeafBudget; n++ {
+		b, idx, callee := findInlinable(caller, cg, scc, sites, func(c *ir.Func) bool {
+			return funcSize(c) <= inlineTinyLeafSize && !hasCallInBody(c)
+		})
+		if callee == nil {
+			break
+		}
+		spliceCall(caller, b, idx, callee, cg, scc, 0)
+		changed = true
+	}
+	return changed
+}
+
+// hasCallInBody reports whether f calls anything right now.
+//
+// "Right now" is the whole of the claim, and worth being exact about: a callee
+// whose own callee is inlinable gets flattened first, and then qualifies here on
+// its own merits. What this actually excludes is a callee still holding a call
+// the inliner cannot remove -- an external one, or one it has declined. That is
+// the case worth excluding: folding it in moves a call into an already-large
+// function without removing one, and pulls whatever that call needs live across
+// it into the caller's pressure.
+func hasCallInBody(f *ir.Func) bool {
+	for _, b := range f.Blocks {
+		for i := range b.Instrs {
+			if b.Instrs[i].Op == ir.OCall {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// inlineTinyLeafSize is measured rather than chosen. Sweeping it over 4, 8, 16
+// and 24 on SQLite: 8 gives the smallest object of any of them (1,083,080, below
+// the 1,083,784 of not doing this at all) and leaves Lua byte-identical, while 16
+// and above grow the object past baseline and start perturbing Lua. It is the
+// point where the call sequence still costs more than the body, and past it the
+// duplication starts costing more than the call.
+const inlineTinyLeafSize = 8
+
+// inlineTinyLeafBudget is a backstop and nothing more: 4, 32 and 1000 all emit
+// the identical object on SQLite, because a large function does not have many
+// distinct tiny leaves to fold. It bounds a pathological module rather than
+// shaping any real one.
+const inlineTinyLeafBudget = 32
 
 func inlineCallerOverBudget(function *ir.Func) bool {
 	return functionInstructionCount(function) > inlineCallerInstrBudget
