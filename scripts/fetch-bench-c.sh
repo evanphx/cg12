@@ -20,6 +20,16 @@
 #           seconds, which is the whole point — a measurement loop nobody
 #           minds running.
 #
+#   quickjs 90k lines, MIT. The third interpreter, and the one several of the
+#           optimizer's heuristics were tuned for: its JS_CallInternal dispatches
+#           on a computed goto, where SQLite's VDBE and Lua's interpreter both
+#           dispatch on a switch. It cannot be built as one translation unit --
+#           libregexp.c and quickjs.c each define a static is_digit and a static
+#           compute_stack_size, with different signatures, which gcc rejects too
+#           -- so the support files are built separately and only quickjs.c goes
+#           through the compiler under test. That is also where the interpreter
+#           is, so it is the part worth measuring.
+#
 #   lua     25k lines, MIT, compiled as a single translation unit. Smaller and
 #           slower to reach, but it is the one whose output can be *run*, so it
 #           is the workload that can prove an optimization did not change
@@ -45,6 +55,9 @@ SQLITE_SHA=2842fddbb1cc33f66c7da998a57535f14a6bfee159676a07bb4bf3e59375d93e
 
 LUA_URL=https://www.lua.org/ftp/lua-5.4.7.tar.gz
 LUA_SHA=9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30
+
+QUICKJS_URL=https://bellard.org/quickjs/quickjs-2024-01-13.tar.xz
+QUICKJS_SHA=3c4bf8f895bfa54beb486c8d1218112771ecfc5ac3be1036851ef41568212e03
 
 note() { echo "[fetch-bench-c] $*" >&2; }
 fail() { echo "[fetch-bench-c] $*" >&2; exit 1; }
@@ -117,14 +130,37 @@ fetch_lua() {
 	note "wrote $dir/onelua.c"
 }
 
+# fetch_quickjs unpacks the sources as they ship. Unlike lua there is no
+# one-translation-unit wrapper: quickjs.c and libregexp.c collide on two static
+# names, so whoever builds this compiles the support files separately and hands
+# only quickjs.c to the compiler under test.
+fetch_quickjs() {
+	local dir="$BENCH_C_DIR/quickjs"
+	if [ -f "$dir/quickjs.c" ]; then
+		note "quickjs already present: $dir/quickjs.c"
+		return
+	fi
+	local work
+	work=$(mktemp -d)
+	trap 'rm -rf "$work"' RETURN
+	note "fetching quickjs"
+	curl -fsSL -o "$work/quickjs.tar.xz" "$QUICKJS_URL"
+	verify "$work/quickjs.tar.xz" "$QUICKJS_SHA"
+	tar -xJf "$work/quickjs.tar.xz" -C "$work"
+	mkdir -p "$dir"
+	cp "$work"/quickjs-*/*.c "$work"/quickjs-*/*.h "$work"/quickjs-*/VERSION "$dir/"
+	note "wrote $dir/quickjs.c ($(wc -l <"$dir/quickjs.c") lines)"
+}
+
 targets=("$@")
 if [ ${#targets[@]} -eq 0 ]; then
-	targets=(sqlite lua)
+	targets=(sqlite lua quickjs)
 fi
 for target in "${targets[@]}"; do
 	case "$target" in
 	sqlite) fetch_sqlite ;;
 	lua) fetch_lua ;;
-	*) fail "unknown target $target (want sqlite or lua)" ;;
+	quickjs) fetch_quickjs ;;
+	*) fail "unknown target $target (want sqlite, lua or quickjs)" ;;
 	esac
 done

@@ -46,6 +46,11 @@ func TestBehaviourOnRealPrograms(t *testing.T) {
 		driver  string
 		include string
 		link    []string
+		// support is the rest of the program: sources the host compiler builds in
+		// every arm, for a library that cannot be one translation unit. defines are
+		// the -D flags both compilers need to agree on.
+		support []string
+		defines []string
 	}{
 		{
 			name:    "sqlite",
@@ -53,6 +58,20 @@ func TestBehaviourOnRealPrograms(t *testing.T) {
 			driver:  filepath.Join("testdata", "behaviour", "sqlite_driver.c"),
 			include: benchDir,
 			link:    []string{"-lm", "-lpthread", "-ldl"},
+		},
+		{
+			// QuickJS is three programs' worth of C and only quickjs.c goes through
+			// the compiler under test: it and libregexp.c each define a static
+			// is_digit and a static compute_stack_size with different signatures, so
+			// they cannot share a translation unit (gcc rejects that too). The
+			// interpreter is all in quickjs.c, which is the part worth checking.
+			name:    "quickjs",
+			library: filepath.Join(benchDir, "quickjs", "quickjs.c"),
+			driver:  filepath.Join("testdata", "behaviour", "quickjs_driver.c"),
+			include: filepath.Join(benchDir, "quickjs"),
+			link:    []string{"-lm", "-lpthread"},
+			support: []string{"libregexp.c", "libunicode.c", "cutils.c", "libbf.c"},
+			defines: []string{"_GNU_SOURCE", "CONFIG_BIGNUM", `CONFIG_VERSION="cg12"`},
 		},
 		{
 			name:    "lua",
@@ -77,12 +96,24 @@ func TestBehaviourOnRealPrograms(t *testing.T) {
 			// thing that differs between them is the object the compiler under test
 			// produced for the library.
 			driverObj := filepath.Join(dir, "driver.o")
-			build(t, gcc, "-O2", "-I", tc.include, "-c", "-o", driverObj, tc.driver)
+			driverArgs := append(hostDefines(tc.defines), "-c", "-o", driverObj, tc.driver)
+			build(t, gcc, append([]string{"-O2", "-I", tc.include}, driverArgs...)...)
+
+			// The support sources are the host compiler's in every arm, so the only
+			// thing that differs between arms stays the one object under test.
+			extra := []string{driverObj}
+			for _, name := range tc.support {
+				obj := filepath.Join(dir, name+".o")
+				args := append(hostDefines(tc.defines), "-c", "-o", obj, filepath.Join(tc.include, name))
+				build(t, gcc, append([]string{"-O2", "-fwrapv", "-I", tc.include}, args...)...)
+				extra = append(extra, obj)
+			}
 
 			// The reference: the same library, built by the host compiler.
 			referenceObj := filepath.Join(dir, "reference.o")
-			build(t, gcc, "-O2", "-I", tc.include, "-c", "-o", referenceObj, tc.library)
-			want := runProgram(t, gcc, dir, "reference", referenceObj, driverObj, tc.link)
+			refArgs := append(hostDefines(tc.defines), "-c", "-o", referenceObj, tc.library)
+			build(t, gcc, append([]string{"-O2", "-fwrapv", "-I", tc.include}, refArgs...)...)
+			want := runProgram(t, gcc, dir, "reference", referenceObj, extra, tc.link)
 			require.NotEmpty(t, want, "the reference build produced no output")
 			t.Logf("reference: %s", want)
 
@@ -98,6 +129,7 @@ func TestBehaviourOnRealPrograms(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					module, err := cc.CompileWith(tc.library, string(source), cc.Options{
 						IncludeDirs: []string{tc.include},
+						Defines:     tc.defines,
 					})
 					require.NoError(t, err)
 					if optimize {
@@ -109,7 +141,7 @@ func TestBehaviourOnRealPrograms(t *testing.T) {
 
 					libraryObj := filepath.Join(dir, name+".o")
 					require.NoError(t, os.WriteFile(libraryObj, code, 0o644))
-					got := runProgram(t, gcc, dir, name, libraryObj, driverObj, tc.link)
+					got := runProgram(t, gcc, dir, name, libraryObj, extra, tc.link)
 					require.Equal(t, want, got)
 				})
 			}
@@ -131,10 +163,20 @@ func build(t *testing.T, gcc string, args ...string) {
 // through the GOT (arm64.Options.PIC). Before that it failed outright on Lua --
 // "unresolvable R_AARCH64_ADR_PREL_PG_HI21 relocation against symbol `stdin'" --
 // so this arm is what keeps the GOT path honest on a real program.
-func runProgram(t *testing.T, gcc, dir, name, libraryObj, driverObj string, link []string) string {
+// hostDefines turns the case's -D list into host compiler flags. Both compilers
+// must see the same ones or they are not building the same program.
+func hostDefines(defines []string) []string {
+	var args []string
+	for _, d := range defines {
+		args = append(args, "-D"+d)
+	}
+	return args
+}
+
+func runProgram(t *testing.T, gcc, dir, name, libraryObj string, others []string, link []string) string {
 	t.Helper()
 	bin := filepath.Join(dir, name)
-	args := append([]string{"-o", bin, libraryObj, driverObj}, link...)
+	args := append(append([]string{"-o", bin, libraryObj}, others...), link...)
 	out, err := exec.Command(gcc, args...).CombinedOutput()
 	require.NoErrorf(t, err, "link %s: %s", name, out)
 
