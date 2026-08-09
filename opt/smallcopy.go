@@ -25,7 +25,7 @@ import (
 // mem2reg rather than at the end of the pipeline.
 //
 // On the direct cost, though, be modest. Removing all 450 calls from SQLite moved
-// about 29ms of a 6200ms run -- half a percent, under what scripts/bench-sqlite.sh
+// about 29ms of a 6200ms run -- half a percent, under what scripts/bench-c.sh
 // can resolve, and the benchmark duly reported no change. Lua has only 13 such
 // sites and did not move at all. The case for this is that it is plainly right,
 // costs no compile time (2.92s -> 2.80s on SQLite) and no code size (-0.4%), and

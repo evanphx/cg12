@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# bench-sqlite.sh — time a cg12-compiled SQLite against the system compilers.
+# bench-c.sh — time a cg12-compiled C program against the system compilers.
 #
 # This answers "is cg12's generated code getting faster or slower", which is a
 # different question from the ones the other scripts ask. cc-identity-check.sh
@@ -10,13 +10,20 @@
 #
 # Method, and why each part is there:
 #
-#   Only the SQLite object varies. The driver is built by the host compiler in
-#   every arm, so a difference in time is a difference in how SQLite was
-#   compiled, and not in anything else.
+#   Only the object under test varies. The driver, and for QuickJS the support
+#   files, are built by the host compiler in every arm, so a difference in time
+#   is a difference in how the workload was compiled and not in anything else.
 #
-#   Timing happens inside the process. cc/testdata/perf/sqlite_bench.c times each
-#   phase with a monotonic clock, so process startup, dynamic linking and
-#   teardown are outside every measurement.
+#   Timing happens inside the process. Each workload's driver in
+#   cc/testdata/perf/ times its phases with a monotonic clock, so process
+#   startup, dynamic linking and teardown are outside every measurement.
+#
+#   THREE WORKLOADS, because one is not enough to decide anything. Jump threading
+#   looked like a 3.9% regression on SQLite and is worth 1.4% of QuickJS's text;
+#   lifting the inliner's caller ceiling looked like a 3.7% win on SQLite and is a
+#   4.7% loss on Lua. SQLite's VDBE and Lua's interpreter both dispatch on a
+#   switch; QuickJS's JS_CallInternal uses a computed goto, which is the shape
+#   several of the optimizer's heuristics were actually written against.
 #
 #   Rounds are interleaved -- every arm runs once, then every arm runs again --
 #   so a machine that warms up or throttles partway through spreads that drift
@@ -58,11 +65,13 @@
 # undefined behaviour that cost it its loop exit -- did exactly that.
 #
 # Usage:
-#   scripts/bench-sqlite.sh                  # gcc -O2, clang -O2, cg12 -O
-#   scripts/bench-sqlite.sh -rounds 9        # more rounds, tighter spread
-#   scripts/bench-sqlite.sh -scale 2         # twice the work per round
-#   scripts/bench-sqlite.sh -all             # add the -O0 arms
-#   scripts/bench-sqlite.sh -ref HEAD~1      # add a cg12 built from another commit
+#   scripts/bench-c.sh                       # sqlite: gcc -O2, clang -O2, cg12 -O
+#   scripts/bench-c.sh -workload quickjs     # or lua, or sqlite (the default)
+#   scripts/bench-c.sh -workload all         # each in turn
+#   scripts/bench-c.sh -rounds 9             # more rounds, tighter spread
+#   scripts/bench-c.sh -scale 2              # twice the work per round
+#   scripts/bench-c.sh -all                  # add the -O0 arms
+#   scripts/bench-c.sh -ref HEAD~1           # add a cg12 built from another commit
 #
 set -uo pipefail
 
@@ -73,6 +82,7 @@ ROUNDS=7
 SCALE=1
 ALL=0
 REF=""
+WORKLOAD=sqlite
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -80,17 +90,67 @@ while [ $# -gt 0 ]; do
 	-scale) SCALE=$2; shift 2 ;;
 	-all) ALL=1; shift ;;
 	-ref) REF=$2; shift 2 ;;
-	-h | -help | --help) sed -n '2,45p' "$0"; exit 0 ;;
+	-workload) WORKLOAD=$2; shift 2 ;;
+	-h | -help | --help) sed -n '2,80p' "$0"; exit 0 ;;
 	*) echo "unknown flag $1" >&2; exit 2 ;;
 	esac
 done
 
 BENCH="$ROOT/cc/testdata/bench"
-DRIVER="$ROOT/cc/testdata/perf/sqlite_bench.c"
-SQLITE="$BENCH/sqlite3.c"
 
-if [ ! -f "$SQLITE" ]; then
-	echo "[bench-sqlite] $SQLITE is not present; run scripts/fetch-bench-c.sh" >&2
+if [ "$WORKLOAD" = all ]; then
+	# Each in turn, in its own invocation, so one workload's failure does not cost
+	# the others their numbers.
+	pass=(-rounds "$ROUNDS" -scale "$SCALE")
+	[ "$ALL" = 1 ] && pass+=(-all)
+	[ -n "$REF" ] && pass+=(-ref "$REF")
+	status=0
+	for one in sqlite lua quickjs; do
+		echo
+		echo "################ $one"
+		"$0" -workload "$one" "${pass[@]}" || status=1
+	done
+	exit $status
+fi
+
+# Each workload names the source under test, the driver that times it, what the
+# two need on the include path, what the link needs, and -- where the program is
+# more than one translation unit -- the support files the host compiler builds in
+# every arm. SUPPORT and DEFINES are empty for the workloads that need neither.
+SUPPORT=()
+DEFINES=()
+case "$WORKLOAD" in
+sqlite)
+	SRC="$BENCH/sqlite3.c"
+	DRIVER="$ROOT/cc/testdata/perf/sqlite_bench.c"
+	INCLUDE="$BENCH"
+	LINK=(-lm -lpthread -ldl)
+	;;
+lua)
+	SRC="$BENCH/lua/onelua.c"
+	DRIVER="$ROOT/cc/testdata/perf/lua_bench.c"
+	INCLUDE="$BENCH/lua"
+	LINK=(-lm)
+	;;
+quickjs)
+	# quickjs.c and libregexp.c collide on two static names, so they cannot share
+	# a translation unit and the support files are built separately. The
+	# interpreter is all in quickjs.c, which is the part being measured.
+	SRC="$BENCH/quickjs/quickjs.c"
+	DRIVER="$ROOT/cc/testdata/perf/quickjs_bench.c"
+	INCLUDE="$BENCH/quickjs"
+	LINK=(-lm -lpthread)
+	SUPPORT=(libregexp.c libunicode.c cutils.c libbf.c)
+	DEFINES=(-D_GNU_SOURCE -DCONFIG_BIGNUM '-DCONFIG_VERSION="cg12"')
+	;;
+*)
+	echo "[bench-c] unknown workload $WORKLOAD (want sqlite, lua, quickjs or all)" >&2
+	exit 2
+	;;
+esac
+
+if [ ! -f "$SRC" ]; then
+	echo "[bench-c] $SRC is not present; run scripts/fetch-bench-c.sh" >&2
 	exit 1
 fi
 
@@ -103,7 +163,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-note() { echo "[bench-sqlite] $*" >&2; }
+note() { echo "[bench-c/$WORKLOAD] $*" >&2; }
 
 # guard runs one command with a ceiling on address space and CPU time, so a
 # runaway cannot reach the rest of the machine. 4 GiB is many times what the
@@ -121,25 +181,38 @@ guard() { $PIN prlimit --as=4000000000 --cpu=300 -- "$@"; }
 # is not decoration: the bug that made an early version of this driver dangerous
 # announced itself as -Waggressive-loop-optimizations, and was read past.
 note "building the driver with the host compiler"
-if ! gcc -O2 -Werror -I "$BENCH" -c -o "$WORK/driver.o" "$DRIVER"; then
+if ! gcc -O2 -Werror -fwrapv -I "$INCLUDE" "${DEFINES[@]}" -c -o "$WORK/driver.o" "$DRIVER"; then
 	note "FAIL: the driver does not build"
 	exit 1
 fi
 
+# The support files, host-built once and linked into every arm.
+HOSTOBJS=("$WORK/driver.o")
+for unit in ${SUPPORT[@]+"${SUPPORT[@]}"}; do
+	obj="$WORK/support-$unit.o"
+	if ! gcc -O2 -fwrapv -I "$INCLUDE" "${DEFINES[@]}" -c -o "$obj" "$INCLUDE/$unit" \
+		>"$WORK/support-$unit.build" 2>&1; then
+		note "FAIL: $unit does not build (see $WORK/support-$unit.build)"
+		exit 1
+	fi
+	HOSTOBJS+=("$obj")
+done
+
 ARMS=()
 
-# build_arm compiles SQLite with one toolchain and links it against the shared
-# driver. It records the arm only if every step succeeded, so a missing compiler
-# is skipped with a note rather than reported as infinitely slow.
+# build_arm compiles the workload with one toolchain and links it against the
+# host-built driver and support objects. It records the arm only if every step
+# succeeded, so a missing compiler is skipped with a note rather than reported as
+# infinitely slow.
 build_arm() {
 	local name=$1; shift
 	local object="$WORK/$name.o"
 	note "building $name"
-	if ! (cd "$BENCH" && "$@" -c -o "$object" "$SQLITE") >"$WORK/$name.build" 2>&1; then
+	if ! (cd "$INCLUDE" && "$@" -fwrapv "${DEFINES[@]}" -c -o "$object" "$SRC") >"$WORK/$name.build" 2>&1; then
 		note "skipping $name: it did not compile (see $WORK/$name.build)"
 		return
 	fi
-	if ! gcc -o "$WORK/$name" "$object" "$WORK/driver.o" -lm -lpthread -ldl >>"$WORK/$name.build" 2>&1; then
+	if ! gcc -o "$WORK/$name" "$object" "${HOSTOBJS[@]}" "${LINK[@]}" >>"$WORK/$name.build" 2>&1; then
 		note "skipping $name: it did not link (see $WORK/$name.build)"
 		return
 	fi
@@ -155,13 +228,17 @@ if command -v clang >/dev/null; then
 	[ "$ALL" = 1 ] && build_arm clang-O0 clang -O0
 fi
 
-note "building cc from the working tree"
-if ! go build -o "$WORK/cc" ./cmd/cc; then
+# cg12cc rather than cc: it is the gcc-compatible driver, and QuickJS needs -I
+# and -D, which cc does not take. -O2 on it means the same thing -O does on cc --
+# cg12's optimizer has one setting, on -- so the arm is the one earlier
+# measurements reported.
+note "building cg12cc from the working tree"
+if ! go build -o "$WORK/cc" ./cmd/cg12cc; then
 	note "FAIL: the working tree does not build"
 	exit 1
 fi
-build_arm cg12-O "$WORK/cc" -O
-[ "$ALL" = 1 ] && build_arm cg12-O0 "$WORK/cc"
+build_arm cg12-O "$WORK/cc" -O2
+[ "$ALL" = 1 ] && build_arm cg12-O0 "$WORK/cc" -O0
 
 # -ref adds a cg12 built from another commit, which is how a change to the
 # optimizer is judged: the same workload, the same machine, the same rounds.
@@ -169,8 +246,8 @@ if [ -n "$REF" ]; then
 	REF_TREE=$(mktemp -d)
 	rm -rf "$REF_TREE"
 	if git worktree add --detach "$REF_TREE" "$REF" >/dev/null 2>&1 &&
-		(cd "$REF_TREE" && go build -o "$WORK/cc.ref" ./cmd/cc); then
-		build_arm "cg12-O@$REF" "$WORK/cc.ref" -O
+		(cd "$REF_TREE" && go build -o "$WORK/cc.ref" ./cmd/cg12cc); then
+		build_arm "cg12-O@$REF" "$WORK/cc.ref" -O2
 	else
 		note "skipping the $REF arm: it does not build"
 	fi
@@ -203,7 +280,7 @@ for round in $(seq 1 "$ROUNDS"); do
 done
 echo >&2
 
-cp "$WORK/samples.txt" "${BENCH_SQLITE_LOG:-${TMPDIR:-/tmp}}/bench-sqlite-samples.txt" 2>/dev/null || true
+cp "$WORK/samples.txt" "${BENCH_C_LOG:-${TMPDIR:-/tmp}}/bench-c-$WORKLOAD-samples.txt" 2>/dev/null || true
 
 # The report. Phases keep the order the driver printed them in, which is the
 # order they ran, rather than being sorted into something less meaningful.
