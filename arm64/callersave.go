@@ -2,6 +2,7 @@ package arm64
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -124,6 +125,20 @@ func insertCallerSaves(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, a
 		slotOf[rep] = alloc.spillBytes
 		alloc.spillBytes += sz
 		return slotOf[rep]
+	}
+
+	if want := os.Getenv("CG12_CALLERSAVE_STATS"); want != "" && want == f.Name {
+		// Every entry here is a store before a call and a load after it. This is the
+		// bill for colouring a call-crossing value into a caller-saved register: it is
+		// paid at each crossing, where a callee-saved register would have cost one
+		// save and restore for the whole function.
+		pairs, sites := 0, 0
+		for _, sv := range saves {
+			sites++
+			pairs += len(sv)
+		}
+		fmt.Fprintf(os.Stderr, "callersave %s: callsWithSaves=%d savedValues=%d (=> %d stores + %d loads)\n",
+			f.Name, sites, pairs, pairs, pairs)
 	}
 
 	// Pass 2: wrap each call sequence -- saves before the first OArg of its contiguous

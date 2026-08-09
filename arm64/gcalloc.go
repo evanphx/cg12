@@ -363,29 +363,14 @@ func (g *colorGraph) assign() (*allocation, error) {
 		cost float64
 	}
 	var cands []crossCand
-	var exRemoved, exNotNode, exFloat, exNoCross, exLowCost int
+	var exRemoved, exFloat, exNoCross, exLowCost int
 	for t := range f.Temps {
 		if removed[t] || !g.node[t] || f.Temps[t].Cls.IsFloat() {
 			switch {
 			case removed[t]:
-				exRemoved++
-			case !g.node[t]:
-				exNotNode++
+				exRemoved++ // also covers !g.node: removed starts as its negation
 			default:
 				exFloat++
-			}
-			if os.Getenv("CG12_PREASSIGN_STATS") == f.Name && g.cost[t] > 5 {
-				n := f.Temps[t].Name
-				if n == "" {
-					n = fmt.Sprintf("t%d", t)
-				}
-				why := "float"
-				if removed[t] {
-					why = "removed"
-				} else if !g.node[t] {
-					why = "not a node"
-				}
-				fmt.Fprintf(os.Stderr, "  EXCLUDED t%d %-16s cost=%.1f crossFreq=%.1f reason=%s fixed=%v reg=%d\n", t, n, g.cost[t], g.crossFreq[t], why, f.Temps[t].Fixed, f.Temps[t].Reg)
 			}
 			continue
 		}
@@ -400,8 +385,8 @@ func (g *colorGraph) assign() (*allocation, error) {
 		}
 	}
 	if os.Getenv("CG12_PREASSIGN_STATS") == f.Name {
-		fmt.Fprintf(os.Stderr, "preassign %s excluded: removed=%d notNode=%d float=%d noCallCross=%d lowCost=%d\n",
-			f.Name, exRemoved, exNotNode, exFloat, exNoCross, exLowCost)
+		fmt.Fprintf(os.Stderr, "preassign %s excluded: alreadyPlaced=%d float=%d noCallCross=%d lowCost=%d\n",
+			f.Name, exRemoved, exFloat, exNoCross, exLowCost)
 	}
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].cost > cands[j].cost })
 	preassignDebug := os.Getenv("CG12_PREASSIGN_STATS") == f.Name
@@ -759,6 +744,25 @@ func (g *colorGraph) reportStats(alloc *allocation) {
 			name string
 			span int
 			cost float64
+			refs int
+		}
+		// Static reference count beside the frequency-weighted cost. When the two
+		// disagree badly -- a value referenced in a hundred places whose cost rounds
+		// to nothing -- the spill decision was made on a frequency estimate that does
+		// not believe any of those places execute.
+		refCount := make([]int, len(f.Temps))
+		for _, b := range f.Blocks {
+			for k := range b.Instrs {
+				in := &b.Instrs[k]
+				for _, u := range in.Uses() {
+					if u.Kind == ir.RefTemp {
+						refCount[u.ID]++
+					}
+				}
+				for _, d := range instrDefs(in) {
+					refCount[d]++
+				}
+			}
 		}
 		var rows []row
 		for t := range f.Temps {
@@ -768,7 +772,7 @@ func (g *colorGraph) reportStats(alloc *allocation) {
 			if _, remat := g.remat[t]; remat {
 				continue
 			}
-			rows = append(rows, row{t, f.Temps[t].Name, span[t], g.cost[t]})
+			rows = append(rows, row{t, f.Temps[t].Name, span[t], g.cost[t], refCount[t]})
 		}
 		sort.SliceStable(rows, func(i, j int) bool { return rows[i].span > rows[j].span })
 		for _, r := range rows {
@@ -776,7 +780,7 @@ func (g *colorGraph) reportStats(alloc *allocation) {
 			if name == "" {
 				name = "(unnamed)"
 			}
-			fmt.Fprintf(os.Stderr, "spill %s t%d %s span=%d/%d cost=%.1f\n", f.Name, r.id, name, r.span, blocks, r.cost)
+			fmt.Fprintf(os.Stderr, "spill %s t%d %s span=%d/%d cost=%.2f refs=%d\n", f.Name, r.id, name, r.span, blocks, r.cost, r.refs)
 		}
 	}
 	fmt.Fprintf(os.Stderr,
