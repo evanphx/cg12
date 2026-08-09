@@ -135,6 +135,26 @@ func TestRecordRestoresTheRecorderAndRefusesToNest(t *testing.T) {
 // inlineOnceBudget/sites is floored at inlineSmallBudget, and the floor is the
 // same number as the numerator. This test is what lets the report say so, and it
 // fails the moment someone separates the constants and re-arms the dependency.
+//
+// It has since done exactly that, so the price of the constraint is now known
+// rather than hypothetical. Raising inlineOnceBudget to 96 and leaving the floor
+// at 24 -- which is what the comment on those constants already describes, a lone
+// site inlining a large body cheaply because the original then dies -- was
+// measured at:
+//
+//	object size   sqlite -3.8%, lua -7.8%, quickjs +0.5%
+//	runtime       sqlite -0.8%, lua +0.3%   (both inside the benchmark's noise)
+//	pressure      unchanged (sqlite3VdbeExec holds at 22 spills)
+//	compile       +2.5% on sqlite
+//
+// So there is a real code-size win behind this test, and it is not available
+// until the dependency it names is armed. memo.Dep carries {Name, Input,
+// Recursive} and no site count, and InlineDeps.SiteCounts is recorded but feeds
+// reporting rather than the key -- so with the constants separated, a cached body
+// could be reused after the count that produced it had changed. Taking the win
+// means putting the count into Dep, serialising it (a memo format version), and
+// validating it on load. That is the work; this test is the reason to do it
+// first rather than after.
 func TestCallSiteCountCannotChangeAnInlineDecisionToday(t *testing.T) {
 	require.Equal(t, inlineOnceBudget, inlineSmallBudget,
 		"the site count is a live input again; the per-function key now needs it")
