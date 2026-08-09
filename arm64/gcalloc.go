@@ -389,8 +389,30 @@ func (g *colorGraph) assign() (*allocation, error) {
 			f.Name, exRemoved, exFloat, exNoCross, exLowCost)
 	}
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].cost > cands[j].cost })
+	// Static reference count alongside the frequency-weighted cost, because the
+	// two disagreeing is the interesting case: in sqlite3VdbeExec a value
+	// referenced twice scores 9.00 and takes a callee-saved register while one
+	// referenced 191 times scores 2.74 and spills. That is the frequency estimate
+	// speaking, and whether it is right is a question this makes askable rather
+	// than one it answers -- adding a static term to the cost was measured and
+	// made allocation worse (29 spills became 48).
 	preassignDebug := os.Getenv("CG12_PREASSIGN_STATS") == f.Name
+	var preRefs []int
 	if preassignDebug {
+		preRefs = make([]int, len(f.Temps))
+		for _, b := range f.Blocks {
+			for k := range b.Instrs {
+				in := &b.Instrs[k]
+				for _, u := range in.Uses() {
+					if u.Kind == ir.RefTemp {
+						preRefs[u.ID]++
+					}
+				}
+				for _, d := range instrDefs(in) {
+					preRefs[d]++
+				}
+			}
+		}
 		fmt.Fprintf(os.Stderr, "preassign %s: %d call-crossing candidates\n", f.Name, len(cands))
 	}
 	for ci, c := range cands {
@@ -410,8 +432,8 @@ func (g *colorGraph) assign() (*allocation, error) {
 			if pick != Reg(ir.NoReg) {
 				got = fmt.Sprintf("x%d", int(pick))
 			}
-			fmt.Fprintf(os.Stderr, "  #%d %-16s cost=%.1f crossFreq=%.1f -> %s\n",
-				ci, name, c.cost, g.crossFreq[c.t], got)
+			fmt.Fprintf(os.Stderr, "  #%d %-16s cost=%.2f refs=%d crossFreq=%.1f -> %s\n",
+				ci, name, c.cost, preRefs[c.t], g.crossFreq[c.t], got)
 		}
 		if pick == Reg(ir.NoReg) {
 			continue // no callee-saved register free; leave this one to the colourer
