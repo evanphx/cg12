@@ -604,6 +604,7 @@ func findSplitCalleeToInline(caller *ir.Func, cg *callGraph, scc *sccInfo) (*ir.
 // exposed by a previous inline (the callee's own calls) be inlined in turn; the
 // budget bounds code-size growth (e.g. a diamond call graph inlined repeatedly).
 func inlineInto(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.Func]int, base map[*ir.Func]int) bool {
+	reportInlineDecisions(caller, cg, scc, sites, nil)
 	if inlineCallerOverBudget(caller) {
 		return false
 	}
@@ -684,16 +685,10 @@ func findInlinable(caller *ir.Func, cg *callGraph, scc *sccInfo, sites map[*ir.F
 				continue
 			}
 			callee := directCallee(caller, in, cg.byName)
-			if callee == nil || scc.recursive[callee] || !canInlineCall(caller, in, callee) {
-				continue // indirect/external, or part of a recursion cycle
+			if callee != nil && scc.recursive[callee] {
+				continue // part of a recursion cycle
 			}
-			if !accept(callee) {
-				continue // this pass (large-forced vs budgeted) is not handling this callee
-			}
-			if len(in.Args)-1 != len(callee.Params) {
-				continue
-			}
-			if worthInlining(callee, sites[callee]) {
+			if inlineDecision(caller, in, callee, sites[callee], accept) == inlineAccept {
 				return b, i, callee
 			}
 		}
@@ -720,6 +715,8 @@ func directCallee(caller *ir.Func, call *ir.Instr, byName map[string]*ir.Func) *
 	return callee
 }
 
+// canInlineCall is the call-site half of the policy, kept for the callers that
+// ask only that question. inlinedecision.go holds the whole of it.
 func canInlineCall(caller *ir.Func, call *ir.Instr, callee *ir.Func) bool {
 	if isFrameScopedRuntimeCall(caller, call) {
 		return false
@@ -737,42 +734,7 @@ func canInlineCall(caller *ir.Func, call *ir.Instr, callee *ir.Func) bool {
 // findInlinable. Whether an inlinable callee is worth inlining is a separate cost
 // decision (worthInlining).
 func inlinableStructure(callee *ir.Func) bool {
-	if callee.Start == nil || hasSecondaryEntry(callee) || callee.Variadic {
-		return false
-	}
-	// An aggregate-returning callee is inlinable: spliceCall materializes the
-	// copy-at-return the ABI would otherwise emit (see aggCopy). CG12_NO_AGGINLINE
-	// disables it for bisection.
-	if callee.RetAgg != nil && os.Getenv("CG12_NO_AGGINLINE") != "" {
-		return false
-	}
-	for _, p := range callee.Params {
-		if p.Agg != nil {
-			return false // by-value aggregate parameter (Stage B)
-		}
-	}
-	hasRet := false
-	for _, b := range callee.Blocks {
-		// A computed goto (JmpBr) or a taken label address (OBlockAddr) makes the
-		// body's control flow depend on block addresses; splicing it into a caller,
-		// where those addresses move, is unsound, so leave it a call -- as gcc does
-		// for a function containing an address-of-label.
-		if b.Jmp.Kind == ir.JmpBr {
-			return false
-		}
-		for k := range b.Instrs {
-			if b.Instrs[k].Op == ir.OBlockAddr {
-				return false
-			}
-			if isFrameScopedRuntimeCall(callee, &b.Instrs[k]) || isCallerFrameIntrinsic(&b.Instrs[k]) {
-				return false
-			}
-		}
-		if b.Jmp.Kind == ir.JmpRet {
-			hasRet = true
-		}
-	}
-	return hasRet // needs a return to splice the continuation onto
+	return inlineStructureReason(callee) == inlineAccept
 }
 
 func inlinable(callee *ir.Func) bool {
@@ -823,27 +785,7 @@ func isFrameScopedRuntimeCall(function *ir.Func, instruction *ir.Instr) bool {
 // inlines a large body cheaply because the original is then dead, while a body copied
 // into many sites must be small to be worth the duplication.
 func worthInlining(callee *ir.Func, sites int) bool {
-	// noinline/cold is honored before everything else, so a cold slow-path helper is
-	// never inlined -- it stays a call, out of the hot inlined body (gcc's hot/cold
-	// split). This wins over ForceInline: the two attributes are mutually exclusive,
-	// but if both were somehow set, "do not inline" is the safe resolution.
-	if callee.NoInline {
-		return false
-	}
-	if !inlinableStructure(callee) {
-		return false
-	}
-	if callee.ForceInline || callee.CostInline {
-		return true // mandatory (always_inline) or cost-model-chosen: size budget bypassed
-	}
-	if sites < 1 {
-		sites = 1
-	}
-	budget := inlineOnceBudget / sites
-	if budget < inlineSmallBudget {
-		budget = inlineSmallBudget
-	}
-	return funcSize(callee) <= budget
+	return calleeInlineReason(callee, sites) == inlineAccept
 }
 
 // spliceCall replaces the call at caller block b, instruction idx, with a clone
