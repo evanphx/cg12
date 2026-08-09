@@ -357,3 +357,85 @@ func TestInlinePolicyReasonsAreDistinct(t *testing.T) {
 		seen[r] = true
 	}
 }
+
+// What the gates cost together, measured on an interpreter.
+//
+// QuickJS's JS_CallInternal is the hot function of the workload in
+// cc/testdata/perf/quickjs_bench.c, and cg12 compiles that workload to code 5.3x
+// slower than clang's -- against 1.31x on SQLite and 1.24x on Lua, so it is not a
+// uniformly slower compiler, it is one particular shape it handles badly.
+// CG12_INLINE_WHY on that function says why. Of its 3362 call sites:
+//
+//	1526  callee is in a recursion cycle
+//	1276  callee takes a by-value aggregate parameter
+//	 472  INLINE
+//	  51  callee is not a direct call to a module function
+//	  23  callee is larger than its size budget
+//	  14  callee is marked noinline
+//
+// and above all of them, the caller-level verdict: 8198 instructions against
+// inlineCallerInstrBudget's 2000, so only the tiny-leaf exemption applies at all
+// and it stops after inlineTinyLeafBudget. The callees being refused are the
+// engine's primitives -- JS_DupValue at 437 sites, JS_FreeValue at 406,
+// set_value at 294, JS_IsException at 283 -- each a refcount bump or a tag test
+// that gcc turns into two instructions.
+//
+// Three gates therefore have to move together, and this test is here so that
+// lifting any one of them alone is not mistaken for a fix: a tiny leaf that takes
+// an aggregate parameter is refused for the aggregate, so raising the caller
+// budget changes nothing about it, and the reverse holds too.
+//
+// The aggregate gate looks the most tractable of the three. Splicing binds a
+// parameter straight to its argument (tempMap[p.ID] = args[k] in spliceCall),
+// which for an aggregate would hand the callee the caller's own object to write
+// to -- the same value-semantics rule that cc.argCopy exists for. The pieces to
+// do it properly are already here: ir has OBlit, Func.AllocAggregate reserves the
+// slot, and ExpandSmallCopies runs before the second mem2reg, so a 16-byte copy
+// would be expanded and promoted back out of memory rather than left behind.
+func TestInlinePolicyGatesCompoundOnAnInterpreterShapedCaller(t *testing.T) {
+	// aggLeaf is JS_IsException's shape: tiny, a leaf, and taking its argument as
+	// a by-value aggregate.
+	aggLeaf := func(m *ir.Module, n string) *ir.Func {
+		f := m.NewFunc(n, ir.ClsW)
+		p := f.Param("v", ir.ClsL)
+		f.Temp(p).Agg = &ir.AggType{Name: "JSValue", Size: 16, Align: 8, Opaque: true}
+		e := f.Entry()
+		e.Ret(e.Load(ir.ClsW, p))
+		return f
+	}
+
+	overBudgetCaller := func(m *ir.Module, calleeName string) (*ir.Func, *ir.Instr) {
+		f := m.NewFunc("interp", ir.ClsW)
+		p := f.Param("p", ir.ClsL)
+		e := f.Entry()
+		v := p
+		for i := 0; i < inlineCallerInstrBudget+16; i++ {
+			v = e.Add(ir.ClsL, v, f.Long(1))
+		}
+		e.Ret(e.Call(ir.ClsW, f.Sym(calleeName, 0), v))
+		for i := range e.Instrs {
+			if e.Instrs[i].Op == ir.OCall {
+				return f, &e.Instrs[i]
+			}
+		}
+		panic("no call emitted")
+	}
+
+	m := ir.NewModule()
+	callee := aggLeaf(m, "JS_IsException")
+	caller, call := overBudgetCaller(m, callee.Name)
+
+	require.LessOrEqual(t, funcSize(callee), inlineTinyLeafSize,
+		"the premise: this callee is small enough for the over-budget exemption")
+	require.True(t, inlineCallerOverBudget(caller),
+		"the premise: this caller is past the ceiling, like JS_CallInternal")
+
+	// The aggregate parameter is the reason, not the size and not the budget. A
+	// reader who raised inlineCallerInstrBudget on the strength of the caller
+	// verdict would see no change at all here.
+	require.Equal(t, reasonAggParam, decide(t, caller, call, callee, 283),
+		"the aggregate parameter decides it, whatever the caller's size")
+
+	Inline(m)
+	require.Equal(t, 1, callsIn(caller), "so the call stays")
+}
