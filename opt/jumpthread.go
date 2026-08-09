@@ -35,9 +35,34 @@ const jtMaxBlockLen = 8
 // pipeline, so the clean fixpoint that contains the pass always terminates even
 // if reconstruction were to keep exposing new candidates.
 type jtState struct {
-	origInstrs  int // function size when first seen
-	grownInstrs int // net instructions added by threading so far
+	origInstrs  int // function size when first seen (see jtSize)
+	origBlocks  int // block count when first seen
+	grownInstrs int // net size added by threading so far
 	threads     int // transforms applied so far
+}
+
+// jtSize measures a function the way threading grows it, which funcSize does not.
+//
+// funcSize counts b.Instrs, and phis live in a separate slice, so it cannot see
+// the thing this pass actually adds: threading a block into one predecessor
+// leaves the join needing a phi entry for every value the block defined. The
+// growth budget was therefore reading zero on every round while the function ran
+// away -- Lua's luaV_execute reached 8.3x its instruction count and 27x its
+// emitted size with the cap never once firing.
+//
+// A phi is weighted by its argument count because that is what it costs: leaving
+// SSA turns one phi into one copy per predecessor, so a phi in a block with two
+// hundred predecessors is two hundred instructions, not one. That weighting is
+// the whole reason a dispatch mesh is where this pass gets expensive.
+func jtSize(f *ir.Func) int {
+	n := 0
+	for _, b := range f.Blocks {
+		n += len(b.Instrs)
+		for _, p := range b.Phis {
+			n += len(p.Args)
+		}
+	}
+	return n
 }
 
 // JumpThreadPass returns the jump-threading pass. Its per-function budget state
@@ -65,14 +90,22 @@ type threadCand struct {
 func jumpThread(f *ir.Func, state map[*ir.Func]*jtState) bool {
 	st := state[f]
 	if st == nil {
-		st = &jtState{origInstrs: funcSize(f)}
+		st = &jtState{origInstrs: jtSize(f), origBlocks: len(f.Blocks)}
 		state[f] = st
 	}
+	// From the block count when the function was FIRST seen, not the current one.
+	// Threading adds blocks, so sizing the cap on len(f.Blocks) let each transform
+	// raise the ceiling on the next: on luaV_execute the cap climbed 237 -> 281 as
+	// the pass consumed it.
 	threadCap := 16
-	if c := len(f.Blocks) / 4; c > threadCap {
+	if c := st.origBlocks / 4; c > threadCap {
 		threadCap = c
 	}
 	growthCap := st.origInstrs / 5
+	if os.Getenv("CG12_JT_STATS") == f.Name {
+		fmt.Fprintf(os.Stderr, "jt %s: enter blocks=%d size=%d origInstrs=%d threads=%d/%d grown=%d/%d\n",
+			f.Name, len(f.Blocks), jtSize(f), st.origInstrs, st.threads, threadCap, st.grownInstrs, growthCap)
+	}
 	check := os.Getenv("CG12_JT_CHECK") != ""
 
 	changed := false
@@ -91,14 +124,14 @@ func jumpThread(f *ir.Func, state map[*ir.Func]*jtState) bool {
 		if !ok {
 			break
 		}
-		before := funcSize(f)
+		before := jtSize(f)
 		threadOne(f, cand)
 		// Threading can cut the last edge into a region, orphaning blocks whose
 		// edges into surviving phi blocks would otherwise leave the phi predecessor
 		// sets inconsistent until the following SimplifyCFG runs. Drop them now so
 		// every transform leaves well-formed SSA.
 		pruneUnreachable(f)
-		st.grownInstrs += funcSize(f) - before
+		st.grownInstrs += jtSize(f) - before
 		st.threads++
 		changed = true
 		if check {
