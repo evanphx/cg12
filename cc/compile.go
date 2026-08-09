@@ -104,6 +104,31 @@ func (g *gen) addrOf(v lval) ir.Ref {
 	return v.addr
 }
 
+// clearGCRefs unmarks every temp this function's body marked as a
+// garbage-collector root. C has no collector, and the marks are not this front
+// end's: ir.Block.Load flags every ClsP load as a GC reference, which is what goc
+// needs (it marks a load from a managed slot and relies on that) and is simply
+// wrong here.
+//
+// It is not free to leave them. The register allocator pins a GC reference live
+// across a call into a fixed stack slot for its whole life, so the collector can
+// find it at a known frame offset -- and with no collector that is a value
+// evicted from a register for nobody. In SQLite's sqlite3VdbeExec it was 67
+// values, including the database handle itself, which carried the largest spill
+// weight in the function.
+//
+// opt/mem2reg.go states the intended rule already: "a ClsP phi minted ...
+// managed (a frame address, a C pointer) must stay unmarked". This is the front
+// end saying so for its own output rather than hoping nothing marked it.
+func clearGCRefs(f *ir.Func) {
+	for _, t := range f.Temps {
+		if t != nil {
+			t.GCRef = false
+			t.GCType = 0
+		}
+	}
+}
+
 // headerCompat makes the host's glibc system headers parseable by
 // modernc.org/cc/v4, which does not model two GCC extensions glibc leans on:
 // the AArch64 SIMD/SVE vector math declarations (gated on __GNUC__ >= 9) and the
@@ -749,6 +774,8 @@ func (g *gen) genFunc(fd *moderncc.FunctionDefinition) {
 	// the optimiser has had its chance to act on it. Variable-length arrays stay
 	// where they are: their size is a runtime value.
 	lowerpass.HoistAllocas(g.fn)
+
+	clearGCRefs(g.fn)
 
 	// Guard: every block must be terminated. An unterminated block is a codegen
 	// bug; catching it here fails cleanly instead of handing malformed IR to the
