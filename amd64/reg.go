@@ -275,3 +275,116 @@ var floatAllocOrderCalleeFirst = floatAllocOrder
 // argGP / argFP are the System V argument registers in order.
 var argGP = []Reg{RDI, RSI, RDX, RCX, R8, R9}
 var argFP = []Reg{XMM(0), XMM(1), XMM(2), XMM(3), XMM(4), XMM(5), XMM(6), XMM(7)}
+
+// regProfile is the register policy one function is compiled under: which
+// registers the emitter may borrow as scratch, which the allocator may hand out,
+// and whether a call preserves anything.
+//
+// There are exactly two profiles. A plain System V function keeps the historical
+// one -- R10/R11 and XMM14/XMM15 as scratch, the System V callee-saved set
+// honoured -- so C code is compiled byte-for-byte as it was. A function that
+// reserves the Go runtime's registers (reservesRuntimeRegs: a managed frame or the
+// ABIInternal convention) takes the Go profile instead:
+//
+//   - R14 holds g and X15 holds zero, so neither is allocatable or scratch.
+//   - The scratch pair moves to R12/R13 (scratchGPFor) and XMM13/XMM14
+//     (scratchFPFor), because R10/R11 are ABIInternal argument registers and
+//     XMM15 is the zero register.
+//   - Nothing survives a call. Go's ABIs preserve no general-purpose or vector
+//     register, and a managed frame can enter the runtime's stack-growth path,
+//     which follows that contract even when the call itself is System V; so a
+//     value live across a call is kept in a stack slot the stack maps describe,
+//     never in a register.
+//   - Consequently there is nothing for the prologue to save: a managed
+//     function's callers are Go code, ABI0 assembly, or the runtime's own
+//     trampolines, none of which keep a value in a register across a call.
+type regProfile struct {
+	gp0, gp1    Reg
+	fp0, fp1    Reg
+	intOrder    []Reg
+	floatOrder  []Reg
+	goRuntime   bool
+	preservesCS bool
+}
+
+var platformProfile = regProfile{
+	gp0:         gpScratch0,
+	gp1:         gpScratch1,
+	fp0:         fpScratch0,
+	fp1:         fpScratch1,
+	intOrder:    intAllocOrder,
+	floatOrder:  floatAllocOrder,
+	preservesCS: true,
+}
+
+// goRuntimeIntAllocOrder is the general-purpose allocation order of a function
+// under the Go profile. RAX/RCX/RDX stay reserved for the fixed-register
+// instructions (reservedForFixedOps), R12/R13 are scratch and R14 is g; R10 and
+// R11 come back, since the scratch pair no longer needs them.
+var goRuntimeIntAllocOrder = []Reg{RSI, RDI, R8, R9, R10, R11, RBX, R15}
+
+// goRuntimeFloatAllocOrder drops XMM13/XMM14 (scratch) and XMM15 (zero).
+var goRuntimeFloatAllocOrder = []Reg{
+	XMM(0), XMM(1), XMM(2), XMM(3), XMM(4), XMM(5), XMM(6),
+	XMM(7), XMM(8), XMM(9), XMM(10), XMM(11), XMM(12),
+}
+
+var goProfile = regProfile{
+	gp0:        R12,
+	gp1:        R13,
+	fp0:        XMM(13),
+	fp1:        XMM(14),
+	intOrder:   goRuntimeIntAllocOrder,
+	floatOrder: goRuntimeFloatAllocOrder,
+	goRuntime:  true,
+}
+
+// profileOf returns the register policy for f. A nil function, which only test
+// helpers produce, gets the System V profile.
+func profileOf(f *ir.Func) *regProfile {
+	if f != nil && reservesRuntimeRegs(f) {
+		return &goProfile
+	}
+	return &platformProfile
+}
+
+// clobberedByCall reports whether register r holds a value across a call made
+// by f.
+func (p *regProfile) clobberedByCall(r Reg) bool {
+	if !p.preservesCS {
+		return true
+	}
+	return callerClobbered(r)
+}
+
+func (m *mc) gs0() Reg {
+	return profileOf(m.f).gp0
+}
+
+func (m *mc) gs1() Reg {
+	return profileOf(m.f).gp1
+}
+
+func (m *mc) fs0() Reg {
+	return profileOf(m.f).fp0
+}
+
+func (m *mc) fs1() Reg {
+	return profileOf(m.f).fp1
+}
+
+func (s *xsel) gs0() Reg {
+	return profileOf(s.f).gp0
+}
+
+func (s *xsel) gs1() Reg {
+	return profileOf(s.f).gp1
+}
+
+func (s *xsel) fs0() Reg {
+	return profileOf(s.f).fp0
+}
+
+func (s *xsel) fs1() Reg {
+	return profileOf(s.f).fp1
+}

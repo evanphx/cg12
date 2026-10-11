@@ -19,6 +19,11 @@ type allocation struct {
 	posInstr  []*ir.Instr         // numbering position -> instruction (nil at block ends)
 	safeRoots map[*ir.Instr][]int // safepoint (call or OSafepoint) -> live GC-ref temps
 
+	// undefinedAllocs names, per safepoint, the pointer-bearing stack allocations
+	// the program has not written since the allocation was (re-)entered; see
+	// analysis.UndefinedAllocationsAtSafepoints. Managed frames only.
+	undefinedAllocs map[*ir.Instr]map[int]bool
+
 	// remat maps a spilled-but-rematerialisable temp to the rule for recomputing it
 	// at each use (it has no spill slot).
 	remat map[int]rematRule
@@ -98,7 +103,14 @@ func regAlloc(f *ir.Func) (*allocation, error) {
 	num := numberInstrs(cfg)
 	alloc.intervals = buildIntervals(f, cfg, live, num)
 	alloc.posInstr = num.posInstr
-	alloc.safeRoots = computeSafepointRoots(f, cfg, live)
+	if f.UsesManagedFrame() {
+		// A managed frame reports allocations as well as temporaries, and has to
+		// know which allocations still hold a previous incarnation's words.
+		alloc.safeRoots = analysis.SafepointRoots(f, cfg, live)
+		alloc.undefinedAllocs = analysis.UndefinedAllocationsAtSafepoints(f, cfg)
+	} else {
+		alloc.safeRoots = computeSafepointRoots(f, cfg, live)
+	}
 	return alloc, nil
 }
 

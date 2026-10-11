@@ -203,8 +203,12 @@ func (g *colorGraph) build(cfg *analysis.CFG, live *analysis.Liveness) {
 				}
 			}
 			if in.Op == ir.OCall || in.Op == ir.OSafepoint {
+				// Under the Go profile nothing survives a call in a register, and a
+				// managed frame's stack maps can only describe slots, so every value
+				// live across a call lives in its slot for its whole life.
+				goRuntime := profileOf(f).goRuntime
 				for t := range liveSet.All() {
-					if f.Temps[t].GCRef {
+					if f.Temps[t].GCRef || goRuntime {
 						g.gc[t] = true
 					}
 				}
@@ -352,7 +356,7 @@ func (g *colorGraph) assign() (*allocation, error) {
 		// the value tries callee-saved registers first; otherwise it takes caller-saved
 		// freely (cheap when the crossed calls are cold, the interpreter's case).
 		crossing := g.crossFreq[t] > 0
-		preferCallee := crossing && g.crossFreq[t]*2 >= 2.0
+		preferCallee := crossing && g.crossFreq[t]*2 >= 2.0 && profileOf(f).preservesCS
 		pool := g.pool(t)
 		if preferCallee {
 			pool = intAllocOrderCalleeFirst
@@ -409,10 +413,11 @@ func (g *colorGraph) assign() (*allocation, error) {
 
 // pool is the register allocation order for temp t's class.
 func (g *colorGraph) pool(t int) []Reg {
+	profile := profileOf(g.f)
 	if g.f.Temps[t].Cls.IsFloat() {
-		return floatAllocOrder
+		return profile.floatOrder
 	}
-	return intAllocOrder
+	return profile.intOrder
 }
 
 // spillRatio ranks spill candidates: spill cost per interfering neighbour freed. A

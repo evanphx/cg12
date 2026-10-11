@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 
+	"github.com/evanphx/cg12/internal/gometa"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
 )
@@ -12,10 +13,30 @@ import (
 // addData appends a data definition to the object, emitting an ABS64 .rela.data
 // relocation for any pointer-to-symbol item.
 func addData(o *obj.Object, d *ir.Data) error {
+	return addDataWithBSSAndFixups(o, d, true, nil)
+}
+
+// relativeDataFixup is a symbol difference a Go datum stores (the runtime's
+// type and name offsets), resolved once every symbol in the object is placed.
+type relativeDataFixup struct {
+	section    obj.SecKind
+	offset     uint64
+	target     string
+	relativeTo string
+	addend     int64
+	size       int
+}
+
+// addDataWithBSSAndFixups appends one data definition. allowBSS lets an
+// all-zero datum go to .bss; a Go module keeps its globals in one contiguous
+// data range instead, because the runtime's moduledata and GC program describe
+// that range. fixups collects symbol differences to resolve after layout; nil
+// resolves them immediately, which requires both symbols to be placed already.
+func addDataWithBSSAndFixups(o *obj.Object, d *ir.Data, allowBSS bool, fixups *[]relativeDataFixup) error {
 	// Nothing but zero fill: it needs no bytes in the file, only room at run time.
 	// .bss follows .data in memory and .tbss follows .tdata in each thread's block,
 	// so the symbol's value counts from the start of its own zero-filled region.
-	if allZero(d) {
+	if allowBSS && allZero(d) {
 		size, sec, at := zeroSize(d), obj.SecBss, &o.BssSize
 		align := &o.BssAlign
 		if d.Linkage.Thread {
@@ -73,6 +94,24 @@ func addData(o *obj.Object, d *ir.Data) error {
 			*buf = append(*buf, make([]byte, it.Zero)...)
 		case it.Str != "":
 			*buf = append(*buf, []byte(it.Str)...)
+		case it.Sym != "" && it.RelativeTo != "":
+			if fixups == nil {
+				value, err := relativeDataValue(o, sanitize(it.Sym), sanitize(it.RelativeTo), it.Off)
+				if err != nil {
+					return fmt.Errorf("amd64: %w", err)
+				}
+				*buf = appendInt(*buf, value, it.Sub.Size())
+				continue
+			}
+			*fixups = append(*fixups, relativeDataFixup{
+				section:    sec,
+				offset:     uint64(len(*buf)),
+				target:     sanitize(it.Sym),
+				relativeTo: sanitize(it.RelativeTo),
+				addend:     it.Off,
+				size:       it.Sub.Size(),
+			})
+			*buf = append(*buf, make([]byte, it.Sub.Size())...)
 		case it.Sym != "":
 			if sec == obj.SecTdata {
 				return fmt.Errorf("amd64: thread-local %q cannot hold the address of %q: every thread's copy would need its own relocation", d.Name, it.Sym)
@@ -88,11 +127,17 @@ func addData(o *obj.Object, d *ir.Data) error {
 			if sec == obj.SecRelro {
 				list = &o.RelroRelocs
 			}
+			relocationType := uint32(obj.R_X86_64_64)
+			relocationSize := 8
+			if it.Sub.Size() == 4 {
+				relocationType = obj.R_X86_64_32
+				relocationSize = 4
+			}
 			*list = append(*list, obj.Reloc{
 				Offset: uint64(len(*buf)), Sym: sanitize(it.Sym),
-				Type: obj.R_X86_64_64, Addend: it.Off,
+				Type: relocationType, Addend: it.Off,
 			})
-			*buf = append(*buf, make([]byte, 8)...)
+			*buf = append(*buf, make([]byte, relocationSize)...)
 		case len(it.Flts) > 0:
 			for _, v := range it.Flts {
 				*buf = appendInt(*buf, floatBitsOf(it.Sub, v), it.Sub.Size())
@@ -109,6 +154,57 @@ func addData(o *obj.Object, d *ir.Data) error {
 		TLS: sec == obj.SecTdata,
 	})
 	return nil
+}
+
+// relativeDataValue is target - relativeTo + addend for two symbols already
+// placed in the same section of the object.
+func relativeDataValue(o *obj.Object, target, relativeTo string, addend int64) (int64, error) {
+	targetSymbol, targetFound := gometa.ObjectSymbol(o, target)
+	if !targetFound {
+		return 0, fmt.Errorf("relative data reference %q is undefined", target)
+	}
+	baseSymbol, baseFound := gometa.ObjectSymbol(o, relativeTo)
+	if !baseFound {
+		return 0, fmt.Errorf("relative data base %q is undefined", relativeTo)
+	}
+	if targetSymbol.Section != baseSymbol.Section {
+		return 0, fmt.Errorf("relative data reference %q and base %q are in different sections", target, relativeTo)
+	}
+	return int64(targetSymbol.Value) - int64(baseSymbol.Value) + addend, nil
+}
+
+// resolveRelativeDataFixups writes every deferred symbol difference.
+func resolveRelativeDataFixups(o *obj.Object, fixups []relativeDataFixup) error {
+	for _, fixup := range fixups {
+		value, err := relativeDataValue(o, fixup.target, fixup.relativeTo, fixup.addend)
+		if err != nil {
+			return err
+		}
+		buffer, ok := objectSectionData(o, fixup.section)
+		if !ok {
+			return fmt.Errorf("unsupported destination section %d", fixup.section)
+		}
+		if fixup.offset+uint64(fixup.size) > uint64(len(buffer)) {
+			return fmt.Errorf("destination for %q lies outside section", fixup.target)
+		}
+		copy(buffer[fixup.offset:], appendInt(nil, value, fixup.size))
+	}
+	return nil
+}
+
+func objectSectionData(o *obj.Object, section obj.SecKind) ([]byte, bool) {
+	switch section {
+	case obj.SecData:
+		return o.Data, true
+	case obj.SecRodata:
+		return o.Rodata, true
+	case obj.SecRelro:
+		return o.Relro, true
+	case obj.SecTdata:
+		return o.Tdata, true
+	default:
+		return nil, false
+	}
 }
 
 func appendInt(b []byte, v int64, size int) []byte {

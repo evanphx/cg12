@@ -57,10 +57,10 @@ func (b *mcXasm) blockAddrLea(dst Reg, blk *ir.Block) {
 }
 func (b *mcXasm) jmpTable(idx Reg, blk *ir.Block, targets []*ir.Block) {
 	tbl := blk.Name + ".tbl"
-	b.m.prog.LeaLabel(true, gpScratch0.mreg(), tbl) // lea R10, [rip+tbl]
-	b.m.emit(x64.MovsxdLoad(gpScratch1.mreg(), x64.Mem{Base: gpScratch0.mreg(), Index: idx.mreg(), Scale: 4, HasIndex: true}))
-	b.m.emit(x64.AddReg(true, gpScratch0.mreg(), gpScratch1.mreg())) // add R10, R11
-	b.m.emit(x64.JmpReg(gpScratch0.mreg()))                          // jmp *R10
+	b.m.prog.LeaLabel(true, b.m.gs0().mreg(), tbl) // lea R10, [rip+tbl]
+	b.m.emit(x64.MovsxdLoad(b.m.gs1().mreg(), x64.Mem{Base: b.m.gs0().mreg(), Index: idx.mreg(), Scale: 4, HasIndex: true}))
+	b.m.emit(x64.AddReg(true, b.m.gs0().mreg(), b.m.gs1().mreg())) // add R10, R11
+	b.m.emit(x64.JmpReg(b.m.gs0().mreg()))                         // jmp *R10
 	b.m.prog.Label(tbl)
 	for _, t := range targets {
 		b.m.prog.DataWord(t.Name, tbl) // .long t - tbl

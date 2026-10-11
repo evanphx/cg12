@@ -47,7 +47,7 @@ type GCContext struct {
 func (c *GCContext) Emit(b []byte) { c.mc.emit(b) }
 
 // Scratch returns two caller-clobberable registers (r10/r11) free at a safepoint.
-func (c *GCContext) Scratch() (Reg, Reg) { return gpScratch0, gpScratch1 }
+func (c *GCContext) Scratch() (Reg, Reg) { return c.mc.gs0(), c.mc.gs1() }
 
 // Sym / TLSym materialize a (thread-local) symbol address into reg.
 func (c *GCContext) Sym(reg Reg, name string)   { c.mc.materializeSym(reg, sanitize(name), 0, false) }
@@ -99,7 +99,7 @@ type PrologueContext struct {
 
 func (c *PrologueContext) FrameSize() int              { return c.mc.frame }
 func (c *PrologueContext) Emit(b []byte)               { c.mc.emit(b) }
-func (c *PrologueContext) Scratch() (Reg, Reg)         { return gpScratch0, gpScratch1 }
+func (c *PrologueContext) Scratch() (Reg, Reg)         { return c.mc.gs0(), c.mc.gs1() }
 func (c *PrologueContext) MovImm(reg Reg, v int64)     { c.mc.movImm(reg, v, true) }
 func (c *PrologueContext) Label(name string)           { c.mc.prog.Label(name) }
 func (c *PrologueContext) Jmp(label string)            { c.mc.prog.Jmp(label) }

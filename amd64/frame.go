@@ -15,6 +15,7 @@ type frameLayout struct {
 	spillBase   int               // bytes below RBP where spill slots begin
 	allocOff    map[*ir.Instr]int // each stack allocation's distance below RBP
 	frame       int               // bytes subtracted from RSP (16-aligned)
+	outgoing    int               // the fixed call area at the bottom of the frame
 	regSaveDist int               // variadic register save area, at [rbp - regSaveDist]
 }
 
@@ -23,10 +24,12 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 	var lay frameLayout
 	lay.allocOff = map[*ir.Instr]int{}
 
-	// Collect the callee-saved registers the allocator actually used.
+	// Collect the callee-saved registers the allocator actually used. A function
+	// under the Go profile preserves nothing for its callers (see regProfile).
+	preserves := profileOf(f).preservesCS
 	used := map[Reg]bool{}
 	for _, t := range f.Temps {
-		if t.Reg != ir.NoReg && calleeSavedReg(Reg(t.Reg)) {
+		if preserves && t.Reg != ir.NoReg && calleeSavedReg(Reg(t.Reg)) {
 			used[Reg(t.Reg)] = true
 		}
 	}
@@ -39,7 +42,7 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 	for _, b := range f.Blocks {
 		for i := range b.Instrs {
 			for _, r := range asmClobberRegs(&b.Instrs[i]) {
-				if calleeSavedReg(r) {
+				if preserves && calleeSavedReg(r) {
 					used[r] = true
 				}
 			}
@@ -75,6 +78,7 @@ func computeFrame(f *ir.Func, alloc *allocation) frameLayout {
 		lay.regSaveDist = acc
 	}
 	lay.frame = roundUp(acc+maxCall, 16)
+	lay.outgoing = maxCall
 	return lay
 }
 

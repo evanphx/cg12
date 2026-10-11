@@ -68,143 +68,6 @@ func addAliases(o *obj.Object, aliases []*ir.Alias) error {
 	return nil
 }
 
-// goABIUnsupported names the Go-ABI feature f asks for that this backend cannot
-// provide, or returns nil when f is compilable. amd64 has no runtime-managed frame
-// at all: no morestack prologue, no g-relative stack-guard check, no Go stack-map
-// metadata. It nevertheless used to accept the annotation and emit an ordinary
-// System V frame anyway, so a function whose stack the Go runtime is supposed to
-// grow got one that simply overruns it -- a silent miscompile with err == nil.
-// ManagedFrame is the flag that gates that machinery (arm64 keys both its
-// morestack prologue and its Go stack maps on UsesManagedFrame), so it is the
-// tripwire worth having, and it is the one rejected here.
-//
-// The Go internal calling convention is deliberately NOT rejected, even though
-// amd64 does not implement ABIInternal's register assignment either. CallConv is
-// not currently a trustworthy signal that a function needs Go's ABI: goc applies
-// CallConvGoInternal unconditionally to closure-shaped functions -- function
-// literals (goc/compile.go:10119), method-value wrappers (:9781) and funcvalue
-// adapters (:10638) -- which then pass their environment through an ordinary
-// fixed-register temporary (rdx via goc's closureRegister) rather than through the
-// convention's register assignment. Those bodies are self-consistent System V code
-// and are correct today; rejecting them catches no latent miscompile and instead
-// breaks working code (measured: 14 goc corpus subtests that build natively on
-// amd64). Check whether those frontend sites still over-apply the annotation
-// before tightening this.
-//
-// NoSplit and SystemStack are likewise not rejected. Neither describes the frame
-// on its own: they only tune the managed frame's stack-growth check (arm64 reads
-// NoSplit only inside its UsesManagedFrame prologue branch, and SystemStack only
-// within that check, to pick g.stackguard1 and runtime_morestackc). A platform-ABI,
-// unmanaged function emits no such check, so the flags have nothing to change --
-// and the C path already sets NoSplit benignly on plain platform-ABI functions
-// (goc's runtime coverage dump, semantic assembly's NOSPLIT flag), which compile
-// correctly today. Rejecting them would break working code without catching any
-// wrong code.
-func goABIUnsupported(f *ir.Func) error {
-	if f.UsesManagedFrame() {
-		return fmt.Errorf("amd64: unsupported managed frame")
-	}
-	return nil
-}
-
-// rejectGoABI fails the whole module before any of it is compiled. It runs up
-// front rather than per function inside the emit loop because lowering rewrites
-// each function in place: bailing out midway would leave the caller's module
-// partly lowered.
-func rejectGoABI(m *ir.Module) error {
-	for _, f := range m.Funcs {
-		if err := goABIUnsupported(f); err != nil {
-			return fmt.Errorf("function %s: %w", f.Name, err)
-		}
-	}
-	return nil
-}
-
-func CompileToObjectWith(m *ir.Module, opts Options) (*obj.Object, error) {
-	// Every exported entry point (CompileObject, CompileObjectWith,
-	// CompileToObject) and Backend.CompileModule funnels through here, so this is
-	// the one place codegen can be reached from and the one place the guard needs
-	// to sit.
-	if err := rejectGoABI(m); err != nil {
-		return nil, err
-	}
-	o := &obj.Object{Machine: obj.EM_X86_64}
-	var smFuncs []stackMapFunc
-	var rows []obj.LineRow
-	var dfuncs []obj.DwarfFunc
-	anchor := ""
-	for _, f := range m.Funcs {
-		name := sanitize(f.Name)
-		params := dwarfParams(f) // captured before lowering rewrites the params
-		paramTemps := paramTempIDs(f)
-		ir.LowerPointers(f, ir.ClsL)
-		if err := lower(f); err != nil {
-			return nil, fmt.Errorf("function %s: %w", f.Name, err)
-		}
-		alloc, err := regAlloc(f)
-		if err != nil {
-			return nil, fmt.Errorf("function %s: %w", f.Name, err)
-		}
-		mc, err := emitMachine(f, alloc, opts.GC, opts.TLSModel)
-		if err != nil {
-			return nil, fmt.Errorf("function %s: %w", f.Name, err)
-		}
-		base := len(o.Text)
-		if anchor == "" {
-			anchor = name
-		}
-		o.Text = append(o.Text, mc.code...)
-		for _, r := range mc.relocs {
-			r.Offset += uint64(base)
-			o.Relocs = append(o.Relocs, r)
-		}
-		o.Syms = append(o.Syms, obj.Sym{
-			Name: name, Section: obj.SecText, Value: uint64(base),
-			Size: uint64(len(mc.code)), Global: f.Linkage.Export, Func: true,
-		})
-		// Local symbols at address-taken blocks (&&label used in static data).
-		for _, bs := range mc.blockSyms {
-			o.Syms = append(o.Syms, obj.Sym{
-				Name: bs.name, Section: obj.SecText, Value: uint64(base + bs.off),
-			})
-		}
-		for i := range params {
-			params[i].Loc = mc.m.varLoc(paramTemps[i])
-		}
-		df := obj.DwarfFunc{
-			Name: name, Sym: name, Size: uint64(len(mc.code)),
-			HasRet: f.HasRet, RetType: dwarfRetType(f), Params: params, External: f.Linkage.Export,
-			Inlines: buildInlineTree(mc.inl, uint64(len(mc.code))),
-		}
-		if len(mc.rows) > 0 {
-			df.DeclFile, df.DeclLine = mc.rows[0].File, mc.rows[0].Line
-		}
-		dfuncs = append(dfuncs, df)
-		for _, r := range mc.rows {
-			r.TextOff += uint64(base)
-			rows = append(rows, r)
-		}
-		if len(mc.safepoints) > 0 {
-			smFuncs = append(smFuncs, stackMapFunc{sym: name, points: mc.safepoints})
-		}
-	}
-	for _, d := range m.Data {
-		if err := addData(o, d); err != nil {
-			return nil, err
-		}
-	}
-	if err := addAliases(o, m.Aliases); err != nil {
-		return nil, err
-	}
-	if len(m.Files) > 0 && anchor != "" {
-		o.SetDWARF(m.Files, rows, dfuncs, uint64(len(o.Text)), anchor, "cg12", ".", m.Files[0], obj.R_X86_64_64, 0x56) // DW_OP_reg6 (rbp)
-	}
-	if len(smFuncs) > 0 {
-		setStackMap(o, smFuncs)
-	}
-	return o, nil
-}
-
 // dwarfType maps an IR class to a DWARF base type (DW_ATE_signed = 5,
 // DW_ATE_float = 4).
 func dwarfType(cls ir.Cls) obj.DwarfType {
@@ -466,6 +329,13 @@ type mc struct {
 
 	safepoints []safepoint // GC safepoints recorded during emission
 
+	// frameStart is the PC at which a managed function's frame is fully built;
+	// the PCSP table reads 0 before it. stackAllocDistance maps each stack
+	// allocation's temporary to its distance below RBP, which is how a live
+	// allocation address becomes the pointer words it covers.
+	frameStart         int
+	stackAllocDistance map[uint32]int
+
 	rows    []obj.LineRow           // DWARF line-table rows
 	lastPos ir.SrcPos               // last emitted source position
 	instrPC map[*ir.Instr][2]uint64 // each instruction's [start, end) PC
@@ -505,8 +375,9 @@ const (
 // safepoint is a call site's return address (function-relative) and the GC roots
 // live across it.
 type safepoint struct {
-	pc    uint64
-	roots []rootLoc
+	pc      uint64
+	startPC uint64 // where the call sequence begins (the Go stack-map index point)
+	roots   []rootLoc
 }
 
 type machineCode struct {
@@ -528,6 +399,14 @@ type blockSym struct {
 func emitMachine(f *ir.Func, alloc *allocation, gc GCStrategy, tlsModel TLSModel) (*machineCode, error) {
 	m := &mc{f: f, alloc: alloc, gc: gc, tlsModel: tlsModel, prog: x64.NewProgram(), instrPC: map[*ir.Instr][2]uint64{}}
 	m.planFrame()
+	if f.UsesManagedFrame() {
+		m.stackAllocDistance = make(map[uint32]int, len(m.allocOff))
+		for instruction, distance := range m.allocOff {
+			if instruction.To.Kind == ir.RefTemp {
+				m.stackAllocDistance[instruction.To.ID] = distance
+			}
+		}
+	}
 	m.useCount = countTempUses(f)
 	m.prologue()
 	for i, b := range f.Blocks {
@@ -582,7 +461,11 @@ func (m *mc) recordLoc(pos ir.SrcPos) {
 // recordSafepoint captures the GC roots live at the current PC (a call's return
 // address, or an explicit OSafepoint). Roots forced to the stack by the allocator
 // are frame-relative (offset from rbp); any in registers are recorded by number.
-func (m *mc) recordSafepoint(in *ir.Instr) {
+func (m *mc) recordSafepoint(in *ir.Instr, startPC uint64) {
+	if m.f.UsesManagedFrame() {
+		m.recordGoSafepoint(in, startPC)
+		return
+	}
 	roots := m.alloc.safeRoots[in]
 	if len(roots) == 0 {
 		return
@@ -596,7 +479,7 @@ func (m *mc) recordSafepoint(in *ir.Instr) {
 			locs = append(locs, rootLoc{kind: rootFrame, val: int32(-(m.spillBase + 8 + t.Slot)), typ: t.GCType})
 		}
 	}
-	m.safepoints = append(m.safepoints, safepoint{pc: uint64(m.prog.Len()), roots: locs})
+	m.safepoints = append(m.safepoints, safepoint{pc: uint64(m.prog.Len()), startPC: startPC, roots: locs})
 }
 
 func (m *mc) fail(err error) {
@@ -618,6 +501,22 @@ func (m *mc) recordReloc(off int, sym string, typ uint32, addend int64) {
 // --- prologue / epilogue ---------------------------------------------------
 
 func (m *mc) prologue() {
+	if m.f.UsesManagedFrame() {
+		if !m.f.NoSplit {
+			m.goStackPrologue()
+		}
+		m.emit(x64.Push(RBP.mreg()))
+		m.emit(x64.MovReg(true, RBP.mreg(), RSP.mreg()))
+		if m.frame > 0 {
+			m.emit(x64.SubImm(true, RSP.mreg(), int32(m.frame)))
+		}
+		m.frameStart = m.prog.Len()
+		m.zeroGoPointerSlots()
+		if m.f.Variadic {
+			m.fail(fmt.Errorf("amd64: %s: a variadic function cannot have a managed frame", m.f.Name))
+		}
+		return
+	}
 	// A strategy may emit a stack-growth guard before the frame is set up; its slow
 	// path branches back to this label to re-check after the stack grows.
 	if pe, ok := m.gc.(PrologueEmitter); ok {
@@ -825,23 +724,23 @@ func (m *mc) moveToMem(dst, src loc) {
 			m.emit(x64.Store(dst.size*8, src.reg.mreg(), mem))
 		}
 	case locMem:
-		scratch := gpScratch0
+		scratch := m.gs0()
 		m.moveToReg(regLoc(scratch, src.size, src.float), src)
 		m.moveToMem(dst, regLoc(scratch, dst.size, dst.float))
 	case locImm:
 		if dst.float {
-			m.materializeFloat(fpScratch0, src.val, src.size)
-			m.moveToMem(dst, regLoc(fpScratch0, dst.size, true))
+			m.materializeFloat(m.fs0(), src.val, src.size)
+			m.moveToMem(dst, regLoc(m.fs0(), dst.size, true))
 		} else {
-			m.movImm(gpScratch0, src.val, w64(dst.size))
-			m.emit(x64.Store(dst.size*8, gpScratch0.mreg(), mem))
+			m.movImm(m.gs0(), src.val, w64(dst.size))
+			m.emit(x64.Store(dst.size*8, m.gs0().mreg(), mem))
 		}
 	case locSym:
-		m.materializeSym(gpScratch0, src.sym, src.symoff, src.tls)
-		m.emit(x64.Store(64, gpScratch0.mreg(), mem))
+		m.materializeSym(m.gs0(), src.sym, src.symoff, src.tls)
+		m.emit(x64.Store(64, m.gs0().mreg(), mem))
 	case locFrameAddr:
-		m.emit(x64.Lea(true, gpScratch0.mreg(), x64.At(src.base.mreg(), src.off)))
-		m.emit(x64.Store(64, gpScratch0.mreg(), mem))
+		m.emit(x64.Lea(true, m.gs0().mreg(), x64.At(src.base.mreg(), src.off)))
+		m.emit(x64.Store(64, m.gs0().mreg(), mem))
 	}
 }
 
@@ -861,11 +760,11 @@ func (m *mc) movImm(d Reg, val int64, w bool) {
 // materializeFloat loads a float constant (given by its bit pattern) into an XMM.
 func (m *mc) materializeFloat(d Reg, bits int64, size int) {
 	if size == 8 {
-		m.movImm(gpScratch0, bits, true)
-		m.emit(x64.MovqToXmm(true, d.mreg(), gpScratch0.mreg()))
+		m.movImm(m.gs0(), bits, true)
+		m.emit(x64.MovqToXmm(true, d.mreg(), m.gs0().mreg()))
 	} else {
-		m.movImm(gpScratch0, bits, false)
-		m.emit(x64.MovqToXmm(false, d.mreg(), gpScratch0.mreg()))
+		m.movImm(m.gs0(), bits, false)
+		m.emit(x64.MovqToXmm(false, d.mreg(), m.gs0().mreg()))
 	}
 }
 
@@ -923,8 +822,8 @@ func (m *mc) gpDst(ref ir.Ref) (Reg, func()) {
 		return Reg(t.Reg), func() {}
 	}
 	size := t.Cls.Size()
-	return gpScratch0, func() {
-		m.emit(x64.Store(size*8, gpScratch0.mreg(), x64.At(RBP.mreg(), m.slotAddr(t.Slot))))
+	return m.gs0(), func() {
+		m.emit(x64.Store(size*8, m.gs0().mreg(), x64.At(RBP.mreg(), m.slotAddr(t.Slot))))
 	}
 }
 
@@ -935,12 +834,12 @@ func (m *mc) fpDst(ref ir.Ref) (Reg, func()) {
 		return Reg(t.Reg), func() {}
 	}
 	size := t.Cls.Size()
-	return fpScratch0, func() {
+	return m.fs0(), func() {
 		mem := x64.At(RBP.mreg(), m.slotAddr(t.Slot))
 		if size == 8 {
-			m.emit(x64.MovsdStore(fpScratch0.mreg(), mem))
+			m.emit(x64.MovsdStore(m.fs0().mreg(), mem))
 		} else {
-			m.emit(x64.MovssStore(fpScratch0.mreg(), mem))
+			m.emit(x64.MovssStore(m.fs0().mreg(), mem))
 		}
 	}
 }
@@ -1040,24 +939,29 @@ func (m *mc) block(b *ir.Block) {
 			argPending = append(argPending, in)
 		case ir.OCall:
 			m.emitArgs(argPending)
-			// System V requires AL = number of vector registers used, for variadic
-			// callees. Setting it before every call is harmless (rax is not an
-			// argument register) and lets us call variadic functions without knowing
-			// the callee's prototype.
-			nfloat := 0
-			for _, ai := range argPending {
-				if !ai.To.IsNone() && ai.Cls.IsFloat() {
-					nfloat++
+			goInternal := in.CallConvSet && in.CallConv == ir.CallConvGoInternal
+			if !goInternal {
+				// System V requires AL = number of vector registers used, for variadic
+				// callees. Setting it before every call is harmless (rax is not a
+				// System V argument register) and lets us call variadic functions
+				// without knowing the callee's prototype. Under ABIInternal RAX is the
+				// first argument, so it is left alone.
+				nfloat := 0
+				for _, ai := range argPending {
+					if !ai.To.IsNone() && ai.Cls.IsFloat() {
+						nfloat++
+					}
 				}
+				m.emit(x64.MovImm32(false, RAX.mreg(), int32(nfloat)))
 			}
 			argPending = nil
-			m.emit(x64.MovImm32(false, RAX.mreg(), int32(nfloat)))
 			if in.Tail {
 				m.emitTailCall(in)
 				m.blockDone = true
 			} else {
 				m.emitCall(in)
-				m.recordSafepoint(in) // the return address is a safepoint
+				m.recordSafepoint(in, start) // the return address is a safepoint
+				m.emitStackAggregateResult(in)
 			}
 		default:
 			m.instr(in)
@@ -1075,13 +979,24 @@ func (m *mc) leaStackParam(to ir.Ref, off int32) {
 		m.emit(x64.Lea(true, dst.reg.mreg(), x64.At(RBP.mreg(), off)))
 		return
 	}
-	m.emit(x64.Lea(true, gpScratch0.mreg(), x64.At(RBP.mreg(), off)))
-	m.emit(x64.Store(64, gpScratch0.mreg(), x64.At(RBP.mreg(), dst.off)))
+	m.emit(x64.Lea(true, m.gs0().mreg(), x64.At(RBP.mreg(), off)))
+	m.emit(x64.Store(64, m.gs0().mreg(), x64.At(RBP.mreg(), dst.off)))
 }
 
 func (m *mc) emitArgs(args []*ir.Instr) {
+	// Stacked aggregates are copied first: the copies only write the outgoing
+	// area, through scratch registers, so they cannot disturb a source the
+	// register moves below still have to read.
+	for _, ai := range args {
+		if ai.To.IsNone() && ai.RetAgg() != nil {
+			m.emitStackAggregateArgument(ai)
+		}
+	}
 	var pairs []locPair
 	for _, ai := range args {
+		if ai.To.IsNone() && ai.RetAgg() != nil {
+			continue
+		}
 		var dst loc
 		if ai.To.IsNone() {
 			dst = memLoc(RSP, int32(ai.Aux), ai.Cls.Size(), ai.Cls.IsFloat())
@@ -1105,12 +1020,12 @@ func (m *mc) emitTailCall(in *ir.Instr) {
 		m.recordReloc(m.prog.Len()-4, c.Sym, obj.R_X86_64_PLT32, c.Int-4)
 		return
 	}
-	r := m.gpValue(callee, gpScratch1)
-	if r != gpScratch1 {
-		m.emit(x64.MovReg(true, gpScratch1.mreg(), r.mreg()))
+	r := m.gpValue(callee, m.gs1())
+	if r != m.gs1() {
+		m.emit(x64.MovReg(true, m.gs1().mreg(), r.mreg()))
 	}
 	m.teardown()
-	m.emit(x64.JmpReg(gpScratch1.mreg()))
+	m.emit(x64.JmpReg(m.gs1().mreg()))
 }
 
 func (m *mc) emitCall(in *ir.Instr) {
@@ -1221,10 +1136,11 @@ func (m *mc) instr(in *ir.Instr) {
 		m.vaArg(in)
 	case ir.OSafepoint:
 		// Let the strategy emit poll code, then record the roots at the resulting PC.
+		start := uint64(m.prog.Len())
 		if m.gc != nil {
 			m.gc.EmitSafepoint(&GCContext{mc: m, roots: m.gcRoots(in)})
 		}
-		m.recordSafepoint(in)
+		m.recordSafepoint(in, start)
 	case ir.OLifeStart, ir.OLifeEnd:
 		// Alloca lifetime markers carry no code; they only bound live ranges and
 		// stack-slot lifetimes for earlier passes.
@@ -1307,7 +1223,7 @@ func (m *mc) memFor(in *ir.Instr, ai int) (x64.Mem, func()) {
 		case locReg:
 			mem.Base = baseLoc.reg.mreg()
 		default:
-			mem.Base = m.gpValue(base, gpScratch1).mreg()
+			mem.Base = m.gpValue(base, m.gs1()).mreg()
 		}
 		return mem, func() {}
 	}
@@ -1318,7 +1234,7 @@ func (m *mc) memFor(in *ir.Instr, ai int) (x64.Mem, func()) {
 	// A pre-coloured temp could name gpScratch1 itself, in which case loading the
 	// base there would clobber it, so "the index has a register" means a register
 	// that is not the one the base would take.
-	indexHasReg := indexLoc.kind == locReg && indexLoc.reg != gpScratch1
+	indexHasReg := indexLoc.kind == locReg && indexLoc.reg != m.gs1()
 	switch {
 	case baseLoc.kind == locFrameAddr:
 		mem.Base, mem.Disp = baseLoc.base.mreg(), mem.Disp+baseLoc.off
@@ -1326,13 +1242,13 @@ func (m *mc) memFor(in *ir.Instr, ai int) (x64.Mem, func()) {
 		mem.Base = baseLoc.reg.mreg()
 	case indexHasReg:
 		// Only the base needs the scratch; loading it cannot disturb the index.
-		mem.Base = m.gpValue(base, gpScratch1).mreg()
+		mem.Base = m.gpValue(base, m.gs1()).mreg()
 	default:
 		m.addrIntoScratch(baseLoc, index, scale)
-		mem.Base = gpScratch1.mreg()
+		mem.Base = m.gs1().mreg()
 		return mem, func() {}
 	}
-	mem.Index = m.gpValue(index, gpScratch1).mreg()
+	mem.Index = m.gpValue(index, m.gs1()).mreg()
 	mem.Scale = scale
 	mem.HasIndex = true
 	return mem, func() {}
@@ -1358,14 +1274,14 @@ func (m *mc) addrIntoScratch(baseLoc loc, index ir.Ref, scale byte) {
 		return
 	}
 	indexLoc := m.refLoc(index)
-	m.moveToReg(regLoc(gpScratch1, indexLoc.size, false), indexLoc)
+	m.moveToReg(regLoc(m.gs1(), indexLoc.size, false), indexLoc)
 	// The scale multiplies the whole 64-bit register, exactly as the SIB byte's
 	// scale would, so the shift is 64-bit even for a 32-bit index -- whose load
 	// zero-extended it, so the high half is the zero the SIB form would have seen.
 	if shift := scaleShift(scale); shift != 0 {
-		m.emit(x64.ShlImm(true, gpScratch1.mreg(), shift))
+		m.emit(x64.ShlImm(true, m.gs1().mreg(), shift))
 	}
-	m.emit(x64.AddMem(true, gpScratch1.mreg(), x64.At(baseLoc.base.mreg(), baseLoc.off)))
+	m.emit(x64.AddMem(true, m.gs1().mreg(), x64.At(baseLoc.base.mreg(), baseLoc.off)))
 }
 
 // scaleShift is the shift amount an index scale of 1, 2, 4 or 8 stands for, the
@@ -1420,14 +1336,14 @@ func (m *mc) emitAsm(in *ir.Instr) {
 	// lives in: a double in a GP register is not a double. They are counted
 	// separately so a template using both does not exhaust one by spending the
 	// other's budget.
-	gp := [...]Reg{gpScratch0, gpScratch1}
-	fp := [...]Reg{fpScratch0, fpScratch1}
+	gp := [...]Reg{m.gs0(), m.gs1()}
+	fp := [...]Reg{m.fs0(), m.fs1()}
 	gpN, fpN := 0, 0
 	next := func(float bool) Reg {
 		if float {
 			if fpN >= len(fp) {
 				m.fail(fmt.Errorf("amd64: inline asm needs more XMM scratch registers than are available"))
-				return fpScratch0
+				return m.fs0()
 			}
 			r := fp[fpN]
 			fpN++
@@ -1435,7 +1351,7 @@ func (m *mc) emitAsm(in *ir.Instr) {
 		}
 		if gpN >= len(gp) {
 			m.fail(fmt.Errorf("amd64: inline asm needs more scratch registers than are available"))
-			return gpScratch0
+			return m.gs0()
 		}
 		r := gp[gpN]
 		gpN++
@@ -1555,5 +1471,5 @@ func (m *mc) asmInputReg(ref ir.Ref, next func(float bool) Reg) (Reg, int) {
 		return r, 8
 	}
 	m.fail(fmt.Errorf("amd64: unsupported inline-asm operand %v", ref))
-	return gpScratch0, 8
+	return m.gs0(), 8
 }

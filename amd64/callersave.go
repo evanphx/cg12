@@ -46,7 +46,7 @@ func insertCallerSaves(f *ir.Func, cfg *analysis.CFG, live *analysis.Liveness, a
 						continue
 					}
 					r := f.Temps[t].Reg
-					if r == ir.NoReg || !callerClobbered(Reg(r)) {
+					if r == ir.NoReg || !profileOf(f).clobberedByCall(Reg(r)) {
 						continue
 					}
 					// A GC ref live across a safepoint is pre-spilled whole-life

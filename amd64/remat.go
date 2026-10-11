@@ -31,17 +31,31 @@ type rematRule struct {
 // temp, or a temp passed to a call / aggregate path (its value flows through a
 // parallel move or memcpy that reads a spill slot directly, which cannot
 // recompute) is never rematerialized.
+//
+// A managed frame relaxes two of those rules for a stack allocation's address,
+// and has to. Its stack can be copied at any call, and a frame address held in a
+// spill slot is only adjusted if that slot is a stack-map root -- which an
+// address that is not a GC reference never is. Recomputing the address from RBP
+// at each use, which the runtime does adjust, is what keeps it valid; so there a
+// GC-ref allocation (whose pointer words are reported through the allocation
+// itself, not through the address) is rematerialised too, and so is one passed
+// to a call, since a call's argument moves and the stacked-aggregate copy both
+// resolve their sources through refLoc.
 func rematRules(f *ir.Func) map[int]rematRule {
 	n := len(f.Temps)
 	defCount := make([]int, n)
 	defInstr := make([]*ir.Instr, n)
 	unsafe := make([]bool, n)
+	managed := f.UsesManagedFrame()
 	for _, b := range f.Blocks {
 		for k := range b.Instrs {
 			in := &b.Instrs[k]
 			for _, d := range instrDefs(in) {
 				defCount[d]++
 				defInstr[d] = in
+			}
+			if managed && (in.Op == ir.OArg || in.Op == ir.OCall) {
+				continue
 			}
 			if !srcResolvesOperands(in) {
 				for _, a := range in.Uses() {
@@ -64,10 +78,13 @@ func rematRules(f *ir.Func) map[int]rematRule {
 	rules := map[int]rematRule{}
 	for t := 0; t < n; t++ {
 		tt := f.Temps[t]
-		if tt == nil || tt.Fixed || tt.GCRef || unsafe[t] || defCount[t] != 1 {
+		if tt == nil || tt.Fixed || unsafe[t] || defCount[t] != 1 {
 			continue
 		}
 		in := defInstr[t]
+		if tt.GCRef && !(managed && in.Op.IsAlloc()) {
+			continue
+		}
 		switch in.Op {
 		case ir.OAlloc4, ir.OAlloc8, ir.OAlloc16:
 			rules[t] = rematRule{kind: rematAlloca, in: in}

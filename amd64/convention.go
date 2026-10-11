@@ -104,11 +104,22 @@ func goInternalConvention(goInternal bool) ir.CallConvention {
 // the IR this is derived from.
 type calleeConventions map[string]ir.CallConvention
 
-// newCalleeConventions indexes a module's functions by symbol.
+// newCalleeConventions indexes a module's functions by linker symbol.
 func newCalleeConventions(m *ir.Module) calleeConventions {
 	c := make(calleeConventions, len(m.Funcs))
 	for _, f := range m.Funcs {
-		c[f.Name] = f.CallConv
+		c[sanitize(f.Name)] = f.CallConv
+	}
+	return c
+}
+
+// withAssembly adds the functions the module's translated assembly defines,
+// keyed by linker symbol. Every one of them is reached through its ABIInternal
+// entry, so a call into assembly is lowered against that convention even
+// though the module declares the function without a body.
+func (c calleeConventions) withAssembly(assembly map[string]ir.CallConvention) calleeConventions {
+	for name, convention := range assembly {
+		c[name] = convention
 	}
 	return c
 }
@@ -128,7 +139,7 @@ func (c calleeConventions) forCall(f *ir.Func, call *ir.Instr) ir.CallConvention
 	}
 	if len(call.Args) > 0 {
 		if sym, ok := calleeSymbolOf(f, call.Args[0]); ok {
-			if cc, known := c[sym]; known {
+			if cc, known := c[sanitize(sym)]; known {
 				return cc
 			}
 		}
