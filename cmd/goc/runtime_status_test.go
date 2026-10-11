@@ -2537,11 +2537,14 @@ func TestARM64RuntimeCapabilityStatus(t *testing.T) {
 	// A skipped matrix writes no report at all, which is indistinguishable from
 	// a report that lost every program. Asking for coverage in an environment
 	// that cannot run the corpus is an error rather than a skip.
-	if runtime.GOARCH != "arm64" {
+	if runtime.GOARCH != "arm64" && runtime.GOARCH != "amd64" {
 		if *runtimeCoverageProfile != "" {
 			t.Fatalf("-runtime-coverprofile requires arm64, but this host is %s", runtime.GOARCH)
 		}
-		t.Skip("AArch64 Go runtime capability status")
+		t.Skip("Go runtime capability status requires arm64 or amd64")
+	}
+	if runtime.GOARCH != "arm64" && *runtimeCoverageProfile != "" {
+		t.Fatalf("-runtime-coverprofile requires arm64, but this host is %s", runtime.GOARCH)
 	}
 	if _, err := exec.LookPath("cc"); err != nil {
 		if *runtimeCoverageProfile != "" {

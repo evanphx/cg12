@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/evanphx/cg12/goc"
-	"github.com/evanphx/cg12/ir"
 )
 
 // batchRequest is one program to compile, written as one JSON object on one line
@@ -201,14 +200,7 @@ func compileBatchProgram(target goc.Target, packs *packSet, optimize bool, sourc
 		return batchError(err, &diagnostics)
 	}
 
-	var module *ir.Module
-	if target == goc.TargetARM64 {
-		// Only arm64 can be given the full Go runtime; other targets get the
-		// freestanding subset, exactly as the one-shot path does.
-		module, err = goc.CompileExecutableFor(target, name, contents)
-	} else {
-		module, err = goc.CompileFor(target, name, contents)
-	}
+	module, err := goc.CompileExecutableFor(target, name, contents)
 	if err != nil {
 		return err
 	}

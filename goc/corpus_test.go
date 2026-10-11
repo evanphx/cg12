@@ -4418,8 +4418,8 @@ func Test() int {
 
 func runExecutableCase(t *testing.T, source string, want int) {
 	t.Helper()
-	if runtime.GOOS != "linux" || runtime.GOARCH != "arm64" {
-		t.Skip("Go runtime execution test requires Linux ARM64")
+	if !goRuntimeExecutionSupported() {
+		t.Skip(goRuntimeExecutionSkip)
 	}
 	cc, err := exec.LookPath("cc")
 	if err != nil {
@@ -4445,7 +4445,7 @@ func main() {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assemblySource, err := arm64.WriteObjectAndAssembly(objectFile, module)
+	assemblySource, err := writeNativeObjectAndAssembly(objectFile, module)
 	closeErr := objectFile.Close()
 	if err != nil {
 		t.Fatalf("machine code: %v", err)

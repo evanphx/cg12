@@ -34,6 +34,16 @@
       "goos": ["linux"],
       "goarch": ["arm64"],
       "remove_when": "No runtime bootstrap or foreign-entry bridge needs a native cg12 implementation."
+    },
+    {
+      "package": "runtime",
+      "path": "src/runtime/cg12_overlay_linux_amd64.go",
+      "file": "linux_amd64/runtime/cg12_overlay_linux_amd64.go",
+      "mode": "add",
+      "reason": "Define the runtime hook the generated interface-dispatch failure path calls, and expose the active bootstrap overlay revision inside the runtime package for diagnostics and tests.",
+      "goos": ["linux"],
+      "goarch": ["amd64"],
+      "remove_when": "The runtime builds without any cg12-specific source overlays."
     }
   ]
 }

@@ -4,10 +4,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"testing"
 
-	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/goc"
 	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/opt"
@@ -165,8 +163,8 @@ func runCorpusProgramOutputOptimizedBy(
 	environment ...string,
 ) string {
 	t.Helper()
-	if runtime.GOOS != "linux" || runtime.GOARCH != "arm64" {
-		t.Skip("Go runtime execution test requires Linux ARM64")
+	if !goRuntimeExecutionSupported() {
+		t.Skip(goRuntimeExecutionSkip)
 	}
 	cc, err := exec.LookPath("cc")
 	if err != nil {
@@ -183,7 +181,7 @@ func runCorpusProgramOutputOptimizedBy(
 	objectPath := filepath.Join(directory, "program.o")
 	objectFile, err := os.Create(objectPath)
 	require.NoError(t, err)
-	assemblySource, err := arm64.WriteObjectAndAssembly(objectFile, module)
+	assemblySource, err := writeNativeObjectAndAssembly(objectFile, module)
 	closeErr := objectFile.Close()
 	require.NoError(t, err, "machine code")
 	require.NoError(t, closeErr)

@@ -552,6 +552,7 @@ func compile(name string, src []byte, options compileOptions) (*ir.Module, error
 			}
 			function.ManagedFrame = true
 		}
+		markFunctionValueTargets(mod, target)
 		opt.InlineNoSplitCalls(mod)
 		reportNoSplitViolations(mod)
 	}
@@ -678,6 +679,40 @@ func exportAssemblyReferencedFunctions(module *ir.Module, references map[string]
 	for _, function := range module.Funcs {
 		if references[assemblySymbolName(function.Name)] {
 			function.Export()
+		}
+	}
+}
+
+// markFunctionValueTargets gives Go's ABIInternal to every function whose
+// address a funcval descriptor holds directly, without an adapter: the runtime's
+// type equality and hash functions (runtime.strequal, f64hash, the generated
+// .equal and .hash functions), and capture-free function literals. The runtime
+// calls those through the descriptor -- `t.Equal(p, q)` is a closure call -- so
+// they must take their arguments the way a closure call passes them.
+//
+// arm64 is left as it is. There AAPCS64 and ABIInternal assign the first
+// integer and float arguments to the same registers, so the mismatch this
+// repairs cannot be observed for any signature these functions have; on amd64
+// System V starts at RDI and ABIInternal at RAX, so every such call passed its
+// arguments in the wrong registers.
+//
+// A direct call to one of these functions is still stamped with the platform
+// convention by setAAPCS64CallConvention; the backend re-stamps every direct
+// call against the callee's final convention.
+func markFunctionValueTargets(module *ir.Module, target Target) {
+	if target == TargetARM64 {
+		return
+	}
+	targets := make(map[string]bool)
+	for _, data := range module.Data {
+		if !strings.HasPrefix(data.Name, ".goc.funcval.") || len(data.Items) != 1 || data.Items[0].Sym == "" {
+			continue
+		}
+		targets[data.Items[0].Sym] = true
+	}
+	for _, function := range module.Funcs {
+		if targets[function.Name] {
+			function.CallConv = ir.CallConvGoInternal
 		}
 	}
 }
@@ -986,18 +1021,11 @@ func sourceAssemblyReferences(target Target, units map[string]*sourceUnit) (map[
 			if err != nil {
 				return nil, fmt.Errorf("parse assembly %s: %w", assembly.path, err)
 			}
-			translation, err := plan9asm.CompileARM64(file, plan9asm.ARM64Options{
-				PackagePath:      path,
-				Filename:         assembly.path,
-				Defines:          defines,
-				FloatInputs:      floatInputs,
-				FloatOutputs:     floatOutputs,
-				PreferDirectABI0: true,
-			})
+			externalReferences, err := target.translateAssemblyReferences(file, path, assembly.path, defines, floatInputs, floatOutputs)
 			if err != nil {
 				return nil, fmt.Errorf("translate assembly %s: %w", assembly.path, err)
 			}
-			for _, reference := range translation.ExternalReferences {
+			for _, reference := range externalReferences {
 				references[reference] = true
 			}
 		}
@@ -13081,22 +13109,8 @@ func (g *gen) expr(e ast.Expr) (result ir.Ref) {
 			if obj.Pkg() != nil && obj.Pkg().Path() == "runtime" && obj.Name() == "getg" && len(n.Args) == 0 {
 				// getg reads whichever register the target's Go ABI reserves for
 				// the current goroutine. arm64 uses X28; amd64's is R14, settled
-				// in AMD64_PARITY_PLAN B0 and recorded as regClosure's neighbour
-				// regG in amd64/reg.go.
-				//
-				// amd64 is still refused here, and the gate outlives the decision
-				// on purpose: knowing which register holds g is not the same as
-				// being able to compile a function that uses it. The amd64 backend
-				// does not yet reserve R14, lower ABIInternal arguments, or emit a
-				// managed-frame prologue (Track B). Letting getg through before
-				// then would trade this one accurate diagnostic for a scatter of
-				// failures much further downstream.
-				if g.target != TargetARM64 {
-					g.fail(n, "runtime.getg intrinsic is unsupported on %s", g.target)
-					return ir.R
-				}
-				const arm64GRegister = 28
-				return g.cur.Load(ir.ClsP, g.fn.RegVar("g", arm64GRegister))
+				// in AMD64_PARITY_PLAN B0 and recorded as regG in amd64/reg.go.
+				return g.cur.Load(ir.ClsP, g.fn.RegVar("g", g.goroutineRegister()))
 			}
 			if obj.Pkg() != nil && obj.Pkg().Path() == "runtime" && obj.Name() == "KeepAlive" && len(n.Args) == 1 {
 				g.keepAlive(obj, n.Args[0])
@@ -15060,6 +15074,15 @@ func (g *gen) staticFunctionDescriptor(symbol string) string {
 		Items: []ir.DataItem{{Sub: ir.SubL, Sym: symbol}},
 	})
 	return name
+}
+
+// goroutineRegister is the register the target's Go ABIInternal reserves for
+// the current goroutine: X28 on arm64, R14 on amd64 (AMD64_PARITY_PLAN §3.3).
+func (g *gen) goroutineRegister() int {
+	if g.target == TargetARM64 {
+		return 28
+	}
+	return 14
 }
 
 func (g *gen) closureRegister() int {

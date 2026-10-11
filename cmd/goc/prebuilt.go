@@ -29,7 +29,7 @@ func buildRuntimeCommand(arguments []string, errorOutput io.Writer) int {
 	flags.SetOutput(errorOutput)
 	output := flags.String("o", "", "write the prebuilt runtime here")
 	optimize := flags.Bool("O", false, "optimize cg12 IR")
-	targetName := flags.String("target", defaultTargetName(), "arm64")
+	targetName := flags.String("target", defaultTargetName(), "arm64 | amd64")
 	packages := flags.String("packages", "",
 		"comma-separated standard library packages the pack carries beyond the runtime; empty for the runtime alone")
 	profiles := registerProfileFlags(flags)

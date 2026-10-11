@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"go/types"
 	"runtime"
+
+	"github.com/evanphx/cg12/plan9asm"
 )
 
 // Target names the machine goc compiles Go for.
@@ -111,4 +113,63 @@ func checkTargetTypeSizes(target Target) error {
 		)
 	}
 	return nil
+}
+
+// supportsAssemblyPackage reports whether plan9asm translates every assembly
+// file the package selects for this target, so the package may be built from
+// its real (non-purego) sources.
+func (t Target) supportsAssemblyPackage(packagePath string) bool {
+	switch t {
+	case TargetARM64:
+		return plan9asm.SupportsARM64Package(packagePath)
+	case TargetAMD64:
+		return plan9asm.SupportsAMD64Package(packagePath)
+	}
+	return false
+}
+
+// supportsAssemblyFile reports whether plan9asm translates one build-selected
+// assembly file for this target.
+func (t Target) supportsAssemblyFile(packagePath, filename string) bool {
+	switch t {
+	case TargetARM64:
+		return plan9asm.SupportsARM64File(packagePath, filename)
+	case TargetAMD64:
+		return plan9asm.SupportsAMD64File(packagePath, filename)
+	}
+	return false
+}
+
+// translateAssemblyReferences translates one parsed assembly file for the
+// target and returns the symbols it references outside itself, which seed
+// reachability: a Go function only assembly calls is otherwise never compiled.
+func (t Target) translateAssemblyReferences(file *plan9asm.File, packagePath, filename string, defines map[string]int64, floatInputs, floatOutputs map[string][]int) ([]string, error) {
+	switch t {
+	case TargetARM64:
+		translation, err := plan9asm.CompileARM64(file, plan9asm.ARM64Options{
+			PackagePath:      packagePath,
+			Filename:         filename,
+			Defines:          defines,
+			FloatInputs:      floatInputs,
+			FloatOutputs:     floatOutputs,
+			PreferDirectABI0: true,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return translation.ExternalReferences, nil
+	case TargetAMD64:
+		translation, err := plan9asm.CompileAMD64(file, plan9asm.AMD64Options{
+			PackagePath:  packagePath,
+			Filename:     filename,
+			Defines:      defines,
+			FloatInputs:  floatInputs,
+			FloatOutputs: floatOutputs,
+		})
+		if err != nil {
+			return nil, err
+		}
+		return translation.ExternalReferences, nil
+	}
+	return nil, fmt.Errorf("goc: no assembly translator for %s", t)
 }

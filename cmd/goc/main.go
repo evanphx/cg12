@@ -143,9 +143,7 @@ func main() {
 			check(fmt.Errorf("-runtime-covermeta requires an executable build"))
 		}
 		m, runtimeCoverage, err = goc.CompileExecutableWithRuntimeCoverageFor(target, filepath.Base(input), src)
-	} else if buildExecutable && target == goc.TargetARM64 {
-		// Only arm64 can be given the full Go runtime today; other targets get
-		// the freestanding subset, which compiles a single file with no runtime.
+	} else if buildExecutable {
 		m, err = goc.CompileExecutableFor(target, filepath.Base(input), src)
 	} else {
 		m, err = goc.CompileFor(target, filepath.Base(input), src)
@@ -205,8 +203,8 @@ func testCommand(arguments []string) int {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		return 1
 	}
-	// A test executable needs the whole Go runtime, which only arm64 can compile.
-	if target != goc.TargetARM64 {
+	// A test executable needs the whole Go runtime, which arm64 and amd64 compile.
+	if target != goc.TargetARM64 && target != goc.TargetAMD64 {
 		fmt.Fprintf(os.Stderr, "goc: test executables are not supported for %s\n", target)
 		return 1
 	}
@@ -317,17 +315,15 @@ func linkModule(target goc.Target, m *ir.Module, exe string, errorOutput io.Writ
 		return err
 	}
 
-	// arm64 is the only backend with the assembly sidecar the Go runtime needs:
-	// it emits the object plus translated Plan 9 assembly, which is then compiled
-	// into a second object and linked alongside.
-	if target == goc.TargetARM64 {
+	// The backend emits the object plus the module's translated Plan 9
+	// assembly, which is compiled into a second object and linked alongside.
+	switch target {
+	case goc.TargetARM64:
 		translatedAssembly, err = arm64.WriteObjectAndAssembly(f, m)
-	} else {
-		var objectBytes []byte
-		objectBytes, err = compileObject(target, m)
-		if err == nil {
-			_, err = f.Write(objectBytes)
-		}
+	case goc.TargetAMD64:
+		translatedAssembly, err = amd64.WriteObjectAndAssembly(f, m)
+	default:
+		err = fmt.Errorf("unsupported target %s", target)
 	}
 	if err != nil {
 		f.Close()
@@ -341,7 +337,7 @@ func linkModule(target goc.Target, m *ir.Module, exe string, errorOutput io.Writ
 		return err
 	}
 	inputs := []string{f.Name()}
-	if target == goc.TargetARM64 {
+	if translatedAssembly != "" {
 		supportObject, err := compileRuntimeSupport(cc, work, translatedAssembly, errorOutput)
 		if err != nil {
 			return err

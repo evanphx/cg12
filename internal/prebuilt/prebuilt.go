@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/evanphx/cg12/amd64"
 	"github.com/evanphx/cg12/arm64"
 	"github.com/evanphx/cg12/goc"
 	"github.com/evanphx/cg12/internal/gometa"
@@ -38,8 +39,8 @@ type Options struct {
 // returns the pack: the module's object, its assembled sidecar, and the manifest
 // describing what the two define.
 func BuildRuntime(target goc.Target, options Options) (*runtimepack.Pack, error) {
-	if target != goc.TargetARM64 {
-		return nil, fmt.Errorf("goc: a prebuilt runtime is only available for arm64, not %s", target)
+	if target != goc.TargetARM64 && target != goc.TargetAMD64 {
+		return nil, fmt.Errorf("goc: a prebuilt runtime is not available for %s", target)
 	}
 	runtimeModule, err := goc.CompileRuntimeModuleFor(target, options.Packages)
 	if err != nil {
@@ -53,9 +54,9 @@ func BuildRuntime(target goc.Target, options Options) (*runtimepack.Pack, error)
 	if options.Optimize {
 		goc.OptimizeModule(runtimeModule.Module, target)
 	}
-	object, assembly, err := arm64.CompileToObjectAndAssembly(runtimeModule.Module)
+	object, assembly, err := compileToObjectAndAssembly(target, runtimeModule.Module)
 	if err != nil {
-		return nil, fmt.Errorf("arm64: %w", err)
+		return nil, fmt.Errorf("%s: %w", target, err)
 	}
 	// The one write that joins the program module to the image. The child is not
 	// defined here and will not be until a program is compiled against this pack,
@@ -64,7 +65,7 @@ func BuildRuntime(target goc.Target, options Options) (*runtimepack.Pack, error)
 		object,
 		gometa.DefaultModuleDataSymbol,
 		ir.LinkerSymbol(goc.ProgramModuleDataSymbol),
-		obj.R_AARCH64_ABS64,
+		absolute64Relocation(target),
 	)
 	if err != nil {
 		return nil, err
@@ -139,7 +140,7 @@ func CompileProgram(target goc.Target, name string, source []byte, manifests []*
 	if options.Optimize {
 		goc.OptimizeModule(program.Module, target)
 	}
-	object, assembly, err := arm64.CompileToObjectAndAssembly(program.Module)
+	object, assembly, err := compileToObjectAndAssembly(target, program.Module)
 	if err != nil {
 		return nil, err
 	}
@@ -231,4 +232,26 @@ func assemble(source string) ([]byte, error) {
 		return nil, fmt.Errorf("assemble the Go runtime sidecar: %w", err)
 	}
 	return os.ReadFile(objectPath)
+}
+
+// compileToObjectAndAssembly runs the target's backend over a Go module,
+// returning the in-memory object (which the split edits before serializing)
+// and the translated Plan 9 sidecar.
+func compileToObjectAndAssembly(target goc.Target, module *ir.Module) (*obj.Object, string, error) {
+	switch target {
+	case goc.TargetARM64:
+		return arm64.CompileToObjectAndAssembly(module)
+	case goc.TargetAMD64:
+		return amd64.CompileToObjectAndAssembly(module)
+	}
+	return nil, "", fmt.Errorf("goc: no backend for %s", target)
+}
+
+// absolute64Relocation is the target's absolute 64-bit data relocation, which
+// is what moduledata.next is written with.
+func absolute64Relocation(target goc.Target) uint32 {
+	if target == goc.TargetAMD64 {
+		return obj.R_X86_64_64
+	}
+	return obj.R_AARCH64_ABS64
 }

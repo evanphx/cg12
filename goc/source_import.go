@@ -14,8 +14,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-
-	"github.com/evanphx/cg12/plan9asm"
 )
 
 // sourceUnit is the build-selected source for an imported package, including
@@ -367,10 +365,10 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 	// the one place where a wrong target silently produces a plausible-looking
 	// package built out of the other machine's files.
 	ctx.GOARCH = l.target.GOARCH()
-	// Assembly is only translatable for arm64: plan9asm has an AArch64 translator
-	// and nothing else. Off that target the purego tag is added below and the
-	// package is built from its portable Go files.
-	useAssembly := !externalTestPackage && !l.forcePureGo && l.target == TargetARM64 && plan9asm.SupportsARM64Package(path)
+	// Assembly is used where plan9asm translates every file the package selects
+	// for the target. Elsewhere the purego tag is added below and the package is
+	// built from its portable Go files.
+	useAssembly := !externalTestPackage && !l.forcePureGo && l.target.supportsAssemblyPackage(path)
 	if !useAssembly {
 		ctx.BuildTags = append(ctx.BuildTags, "purego")
 	}
@@ -439,7 +437,7 @@ func (l *sourceLoader) Import(path string) (*types.Package, error) {
 		if !useAssembly {
 			continue
 		}
-		if !plan9asm.SupportsARM64File(path, name) {
+		if !l.target.supportsAssemblyFile(path, name) {
 			return nil, fmt.Errorf("translate %s: unsupported build-selected assembly file %s", path, name)
 		}
 		full := filepath.Join(bp.Dir, name)
