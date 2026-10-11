@@ -1,5 +1,90 @@
 # PLAN: Bring the amd64 backend to arm64 parity
 
+## Status (2026-10-11): amd64 runs Go programs with the full runtime
+
+The sections below are the original plan and are kept as written. What has
+since landed on the `amd64-parity` branch, in the order a reader needs it:
+
+**What works.** `goc -target amd64` builds an executable from the unchanged
+Go 1.26.1 runtime and standard library, assembles the translated runtime
+assembly with `cc`, links against glibc, and runs it natively. Goroutines,
+channels, maps, `sync`, `fmt`/`os` I/O (netpoll included) and crypto run
+correctly. Of a 20-program differential sample from `goc/testdata`, compiled
+both plain and `-O` and compared byte-for-byte against host Go output, every
+run matched once the fixes below were in.
+
+**How the pieces map onto this plan.**
+
+- Track D went the translator route, not overlays. `plan9asm/amd64*.go`
+  translates every allowlisted linux/amd64 file (runtime, bytealg,
+  internal/runtime/{atomic,syscall,gc/scan}, cpu, reflect, syscall, math,
+  md5/sha1/sha256/sha512/crc32, chacha8rand) to GNU AT&T. Checked against
+  `go tool asm`: 368 functions and 30,489 instructions decode identically.
+  Symbol contract: ABI0 bodies are `name_abi0`. The plain name is an
+  ABIInternal entry, or an alias when the function takes and returns nothing.
+  g lives in `%fs:runtime_tlsg@tpoff`.
+- Track B: `amd64/goabi.go` (ABIInternal and morestack home slots),
+  `amd64/goframe.go` (prologue against `g.stackguard0` in R14, pointer-slot
+  zeroing, per-safepoint stack maps), and `amd64/reg.go`'s `regProfile`. Under
+  the Go profile, R14 is g, X15 is zero, scratch is R12/R13 and X13/X14, and
+  nothing survives a call in a register.
+- Track C: `amd64/gomodule.go` and `amd64/goframe.go` feed
+  `internal/gometa`. No private PCDATA slot is needed. amd64's existing frame
+  (return address, saved RBP, locals, outgoing area at RSP) is exactly the
+  shape the x86 runtime unwinds: `varp` = RBP, `argp` = RBP+16.
+- F1: `cmd/goc` and `internal/prebuilt` dispatch on target; the prebuilt
+  runtime pack builds for amd64.
+- The GC-root analysis moved from `arm64/regalloc.go` to
+  `analysis/goroots.go`, shared by both backends. arm64 output is
+  byte-identical.
+
+**Defects found by running real programs, all fixed.** The first two were
+invisible on arm64 because AAPCS64 and ABIInternal assign the first arguments
+to the same registers there.
+
+1. goc stamps every direct call as platform ABI. The backend re-stamps each
+   call against its callee's final convention (`applyAssemblyCallConventions`).
+2. Functions reached through a bare funcval -- type equal/hash functions,
+   capture-free literals -- were System V but called as closures.
+   `goc.markFunctionValueTargets` gives them ABIInternal on non-arm64 targets.
+3. Go data needs Go's linker alignment: power of two up to 32 by size.
+   `aeshashbody` reads `aeskeysched` with a legacy-SSE `PXOR`, which faults
+   on misaligned data.
+4. A stack-allocation address spilled across a call went stale when the stack
+   was copied. Managed frames now always rematerialise allocation addresses
+   from RBP.
+5. A caller holding a value as an aggregate and a callee taking it as a
+   parameter group disagreed under System V. Both now treat a group as a
+   by-value aggregate of its type.
+6. cg12 returns results after the first through caller-supplied pointers,
+   not Go's result registers. The translator's ABIInternal entries, and its
+   adapters for multi-result `<ABIInternal>` bodies such as `Syscall6`,
+   follow that contract.
+
+**Verified.** These suites pass:
+`CG12_REQUIRE_TOOLS=1 go test ./amd64/... ./analysis/ ./arm64/ ./plan9asm/... ./internal/gometa/ ./ir/`.
+On this x86-64 orb, `./arm64/` runs under qemu binfmt; `.agents/setup`
+installs it. 50 C test programs compile to byte-identical amd64 objects
+before and after these changes, and three Go programs to byte-identical
+arm64 binaries.
+
+**Not yet done.**
+
+- The runtime capability matrix (`TestARM64RuntimeCapabilityStatus`) is
+  opened to amd64 but has not completed a run.
+- `goc`'s own test suite has not been run on amd64. Many cmd/goc tests are
+  still gated on arm64, and `goc/corpus_test.go` and `goc/loopalias_test.go`
+  have only been generalised as far as `goc/native_runtime_test.go`.
+- The nosplit frame budget (`checkNoSplitBudget`) is arm64-only.
+- Pushes and pops inside assembly bodies (`asyncPreempt`) are not described
+  in PCSP.
+- The fallback `abort` calls reach glibc after `settls` has repointed FS.
+- Runtime coverage instrumentation is still arm64-only.
+- An ABI0 shim for a Go function with more than one result is refused. None
+  is needed today.
+- ABIInternal float arguments stop at X12. Signatures needing more are
+  refused (§3.3(b)).
+
 `arm64` compiles and runs real Go programs; `amd64` does not. This plan closes
 that gap. It is written for concurrent execution: every phase states file-level
 ownership so independent agents cannot collide, and the serial prerequisites are

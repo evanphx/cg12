@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Orb setup for cg12: the Go toolchain the module pins, the assemblers/linkers
+# the backend tests drive, and an aarch64 cross environment so the arm64 suites
+# (which execute what they build) run on an x86-64 orb under qemu.
+set -euo pipefail
+
+GO_VERSION=1.26.1
+if ! command -v go >/dev/null 2>&1 || ! go version | grep -q "go${GO_VERSION} "; then
+	curl -sSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+	sudo rm -rf /usr/local/go
+	sudo tar -C /usr/local -xzf /tmp/go.tgz
+	sudo ln -sf /usr/local/go/bin/go /usr/local/bin/go
+	sudo ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+fi
+
+sudo apt-get update -qq
+sudo apt-get install -y -qq llvm lld clang gcc-aarch64-linux-gnu qemu-user-static >/dev/null
+
+# Run aarch64 binaries transparently: register the qemu binfmt handler and make
+# the cross C library visible where the aarch64 loader looks for it.
+if [ -w /proc/sys/fs/binfmt_misc/register ] || sudo -n true 2>/dev/null; then
+	if [ ! -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ] && [ -f /usr/lib/binfmt.d/qemu-aarch64.conf ]; then
+		sudo sh -c 'cat /usr/lib/binfmt.d/qemu-aarch64.conf > /proc/sys/fs/binfmt_misc/register' || true
+	fi
+	sudo ln -sf /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1 /lib/ld-linux-aarch64.so.1
+	sudo ln -sfn /usr/aarch64-linux-gnu/lib /lib/aarch64-linux-gnu
+fi
