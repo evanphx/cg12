@@ -15,6 +15,13 @@ import (
 type ParseOptions struct {
 	Defines  map[string]string
 	Includes map[string]string
+
+	// Arch selects the operand grammar. The empty string keeps the original
+	// AArch64-oriented grammar, except that a GOARCH_amd64 entry in Defines
+	// selects "amd64". With "amd64", every instruction operand must parse as an
+	// x86 register, immediate, address, memory reference, or branch label;
+	// anything else is an error rather than a silently untyped operand.
+	Arch string
 }
 
 // Parse reads one Plan 9 assembly source file into a syntax tree.
@@ -51,7 +58,18 @@ func ParseWithOptions(reader io.Reader, options ParseOptions) (*File, error) {
 		fmt.Fprintf(&preprocessed, "#define %s %s\n", name, value)
 	}
 	preprocessed.WriteString(expanded)
-	return parsePreprocessed(strings.NewReader(preprocessed.String()))
+	return parsePreprocessed(strings.NewReader(preprocessed.String()), parseArch(options))
+}
+
+// parseArch returns the operand grammar selected by options.
+func parseArch(options ParseOptions) string {
+	if options.Arch != "" {
+		return options.Arch
+	}
+	if _, ok := options.Defines["GOARCH_amd64"]; ok {
+		return "amd64"
+	}
+	return ""
 }
 
 func expandAssemblyIncludes(source string, includes map[string]string, loading map[string]bool) (string, error) {
@@ -103,7 +121,7 @@ func parseIncludeName(source string) (string, bool) {
 	return source[1 : end+1], true
 }
 
-func parsePreprocessed(reader io.Reader) (*File, error) {
+func parsePreprocessed(reader io.Reader, arch string) (*File, error) {
 	file := &File{}
 	scanner := bufio.NewScanner(reader)
 	macros := make(map[string]sourceMacro)
@@ -168,7 +186,7 @@ func parsePreprocessed(reader io.Reader) (*File, error) {
 			return nil, fmt.Errorf("plan9asm:%d: %w while expanding %q", logicalLine, err, strings.TrimSpace(source))
 		}
 		for _, sourceStatement := range splitStatements(expanded) {
-			statement, err := parseStatement(sourceStatement, logicalLine)
+			statement, err := parseStatement(sourceStatement, logicalLine, arch)
 			if err != nil {
 				return nil, err
 			}
@@ -547,7 +565,7 @@ func isIdentifierByte(value byte, first bool) bool {
 	return !first && value >= '0' && value <= '9'
 }
 
-func parseStatement(source string, line int) (Statement, error) {
+func parseStatement(source string, line int, arch string) (Statement, error) {
 	source = strings.TrimSpace(source)
 	if source == "" {
 		return nil, nil
@@ -581,6 +599,20 @@ func parseStatement(source string, line int) (Statement, error) {
 	if dot := strings.LastIndexByte(opcode, '.'); dot >= 0 {
 		suffix = opcode[dot+1:]
 		opcode = opcode[:dot]
+	}
+	if arch == "amd64" {
+		// x86 suffixes compose (VADDPD.RU_SAE.Z), so they begin at the first
+		// dot rather than the last.
+		opcode = upperName
+		suffix = ""
+		if dot := strings.IndexByte(opcode, '.'); dot >= 0 {
+			suffix = opcode[dot+1:]
+			opcode = opcode[:dot]
+		}
+		operands, err = parseAMD64Operands(rest)
+		if err != nil {
+			return nil, fmt.Errorf("plan9asm:%d: %s: %w", line, upperName, err)
+		}
 	}
 	return &Instruction{
 		statementPosition: position,

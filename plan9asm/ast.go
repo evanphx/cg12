@@ -86,6 +86,14 @@ const (
 	OperandVectorRegister
 	OperandVectorList
 	OperandExtendedRegister
+
+	// OperandAddress is an amd64 address constant such as $sym+8(SB),
+	// $name+0(FP), or $16(SP). Immediate keeps the text after the dollar sign;
+	// the memory fields describe the address.
+	OperandAddress
+	// OperandLabel is an amd64 branch target that names a label in the
+	// current function.
+	OperandLabel
 )
 
 // VectorRegister is a SIMD register with an optional lane arrangement and
@@ -98,6 +106,11 @@ type VectorRegister struct {
 
 // Operand is a parsed assembly operand. Text always retains the exact trimmed
 // spelling. The remaining fields describe the selected Kind.
+//
+// For amd64 memory operands, Base is a register or one of the pseudo-registers
+// SB, FP, SP, PC, and TLS (empty for an absolute address), Index and Scale
+// describe the optional (Index*Scale) suffix, and Offset keeps the
+// displacement expression (for SB it is the whole "sym+off" text).
 type Operand struct {
 	Kind        OperandKind
 	Text        string
@@ -106,6 +119,7 @@ type Operand struct {
 	Base        string
 	Offset      string
 	Index       string
+	Scale       string
 	Registers   []string
 	Shift       string
 	ShiftAmount string
