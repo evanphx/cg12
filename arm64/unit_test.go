@@ -3,6 +3,7 @@ package arm64
 import (
 	"encoding/binary"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -2235,4 +2236,32 @@ func TestGoStackMapsKeepAllocationWrittenOnOnlyOnePath(t *testing.T) {
 	require.Len(t, indexPoints, 1)
 	assert.Contains(t, pointerMaps[indexPoints[0].Index], localWord,
 		"one path writes the slot, so the join must still describe it")
+}
+
+// TestAddSubImm checks which add and sub constants fold into an immediate.
+// MinInt64 negates to itself, so it must not fold: it once encoded as #0,
+// which turned x + MinInt64 into x - 0.
+func TestAddSubImm(t *testing.T) {
+	cases := []struct {
+		v     int64
+		imm   uint32
+		lsl12 bool
+		flip  bool
+		ok    bool
+	}{
+		{v: 7, imm: 7, ok: true},
+		{v: -7, imm: 7, flip: true, ok: true},
+		{v: 0xfff, imm: 0xfff, ok: true},
+		{v: 0x5000, imm: 5, lsl12: true, ok: true},
+		{v: -0x5000, imm: 5, lsl12: true, flip: true, ok: true},
+		{v: 0x1001},
+		{v: math.MinInt64},
+		{v: math.MaxInt64},
+	}
+	for _, c := range cases {
+		imm, lsl12, flip, ok := addSubImm(c.v)
+		if imm != c.imm || lsl12 != c.lsl12 || flip != c.flip || ok != c.ok {
+			t.Errorf("addSubImm(%d) = %d, %v, %v, %v; want %d, %v, %v, %v", c.v, imm, lsl12, flip, ok, c.imm, c.lsl12, c.flip, c.ok)
+		}
+	}
 }

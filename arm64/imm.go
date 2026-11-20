@@ -42,6 +42,10 @@ func addSubImm(v int64) (imm uint32, lsl12, flip, ok bool) {
 		flip = true
 		n = -n
 	}
+	if n < 0 {
+		// MinInt64 is its own negation, so it has no immediate form.
+		return 0, false, false, false
+	}
 	switch {
 	case n <= 0xfff:
 		return uint32(n), false, flip, true
