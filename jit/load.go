@@ -7,8 +7,17 @@ import (
 	"fmt"
 	"syscall"
 
+	"github.com/evanphx/cg12/ir"
 	"github.com/evanphx/cg12/obj"
 )
+
+// onGoThread marks m's functions as running on a goroutine's thread,
+// where Go's signal handlers can interrupt them.
+func onGoThread(m *ir.Module) {
+	for _, f := range m.Funcs {
+		f.GoThread = true
+	}
+}
 
 // Code is an object laid out in executable memory: its text and read-only
 // data share one mapping that is written, then made read+execute, so no

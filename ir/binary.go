@@ -23,7 +23,7 @@ import (
 // references. Value references (ir.Ref) already index Temps/Consts by ID.
 const (
 	binMagic   = "cg12"
-	binVersion = 21
+	binVersion = 22
 	// binDigestSize is the width of the content digest that follows the version
 	// byte. See binHeaderSize.
 	binDigestSize = sha256.Size
@@ -567,6 +567,7 @@ func (e *enc) encFunc(f *Func) {
 	e.boolean(f.ManagedFrame)
 	e.boolean(f.NoSplit)
 	e.boolean(f.SystemStack)
+	e.boolean(f.GoThread)
 	e.boolean(f.HasClosureContext)
 	e.boolean(f.ForceInline)
 	e.boolean(f.CostInline)
@@ -1007,6 +1008,7 @@ func (d *dec) decFunc(m *Module) *Func {
 	f.ManagedFrame = d.boolean()
 	f.NoSplit = d.boolean()
 	f.SystemStack = d.boolean()
+	f.GoThread = d.boolean()
 	f.HasClosureContext = d.boolean()
 	f.ForceInline = d.boolean()
 	f.CostInline = d.boolean()

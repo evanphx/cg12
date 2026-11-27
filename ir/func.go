@@ -227,6 +227,13 @@ type Func struct {
 	// on g0 or gsignal: their stack check uses g.stackguard1 and reports an
 	// attempted call from an ordinary goroutine through runtime.morestackc.
 	SystemStack bool
+	// GoThread marks platform-ABI code that runs on a goroutine's thread,
+	// such as the code package jit loads and calls. Go's signal handlers can
+	// interrupt it at any instruction and take g from the register the Go
+	// runtime keeps it in (X28 on arm64), so the backend leaves the registers
+	// the runtime reserves alone, though the platform ABI would let it use
+	// them.
+	GoThread bool
 	// HasClosureContext reports that ABIInternal supplies this function's
 	// closure environment in the architecture's dedicated closure register.
 	// Exactly one temporary must then be marked Temp.ClosureContext -- the one

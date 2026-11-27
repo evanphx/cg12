@@ -2,6 +2,7 @@ package arm64
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/evanphx/cg12/ir"
@@ -305,4 +306,46 @@ func TestCalleeConventionsForCall(t *testing.T) {
 	var empty calleeConventions
 	assert.Equal(t, ir.CallConvPlatform, empty.forCall(caller, &entry.Instrs[1]))
 	assert.Equal(t, ir.CallConvGoInternal, empty.forCall(caller, &entry.Instrs[3]))
+}
+
+// pressure builds a platform-ABI function that keeps more values live
+// across a loop than there are registers, so the allocator reaches for
+// every register it may use.
+func pressure(goThread bool) *ir.Module {
+	const live = 30
+	m := ir.NewModule()
+	f := m.NewFunc("pressure", ir.ClsL).Export()
+	f.GoThread = goThread
+	n := f.Param("n", ir.ClsL)
+	start, loop, body, exit := f.Entry(), f.NewBlock("loop"), f.NewBlock("body"), f.NewBlock("exit")
+	start.Goto(loop)
+	i := loop.Phi(ir.ClsL, ir.PhiEdge{From: start, Val: f.Long(0)})
+	vs := make([]ir.Ref, live)
+	for k := range vs {
+		vs[k] = loop.Phi(ir.ClsL, ir.PhiEdge{From: start, Val: f.Long(int64(k + 1))})
+	}
+	loop.Jnz(loop.Cmp(ir.CmpSge, ir.ClsL, i, n), exit, body)
+	for k, v := range vs {
+		loop.Phis[k+1].Add(body, body.Add(ir.ClsL, body.Mul(ir.ClsL, v, f.Long(int64(k+3))), i))
+	}
+	loop.Phis[0].Add(body, body.Add(ir.ClsL, i, f.Long(1)))
+	body.Goto(loop)
+	sum := vs[0]
+	for _, v := range vs[1:] {
+		sum = exit.Add(ir.ClsL, sum, v)
+	}
+	exit.Ret(sum)
+	return m
+}
+
+// A platform-ABI function may use X26 and X28 as ordinary callee-saved
+// registers, but one that runs on a goroutine's thread may not: Go's signal
+// handler takes g from X28 wherever the signal lands.
+func TestGoThreadKeepsRuntimeRegisters(t *testing.T) {
+	for _, goThread := range []bool{false, true} {
+		assembly := disasmModule(t, pressure(goThread))
+		for _, r := range []string{"x26", "x28"} {
+			assert.Equal(t, !goThread, strings.Contains(assembly, r), "GoThread %v, %s used: %v", goThread, r, !goThread)
+		}
+	}
 }

@@ -12,7 +12,10 @@ import (
 const machine = obj.EM_X86_64
 
 // Compile compiles a cg12 module to an object this package can load.
-func Compile(m *ir.Module) (*obj.Object, error) { return amd64.CompileToObject(m) }
+func Compile(m *ir.Module) (*obj.Object, error) {
+	onGoThread(m)
+	return amd64.CompileToObject(m)
+}
 
 // x86-64 keeps its instruction cache coherent with stores.
 func flushICache(addr, n uintptr) {}

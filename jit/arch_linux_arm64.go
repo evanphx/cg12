@@ -12,7 +12,10 @@ import (
 const machine = obj.EM_AARCH64
 
 // Compile compiles a cg12 module to an object this package can load.
-func Compile(m *ir.Module) (*obj.Object, error) { return arm64.CompileToObject(m) }
+func Compile(m *ir.Module) (*obj.Object, error) {
+	onGoThread(m)
+	return arm64.CompileToObject(m)
+}
 
 // flushICache makes instructions written to [addr, addr+n) visible to
 // instruction fetch: arm64 doesn't keep its caches coherent for code.

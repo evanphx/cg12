@@ -5,10 +5,14 @@ package jit
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"math"
 	"os"
+	"runtime"
+	"runtime/pprof"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/evanphx/cg12/ir"
 )
@@ -83,4 +87,75 @@ func mapping(t *testing.T, addr uintptr) string {
 	}
 	t.Fatalf("no mapping holds %#x", addr)
 	return ""
+}
+
+// TestSignalsDuringCall runs compiled code that needs every register it
+// may use while the CPU profiler and the collector signal its thread. A
+// signal can land at any instruction, and on arm64 the runtime's handler
+// takes g from X28, so code that kept a value there would crash the
+// process.
+func TestSignalsDuringCall(t *testing.T) {
+	const live = 30
+	m := ir.NewModule()
+	f := m.NewFunc("pressure", ir.ClsL).Export()
+	n := f.Param("n", ir.ClsL)
+	start, loop, body, exit := f.Entry(), f.NewBlock("loop"), f.NewBlock("body"), f.NewBlock("exit")
+	start.Goto(loop)
+	i := loop.Phi(ir.ClsL, ir.PhiEdge{From: start, Val: f.Long(0)})
+	vs := make([]ir.Ref, live)
+	for k := range vs {
+		vs[k] = loop.Phi(ir.ClsL, ir.PhiEdge{From: start, Val: f.Long(int64(k + 1))})
+	}
+	loop.Jnz(loop.Cmp(ir.CmpSge, ir.ClsL, i, n), exit, body)
+	for k, v := range vs {
+		loop.Phis[k+1].Add(body, body.Add(ir.ClsL, body.Mul(ir.ClsL, v, f.Long(int64(k+3))), i))
+	}
+	loop.Phis[0].Add(body, body.Add(ir.ClsL, i, f.Long(1)))
+	body.Goto(loop)
+	sum := vs[0]
+	for _, v := range vs[1:] {
+		sum = exit.Add(ir.ClsL, sum, v)
+	}
+	exit.Ret(sum)
+
+	o, err := Compile(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	code, err := Load(o, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer code.Free()
+
+	const iterations = 1_000_000
+	want := uint64(0)
+	for k := range live {
+		v := uint64(k + 1)
+		for i := range uint64(iterations) {
+			v = v*uint64(k+3) + i
+		}
+		want += v
+	}
+
+	if err := pprof.StartCPUProfile(io.Discard); err == nil {
+		defer pprof.StopCPUProfile()
+	}
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				runtime.GC()
+			}
+		}
+	}()
+	for end := time.Now().Add(2 * time.Second); time.Now().Before(end); {
+		if got := Call(code.Addr("pressure"), iterations, 0, 0); got != want {
+			t.Fatalf("pressure(%d) = %d, want %d", iterations, got, want)
+		}
+	}
 }

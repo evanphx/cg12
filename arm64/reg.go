@@ -225,10 +225,12 @@ var (
 	intAllocOrderPlatformCalleeFirst = calleeFirstOrder(intAllocOrderPlatform)
 )
 
-// reservesRuntimeRegs reports whether f's convention reserves X26/X28 for the Go
-// runtime; only such functions use the narrower base allocation order.
+// reservesRuntimeRegs reports whether f reserves X26/X28 for the Go runtime;
+// only such functions use the narrower base allocation order. A function that
+// runs on a goroutine's thread does even under the platform ABI: a signal there
+// lands in the runtime's handler, which takes g from X28.
 func reservesRuntimeRegs(f *ir.Func) bool {
-	return f.UsesGoInternalCallConvention() || f.UsesManagedFrame()
+	return f.UsesGoInternalCallConvention() || f.UsesManagedFrame() || f.GoThread
 }
 
 // intAllocOrderFor / intAllocOrderCalleeFirstFor return f's integer allocation

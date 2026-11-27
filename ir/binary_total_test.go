@@ -372,6 +372,7 @@ func TestFuncRoundTripsEveryField(t *testing.T) {
 	f.ManagedFrame = true
 	f.NoSplit = true
 	f.SystemStack = true
+	f.GoThread = true
 	f.HasClosureContext = true
 	f.ForceInline = true
 	f.CostInline = true
@@ -415,6 +416,7 @@ func TestFuncRoundTripsEveryField(t *testing.T) {
 	require.Equal(t, f.ManagedFrame, got.ManagedFrame)
 	require.Equal(t, f.NoSplit, got.NoSplit)
 	require.Equal(t, f.SystemStack, got.SystemStack)
+	require.Equal(t, f.GoThread, got.GoThread)
 	require.Equal(t, f.HasClosureContext, got.HasClosureContext)
 	require.Equal(t, f.ForceInline, got.ForceInline)
 	require.Equal(t, f.CostInline, got.CostInline)
